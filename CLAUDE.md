@@ -115,3 +115,8 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - `/unfreeze` — 解除 /freeze 的目录限制
 - `/gstack-upgrade` — 升级 gstack 到最新版
 - `/learn` — 管理项目的"学习记录"
+
+## Design System
+
+做任何视觉 / UI 决策前,先读 `DESIGN.md`。字体、配色、间距、布局、动效、美学方向都在那里定义。
+未经用户明确同意不得偏离。QA 时标记任何不符合 `DESIGN.md` 的代码。

@@ -1,0 +1,7 @@
+# gstack 本地工具状态
+.gstack/
+
+# 密钥 / 环境变量(Doubao API key 等)
+.env
+.env.*
+!.env.example
