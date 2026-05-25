@@ -31,4 +31,7 @@ def db_path() -> str:
 def get_doubao_client():
     from openai import OpenAI
 
-    return OpenAI(api_key=ark_api_key(), base_url=ark_base_url())
+    key = ark_api_key()
+    if not key:
+        raise ValueError("ARK_API_KEY is not set; put it in .env")
+    return OpenAI(api_key=key, base_url=ark_base_url())
