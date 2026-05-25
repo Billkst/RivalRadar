@@ -92,7 +92,9 @@ class EntailmentVerdict(BaseModel):
 def check_entailment(
     analysis: CompetitorAnalysis, evidence: list[Evidence], *, client, model
 ) -> list[QCIssue]:
-    """LLM 蕴含(尽力):被引证据是否真支撑结论;不支撑 → hallucination。每条结论一次调用。"""
+    """LLM 蕴含判定:被引证据是否真支撑结论;不支撑 → hallucination。每条结论一次调用。
+    错误契约:本函数不吞错——structured_call 失败会上抛;"尽力/失败降级"由 Lane D 编排层
+    捕获后降级为仅确定性闸的 verdict(spec §5 尽力 + §8 trace)。"""
     idx = {e.id: e for e in evidence}
     issues: list[QCIssue] = []
     for comp, dim, text, refs in _iter_conclusions(analysis):
@@ -126,7 +128,8 @@ def decide_verdict(issues: list[QCIssue]) -> QCVerdict:
 
 
 def check(analysis: CompetitorAnalysis, evidence: list[Evidence], *, client, model) -> QCResult:
-    """质检入口:确定性硬闸(溯源+本体+覆盖)+ LLM 蕴含 → QCResult。"""
+    """质检入口:确定性硬闸(溯源+本体+覆盖,始终运行)+ LLM 蕴含(可能上抛)→ QCResult。
+    Lane D 编排层应捕获蕴含异常,降级为仅确定性闸的 verdict 并记 trace(spec §5/§8)。"""
     issues: list[QCIssue] = []
     issues += check_traceability(analysis, evidence)
     issues += check_ontology(analysis, evidence)
