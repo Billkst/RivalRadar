@@ -22,6 +22,12 @@ def test_source_priority_official_beats_review_beats_other():
     assert official < review < other  # 数字越小优先级越高
 
 
+def test_source_priority_matches_host_not_substring():
+    # 子域算官方;但 host 不等于官方域时,即便 path 含官方域名也不误判
+    assert source_priority("https://www.notion.so/pricing", ["notion.so"]) == 0
+    assert source_priority("https://evil.com/notion.so-phishing", ["notion.so"]) == 2
+
+
 class _StubProvider:
     name = "stub"
 

@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from urllib.parse import urlparse
 
 from rivalradar.collect.pipeline import collect
 from rivalradar.schema.models import Evidence
@@ -30,12 +31,17 @@ def clean_text(text: str) -> str:
     return "\n".join(lines).strip()
 
 
+def _host_matches(url: str, domains) -> bool:
+    """按 host 精确或子域匹配(与 policy.is_denylisted 同口径),避免 URL 子串误判。"""
+    host = urlparse(url).netloc.lower()
+    return any(host == d or host.endswith("." + d) for d in domains)
+
+
 def source_priority(url: str, official_domains: list[str]) -> int:
     """来源优先级(数字越小越优先):官方=0 > 评价平台=1 > 其他=2(spec §7 / 终审遗留②)。"""
-    host = url.lower()
-    if any(d in host for d in official_domains):
+    if _host_matches(url, official_domains):
         return 0
-    if any(p in host for p in _REVIEW_PLATFORMS):
+    if _host_matches(url, _REVIEW_PLATFORMS):
         return 1
     return 2
 
