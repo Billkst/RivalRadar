@@ -60,7 +60,7 @@ def get_evidence(conn: sqlite3.Connection, evidence_id: str) -> Evidence | None:
 
 
 def list_evidence(conn: sqlite3.Connection, run_id: str) -> list[Evidence]:
-    rows = conn.execute("SELECT * FROM evidence WHERE run_id=? ORDER BY id", (run_id,))
+    rows = conn.execute("SELECT * FROM evidence WHERE run_id=? ORDER BY rowid", (run_id,))
     return [
         Evidence(
             id=r["id"], competitor=r["competitor"], dimension=r["dimension"],
