@@ -84,3 +84,18 @@ spec §11.4 的"实时 DAG 把等待做成可看的协作"依旧成立(多 Agent
 
 **给 C-2b/Lane D 的提醒**:`PricingModel.model_type` 实测返回自由串(非受控枚举),如需口径统一由 QC/本体校验把关;
 单竞品 ~5 次调用串行累加(~十余秒),并行化留给 Lane D。
+
+## Spike E — 撰写 + 质检 真实 E2E ✅ GO(2026-05-25,Lane C-2b)
+
+运行:`.venv/bin/python spikes/spike_e_report_qc_real.py`(对 canned analysis 真打 Doubao 跑 `write_report` + `qc.check`)
+
+验证目标:混合撰写(确定性正文 + LLM 导语)与质检(确定性闸 + LLM 蕴含)在**真实 Doubao** 上成稿/判定正确。
+
+**实测输出**:
+- 报告:`# 竞品分析报告` + `## 摘要(AI 生成)` + 确定性正文(`定价(freemium) [e1]`、`优势:生态强 [e1]`、对比表、来源、`as of 2026-05-25`)。**LLM 导语只概括正文已有事实,未编造新数字/竞品** —— 混合忠实度成立。
+- 质检:verdict=`retry_collect`,7 issue = 5×`low_coverage`(canned 仅覆盖 pricing)+ LLM 蕴含抓出的 `hallucination`(canned 故意把"生态强"挂到只讲定价的证据 e1,蕴含判定识破张冠李戴)。
+
+**结论:GO**。撰写混合 + 质检确定性闸 + LLM 蕴含在真模型上协同正确;**§17.3"同源自审"质疑得到实证反驳**(确定性量化拦截 + 蕴含抓语义不符);`decide_verdict` 让 coverage 优先于 hallucination → `retry_collect`,反馈环输入端正确。
+判定 **GO**。
+
+**给 Lane D 的提醒**:`check_entailment` 每条结论一次调用(本 spike 3 条结论 + 撰写导语 1 次 ≈ 4 次真实调用);Lane D 真闭环要按"issues 只补缺口、证据累加不覆盖"重跑,并对蕴含失败做降级 + trace。
