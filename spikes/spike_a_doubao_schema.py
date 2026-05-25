@@ -2,9 +2,11 @@
 
 跑 N 次,统计成功解析率、平均耗时、平均 token。决策规则见 SPIKE_RESULTS.md。
 
-实测发现(2026-05-25):EP ep-20260514111325-xjmj7 既不支持 response_format=json_schema
-也不支持 json_object(均 400)。可行路径 = plain 模式 + 把 JSON Schema 写进 system prompt
-+ 去 markdown 围栏 + Pydantic 校验。本脚本测的就是这条真实路径。
+实测发现(2026-05-25,EP ep-20260514111325-xjmj7):
+- response_format=json_schema → 400 not supported
+- response_format=json_object → 400 not supported
+- **function-calling(tools)→ 可用且最优**(5/5,~4.6s,~1113 token)
+本脚本测的就是 tools 路径(schema 作为工具 parameters + 强制 tool_choice + Pydantic 校验)。
 """
 from __future__ import annotations
 
@@ -37,40 +39,36 @@ class FeatureList(BaseModel):
     items: list[FeatureItem]
 
 
-def _strip_fences(raw: str) -> str:
-    """去掉模型偶尔包裹的 ```json ... ``` 围栏。"""
-    s = raw.strip()
-    if s.startswith("```"):
-        s = s.split("\n", 1)[-1] if "\n" in s else s
-        if s.endswith("```"):
-            s = s[: -3]
-        if s.startswith("json"):
-            s = s[4:]
-    return s.strip()
-
-
 def run_once() -> tuple[bool, float, int]:
     client = config.get_doubao_client()
     schema = to_doubao_schema(FeatureList)
+    tools = [{
+        "type": "function",
+        "function": {
+            "name": "emit_feature_list",
+            "description": "emit extracted features",
+            "parameters": schema,
+        },
+    }]
     messages = [
-        {"role": "system", "content": (
-            "你是竞品功能抽取器。只输出一个 JSON 对象,严格符合下面的 JSON Schema,"
-            "不要任何额外文字或 markdown 代码块。用 parent_id 表达功能的父子层级,"
-            "顶层功能 parent_id 为 null。\nJSON Schema:\n"
-            + json.dumps(schema, ensure_ascii=False)
-        )},
-        {"role": "user", "content": f"从下面文本抽取功能项(category 用 core_workflows):\n{EVIDENCE}"},
+        {"role": "user", "content": f"抽取功能项(category 用 core_workflows,parent_id 表父子层级):\n{EVIDENCE}"},
     ]
     t0 = time.time()
-    resp = client.chat.completions.create(model=config.doubao_model(), messages=messages)
+    resp = client.chat.completions.create(
+        model=config.doubao_model(),
+        messages=messages,
+        tools=tools,
+        tool_choice={"type": "function", "function": {"name": "emit_feature_list"}},
+    )
     latency = time.time() - t0
     tokens = getattr(resp.usage, "total_tokens", 0) if resp.usage else 0
-    raw = resp.choices[0].message.content
+    tool_calls = resp.choices[0].message.tool_calls
     try:
-        parsed = FeatureList.model_validate(json.loads(_strip_fences(raw)))
+        raw = tool_calls[0].function.arguments if tool_calls else None
+        parsed = FeatureList.model_validate(json.loads(raw))
         ok = len(parsed.items) >= 1
     except (json.JSONDecodeError, ValidationError, TypeError) as e:
-        print(f"  parse failed: {e}\n  raw: {(raw or '')[:300]}")
+        print(f"  parse failed: {e}")
         ok = False
     return ok, latency, tokens
 
@@ -87,8 +85,7 @@ def main() -> None:
     print(f"parse success: {oks}/{N_RUNS}")
     print(f"avg latency:   {avg_latency:.2f}s")
     print(f"avg tokens:    {avg_tokens:.0f}")
-    print("approach: plain mode + schema-in-prompt + Pydantic validate "
-          "(model rejects json_schema & json_object)")
+    print("approach: function-calling (tools) — model rejects response_format json_schema & json_object")
     print("decision: GO if >=4/5 parse cleanly")
 
 

@@ -6,25 +6,26 @@
 
 运行:`.venv/bin/python spikes/spike_a_doubao_schema.py`
 
-**实测发现(关键)**:EP `ep-20260514111325-xjmj7`(Doubao-Seed-2.0-lite)
+**实测发现(关键)**:EP `ep-20260514111325-xjmj7`(Doubao-Seed-2.0-lite)对三种结构化方式逐一实测:
 - `response_format={"type":"json_schema"}` → **400 InvalidParameter: not supported**
 - `response_format={"type":"json_object"}` → **400 InvalidParameter: not supported**
-- **plain 模式(不带 response_format)+ schema 写进 prompt → 可用**
+- plain 模式 + schema 写进 prompt → 可用(5/5,但 ~20.1s、~1799 token)
+- **function-calling(tools):schema 作为工具 parameters + 强制 tool_choice → 最优 ✅**
 
-| 项 | 结果 |
-|---|---|
-| 解析成功率 | **5 / 5** |
-| 平均耗时 | 20.1 s/次 |
-| 平均 token | 1799/次(schema 进 prompt 撑大输出) |
-| 采用路径 | plain + schema 注入 system prompt + 去 markdown 围栏 + Pydantic 校验 + 带错重试 |
-| 判定 | **GO** |
+| 路径 | 解析成功率 | 平均耗时 | 平均 token |
+|---|---|---|---|
+| plain + schema 注入 prompt | 5/5 | 20.1 s | 1799 |
+| **tools / function-calling(采用)** | **5/5** | **4.6 s** | **1113** |
 
-**后果(已落地)**:`rivalradar/llm/structured.py` 已从 `response_format=json_schema` 改为上述路径;
-单测 6 项绿;并对真实 Doubao 做了 E2E 冒烟(返回合法 EvidenceRef)。
-**没有原生强制 → 可靠性全靠校验重试循环**(T6 已做扎实)。
+**结论:走 function-calling**——同样 5/5,但快 4 倍、省 1/3 token,且 schema 由工具参数原生约束。
+判定 **GO**。
 
-**给 Lane C 的提醒**:单次 LLM 调用 ~20s,维度 schema 要精简;并行采集必须限并发;
-spec §11.4 的"实时 DAG 把等待做成可看的协作"由此被实测数据支持(确实要等)。
+**后果(已落地)**:`rivalradar/llm/structured.py` 用 tools 路径(定义工具+强制 tool_choice+取
+tool_call 参数+Pydantic 校验+带错重试);单测 5 项绿;真实 Doubao E2E 冒烟通过。
+**模型可能不调用工具或参数不合 schema → 校验重试循环仍是兜底**(T6 已做扎实)。
+
+**给 Lane C 的提醒**:单次 LLM 调用 ~4.6s(tools);维度 schema 仍宜精简;并行采集限并发;
+spec §11.4 的"实时 DAG 把等待做成可看的协作"依旧成立(多 Agent×多竞品累加仍是数十秒级)。
 
 ## Spike B — 搜索/抽取 API 可达性+质量 ✅ GO
 
