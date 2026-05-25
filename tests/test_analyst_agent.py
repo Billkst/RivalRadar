@@ -4,8 +4,9 @@ from types import SimpleNamespace
 from rivalradar.agents.analyst import (
     evidence_for, FeatureExtraction, PersonaExtraction, ComparisonExtraction,
     extract_features, extract_pricing, build_evidence_block,
+    analyze_competitor, build_comparison, analyze,
 )
-from rivalradar.schema.models import Evidence, FeatureItem, PricingModel
+from rivalradar.schema.models import Evidence, FeatureItem, PricingModel, SWOT, CompetitorAnalysis, CompetitorProfile
 
 
 def _ev(eid, competitor, dimension):
@@ -72,3 +73,41 @@ def test_extract_pricing_returns_pricing_model():
     client = _FakeClient([payload])
     pricing = extract_pricing([_ev("e1", "Notion", "pricing")], "Notion", client=client, model="m")
     assert isinstance(pricing, PricingModel) and pricing.model_type == "freemium"
+
+
+def _profile_payloads():
+    # 顺序:features, pricing, personas, swot
+    return [
+        json.dumps({"items": [{"id": "f1", "name": "db", "description": "", "category": "core_workflows", "evidence_refs": []}]}),
+        json.dumps({"model_type": "freemium", "tiers": [], "evidence_refs": []}),
+        json.dumps({"personas": []}),
+        json.dumps({"strengths": [], "weaknesses": [], "opportunities": [], "threats": []}),
+    ]
+
+
+def test_analyze_competitor_assembles_profile():
+    client = _FakeClient(_profile_payloads())
+    prof = analyze_competitor([_ev("e1", "Notion", "core_workflows")], "Notion", client=client, model="m")
+    assert isinstance(prof, CompetitorProfile)
+    assert prof.name == "Notion" and prof.features[0].name == "db"
+    assert prof.pricing.model_type == "freemium"
+
+
+def test_build_comparison_returns_rows():
+    payload = json.dumps({"rows": [{"dimension": "pricing", "cells": [
+        {"competitor": "Notion", "value_type": "number", "value": "0", "evidence_refs": []}]}]})
+    client = _FakeClient([payload])
+    rows = build_comparison([CompetitorProfile(name="Notion",
+                             pricing=PricingModel(model_type="freemium"), swot=SWOT())],
+                            [_ev("e1", "Notion", "pricing")], client=client, model="m")
+    assert rows[0].dimension == "pricing"
+
+
+def test_analyze_end_to_end_with_fake_client():
+    # 1 竞品:4 次抽取 + 1 次对比 = 5 次调用
+    payloads = _profile_payloads() + [json.dumps({"rows": []})]
+    client = _FakeClient(payloads)
+    out = analyze([_ev("e1", "Notion", "core_workflows")], ["Notion"], client=client, model="m")
+    assert isinstance(out, CompetitorAnalysis)
+    assert out.competitors[0].name == "Notion"
+    assert client.chat.completions.calls == 5

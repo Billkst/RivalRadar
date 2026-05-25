@@ -4,7 +4,8 @@ from pydantic import BaseModel, Field
 
 from rivalradar.llm.structured import structured_call
 from rivalradar.schema.models import (
-    ComparisonRow, Evidence, FeatureItem, PricingModel, SWOT, UserPersona,
+    ComparisonRow, CompetitorAnalysis, CompetitorProfile, CONTROLLED_DIMENSIONS,
+    Evidence, FeatureItem, PricingModel, SWOT, UserPersona,
 )
 
 
@@ -78,3 +79,34 @@ def extract_swot(evidence: list[Evidence], competitor: str, *, client, model) ->
     msgs = [{"role": "user", "content":
              f"{_REFS_RULE}\n\n竞品:{competitor}。基于证据给出 SWOT(每点挂 evidence_refs)。\n\n证据:\n{block}"}]
     return structured_call(SWOT, msgs, client=client, model=model)
+
+
+def analyze_competitor(evidence: list[Evidence], competitor: str, *, client, model) -> CompetitorProfile:
+    """对单个竞品做四项抽取并拼成 CompetitorProfile。"""
+    ev = evidence_for(evidence, competitor)
+    return CompetitorProfile(
+        name=competitor,
+        features=extract_features(evidence_for(ev, competitor, dimension="core_workflows") or ev, competitor, client=client, model=model),
+        pricing=extract_pricing(evidence_for(ev, competitor, dimension="pricing") or ev, competitor, client=client, model=model),
+        personas=extract_personas(evidence_for(ev, competitor, dimension="review_sentiment") or ev, competitor, client=client, model=model),
+        swot=extract_swot(ev, competitor, client=client, model=model),
+    )
+
+
+def build_comparison(profiles: list[CompetitorProfile], evidence: list[Evidence], *, client, model) -> list[ComparisonRow]:
+    """收尾产出跨竞品对比(受控本体 + 类型化值 + evidence_refs,spec D5 / §6)。"""
+    names = ", ".join(p.name for p in profiles)
+    dims = ", ".join(CONTROLLED_DIMENSIONS)
+    block = build_evidence_block(evidence)
+    msgs = [{"role": "user", "content":
+             f"{_REFS_RULE}\n\n对竞品 [{names}] 在这些维度做横向对比:{dims}。"
+             f"每个 cell 标 value_type(bool/enum/number/quote_text)与 value,并挂 evidence_refs。"
+             f"\n\n证据:\n{block}"}]
+    return structured_call(ComparisonExtraction, msgs, client=client, model=model).rows
+
+
+def analyze(evidence: list[Evidence], competitors: list[str], *, client, model) -> CompetitorAnalysis:
+    """分析 Agent 入口:证据 → 结构化分析(逐竞品 profile + 跨竞品对比)。"""
+    profiles = [analyze_competitor(evidence, c, client=client, model=model) for c in competitors]
+    comparison = build_comparison(profiles, evidence, client=client, model=model)
+    return CompetitorAnalysis(competitors=profiles, comparison=comparison)
