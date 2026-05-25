@@ -99,3 +99,18 @@ spec §11.4 的"实时 DAG 把等待做成可看的协作"依旧成立(多 Agent
 判定 **GO**。
 
 **给 Lane D 的提醒**:`check_entailment` 每条结论一次调用(本 spike 3 条结论 + 撰写导语 1 次 ≈ 4 次真实调用);Lane D 真闭环要按"issues 只补缺口、证据累加不覆盖"重跑,并对蕴含失败做降级 + trace。
+
+## Spike F — Lane D 整图真打 ✅ GO(2026-05-26,Lane D)
+
+运行:`.venv/bin/python spikes/spike_f_graph_real.py`(FakeProvider 喂源 + 真实 Doubao 驱动 analyze/write/qc)
+
+验证目标:LangGraph 整图(采集累加→分析→撰写→质检→路由→终态)在**真实 Doubao** 上端到端跑通,
+落 evidence/analysis/report/trace,产出合法 verdict。
+
+**实测输出**(填实际值):
+- trace 节点序列:`collect, analyze, write, qc, analyze, write, qc, analyze, write, qc, finalize`(3 轮 retry 后 finalize)
+- verdict=`retry_analyze`;evidence=12 条;status=`degraded`
+- 报告:`> ⚠️ **未达质检标准** ...` + `# 竞品分析报告` + AI 导语 + 确定性正文(多维度分析含 SWOT,as of 2026-05-26)
+
+**结论:GO**。Lane D 编排在真模型上成立;真闭环回归(§13 ★★★)由 `tests/test_graph_loop.py` 机器可验证
+(改善→pass、耗尽→insufficient_evidence,retry_count 封顶)。
