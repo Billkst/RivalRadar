@@ -200,3 +200,38 @@ def test_qc_node_degrades_on_non_structured_error(conn, monkeypatch):
     out = node(state, _CFG)
     assert out["degraded"] is True
     assert out["qc_result"]["verdict"] == "pass"   # 网络错降级 → 仅确定性闸 → pass,不崩整图
+
+
+from rivalradar.graph.nodes import make_finalize_node
+
+
+def test_finalize_pass_marks_done(conn):
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    node = make_finalize_node(conn=conn, max_retries=2)
+    state = {"analysis": _full_clean_analysis().model_dump(), "report": "# 竞品分析报告\n正文",
+             "qc_result": {"verdict": "pass", "issues": []}, "retry_count": 0}
+    out = node(state, _CFG)
+    assert out["status"] == "done"
+    assert out["report"] == "# 竞品分析报告\n正文"          # pass 不加 banner
+    assert repo.get_run(conn, "r1")["status"] == "done"
+
+
+def test_finalize_exhausted_collect_becomes_insufficient(conn):
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    node = make_finalize_node(conn=conn, max_retries=2)
+    state = {"analysis": _full_clean_analysis().model_dump(), "report": "# 竞品分析报告\n正文",
+             "qc_result": {"verdict": "retry_collect", "issues": []}, "retry_count": 2}
+    out = node(state, _CFG)
+    assert out["qc_result"]["verdict"] == "insufficient_evidence"   # 缺证据耗尽 → 一等结论
+    assert "未找到公开数据" in out["report"]                        # 诚实 banner
+    assert out["status"] == "insufficient_evidence"
+
+
+def test_finalize_exhausted_analyze_becomes_degraded(conn):
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    node = make_finalize_node(conn=conn, max_retries=2)
+    state = {"analysis": _full_clean_analysis().model_dump(), "report": "# 竞品分析报告\n正文",
+             "qc_result": {"verdict": "retry_analyze", "issues": []}, "retry_count": 2}
+    out = node(state, _CFG)
+    assert "未达质检标准" in out["report"]
+    assert out["status"] == "degraded"

@@ -9,7 +9,7 @@ from rivalradar.graph.router import extract_collect_targets
 from rivalradar.agents import qc
 from rivalradar.schema.models import CompetitorAnalysis, Evidence, QCResult
 from rivalradar.storage.repository import (
-    append_trace, insert_evidence, save_analysis, save_report,
+    append_trace, insert_evidence, save_analysis, save_report, update_run_status,
 )
 
 
@@ -113,3 +113,40 @@ def make_qc_node(*, conn, client, model):
                      latency_ms=int((time.monotonic() - t0) * 1000))
         return {"qc_result": result.model_dump(), "retry_count": new_rc, "degraded": degraded}
     return qc_node
+
+
+_BANNER_INSUFFICIENT = (
+    "> ⚠️ **数据不足**:部分维度在有界广搜后仍未找到公开数据。"
+    "以下为现有证据下的结论(诚实标注优于编造)。\n\n"
+)
+_BANNER_DEGRADED = (
+    "> ⚠️ **未达质检标准**:存在未消解的质检问题,以下结论请谨慎参考。\n\n"
+)
+
+
+def make_finalize_node(*, conn, max_retries):
+    """终态节点:pass → done;重试耗尽则按最后 verdict 赋 insufficient/降级 + 加 banner。
+
+    route 保证只有 pass 或耗尽才进来(spec §4/§8 + 必办项③)。insufficient_evidence
+    是一等质检结论(§8):缺证据耗尽 → 报告如实写「未找到公开数据」。
+    """
+    def finalize_node(state, config):
+        run_id = config["configurable"]["thread_id"]
+        result = dict(state["qc_result"])
+        verdict = result["verdict"]
+        report = state["report"]
+        if verdict == "pass":
+            status = "done"
+        elif verdict == "retry_collect":
+            result["verdict"] = "insufficient_evidence"
+            report = _BANNER_INSUFFICIENT + report
+            status = "insufficient_evidence"
+        else:  # retry_analyze 或其他耗尽
+            report = _BANNER_DEGRADED + report
+            status = "degraded"
+        save_report(conn, run_id, report)
+        update_run_status(conn, run_id, status)
+        append_trace(conn, run_id, "finalize",
+                     output_summary=f"status={status} verdict={result['verdict']}")
+        return {"report": report, "qc_result": result, "status": status}
+    return finalize_node

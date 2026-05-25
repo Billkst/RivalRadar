@@ -35,6 +35,11 @@ def get_run(conn: sqlite3.Connection, run_id: str) -> dict | None:
     }
 
 
+def update_run_status(conn: sqlite3.Connection, run_id: str, status: str) -> None:
+    conn.execute("UPDATE runs SET status=? WHERE run_id=?", (status, run_id))
+    conn.commit()
+
+
 # ---- evidence ----
 def insert_evidence(conn: sqlite3.Connection, run_id: str, ev: Evidence) -> None:
     conn.execute(

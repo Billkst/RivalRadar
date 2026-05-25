@@ -70,3 +70,9 @@ def test_run_roundtrip(conn):
     run = repo.get_run(conn, "r1")
     assert run["competitors"] == ["Notion", "飞书"]
     assert run["status"] == "running"
+
+
+def test_update_run_status(conn):
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    repo.update_run_status(conn, "r1", "done")
+    assert repo.get_run(conn, "r1")["status"] == "done"
