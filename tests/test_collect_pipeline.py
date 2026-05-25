@@ -64,3 +64,29 @@ def test_skips_empty_content_results():
     evs = collect(["Notion"], ["pricing"], provider=_EmptyProvider(),
                   languages=("en",), max_workers=2)
     assert evs == []  # 空内容证据被过滤
+
+
+from rivalradar.collect.pipeline import collect as _collect_for_broaden
+
+
+class _CaptureProvider:
+    name = "capture"
+
+    def __init__(self):
+        self.queries: list[str] = []
+
+    def search(self, query, *, max_results=5):
+        self.queries.append(query)
+        return []
+
+
+def test_collect_passes_broaden_into_queries():
+    p = _CaptureProvider()
+    _collect_for_broaden(["Notion"], ["pricing"], provider=p, languages=("en",), broaden=True)
+    assert any("comparison" in q for q in p.queries)
+
+
+def test_collect_default_no_broaden():
+    p = _CaptureProvider()
+    _collect_for_broaden(["Notion"], ["pricing"], provider=p, languages=("en",))
+    assert all("comparison" not in q for q in p.queries)

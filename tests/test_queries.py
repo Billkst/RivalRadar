@@ -27,3 +27,18 @@ def test_unknown_dimension_falls_back_to_generic_template():
 def test_all_controlled_dimensions_have_templates():
     qs = generate_queries("X", list(CONTROLLED_DIMENSIONS), languages=("en", "zh"))
     assert len(qs) == len(CONTROLLED_DIMENSIONS) * 2
+
+
+def test_generate_queries_broaden_appends_suffix():
+    qs = generate_queries("Notion", ["pricing"], languages=("en",), broaden=True)
+    assert qs[0].query_text == "Notion pricing plans cost review comparison alternative"
+
+
+def test_generate_queries_default_has_no_suffix():
+    qs = generate_queries("Notion", ["pricing"], languages=("en",))
+    assert qs[0].query_text == "Notion pricing plans cost"
+
+
+def test_generate_queries_broaden_zh_suffix():
+    qs = generate_queries("飞书", ["pricing"], languages=("zh",), broaden=True)
+    assert qs[0].query_text.endswith("评测 对比 替代方案")

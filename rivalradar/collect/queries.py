@@ -26,19 +26,29 @@ class Query(BaseModel):
     query_text: str
 
 
+# broaden 后缀(retry 时换查询词 = Corrective RAG 的 transform_query;spec §8 不死磕同一缺口)
+_BROADEN_SUFFIX: dict[str, str] = {
+    "en": "review comparison alternative",
+    "zh": "评测 对比 替代方案",
+}
+
+
 def generate_queries(
     competitor: str,
     dimensions: list[str],
     *,
     languages: tuple[str, ...] = ("en", "zh"),
+    broaden: bool = False,
 ) -> list[Query]:
     out: list[Query] = []
     for dim in dimensions:
         for lang in languages:
             template = _TEMPLATES.get((dim, lang)) or _generic(lang)
+            text = template.format(c=competitor, dim=dim)
+            if broaden:
+                text = f"{text} {_BROADEN_SUFFIX.get(lang, '')}".strip()
             out.append(Query(
-                competitor=competitor, dimension=dim, language=lang,
-                query_text=template.format(c=competitor, dim=dim),
+                competitor=competitor, dimension=dim, language=lang, query_text=text,
             ))
     return out
 

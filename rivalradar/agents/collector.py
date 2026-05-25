@@ -55,11 +55,12 @@ def collect_evidence(
     languages: tuple[str, ...] = ("en", "zh"),
     max_results: int = 5,
     max_workers: int = 4,
+    broaden: bool = False,
 ) -> list[Evidence]:
     """采集 Agent:C-1 collect() → 清洗正文 → 按来源优先级排序。"""
     official_domains = official_domains or {}
     raw = collect(competitors, dimensions, provider=provider, languages=languages,
-                  max_results=max_results, max_workers=max_workers)
+                  max_results=max_results, max_workers=max_workers, broaden=broaden)
     cleaned: list[Evidence] = []
     for ev in raw:
         body = clean_text(ev.content)

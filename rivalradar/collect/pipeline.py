@@ -22,13 +22,14 @@ def collect(
     languages: tuple[str, ...] = ("en", "zh"),
     max_results: int = 5,
     max_workers: int = 4,
+    broaden: bool = False,
 ) -> list[Evidence]:
     """并行采集:竞品×维度×语言 → 查询 → 搜索 → 证据,限并发 max_workers,按 id 去重(spec §7/D8)。
     空内容证据(content.strip() 为空)在去重环节一并过滤。
     """
     queries: list[Query] = []
     for c in competitors:
-        queries.extend(generate_queries(c, dimensions, languages=languages))
+        queries.extend(generate_queries(c, dimensions, languages=languages, broaden=broaden))
 
     by_id: dict[str, Evidence] = {}
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
