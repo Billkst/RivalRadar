@@ -111,3 +111,15 @@ def test_analyze_end_to_end_with_fake_client():
     assert isinstance(out, CompetitorAnalysis)
     assert out.competitors[0].name == "Notion"
     assert client.chat.completions.calls == 5
+
+
+def test_analyze_two_competitors_aggregates_and_compares():
+    # 2 竞品:每个 4 次抽取 + 1 次对比 = 9 次调用;对比 rows 真流入结果
+    comparison = json.dumps({"rows": [{"dimension": "pricing", "cells": [
+        {"competitor": "Notion", "value_type": "enum", "value": "freemium", "evidence_refs": []}]}]})
+    client = _FakeClient(_profile_payloads() + _profile_payloads() + [comparison])
+    out = analyze([_ev("e1", "Notion", "core_workflows"), _ev("e2", "飞书", "pricing")],
+                  ["Notion", "飞书"], client=client, model="m")
+    assert [c.name for c in out.competitors] == ["Notion", "飞书"]
+    assert client.chat.completions.calls == 9
+    assert out.comparison[0].dimension == "pricing"

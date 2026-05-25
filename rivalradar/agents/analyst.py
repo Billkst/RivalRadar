@@ -83,12 +83,15 @@ def extract_swot(evidence: list[Evidence], competitor: str, *, client, model) ->
 
 def analyze_competitor(evidence: list[Evidence], competitor: str, *, client, model) -> CompetitorProfile:
     """对单个竞品做四项抽取并拼成 CompetitorProfile。"""
-    ev = evidence_for(evidence, competitor)
+    ev = evidence_for(evidence, competitor)  # 已按竞品过滤;下面按维度取子集,缺则回退全量
+    feat_ev = evidence_for(ev, competitor, dimension="core_workflows") or ev
+    price_ev = evidence_for(ev, competitor, dimension="pricing") or ev
+    pers_ev = evidence_for(ev, competitor, dimension="review_sentiment") or ev
     return CompetitorProfile(
         name=competitor,
-        features=extract_features(evidence_for(ev, competitor, dimension="core_workflows") or ev, competitor, client=client, model=model),
-        pricing=extract_pricing(evidence_for(ev, competitor, dimension="pricing") or ev, competitor, client=client, model=model),
-        personas=extract_personas(evidence_for(ev, competitor, dimension="review_sentiment") or ev, competitor, client=client, model=model),
+        features=extract_features(feat_ev, competitor, client=client, model=model),
+        pricing=extract_pricing(price_ev, competitor, client=client, model=model),
+        personas=extract_personas(pers_ev, competitor, client=client, model=model),
         swot=extract_swot(ev, competitor, client=client, model=model),
     )
 
