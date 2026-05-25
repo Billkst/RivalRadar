@@ -6,6 +6,12 @@
 """
 from __future__ import annotations
 
+import pathlib
+import sys
+
+# 允许 `python spikes/spike_b_search_extract.py` 直接运行时找到 rivalradar 包
+sys.path.insert(0, str(pathlib.Path(__file__).resolve().parent.parent))
+
 from tavily import TavilyClient
 
 from rivalradar import config
