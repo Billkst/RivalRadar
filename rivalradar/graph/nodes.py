@@ -6,7 +6,8 @@ from rivalradar.agents.analyst import analyze
 from rivalradar.agents.collector import collect_evidence
 from rivalradar.agents.writer import write_report
 from rivalradar.graph.router import extract_collect_targets
-from rivalradar.schema.models import CompetitorAnalysis, Evidence
+from rivalradar.agents import qc
+from rivalradar.schema.models import CompetitorAnalysis, Evidence, QCResult
 from rivalradar.storage.repository import (
     append_trace, insert_evidence, save_analysis, save_report,
 )
@@ -76,3 +77,39 @@ def make_write_node(*, conn, client, model, as_of):
                      latency_ms=int((time.monotonic() - t0) * 1000))
         return {"report": report}
     return write_node
+
+
+def make_qc_node(*, conn, client, model):
+    """质检节点:确定性三闸(始终跑)+ LLM 蕴含(失败则降级,必办项①)。
+
+    不调 qc.check(它会上抛),而是在本层组合子函数:traceability/ontology/coverage
+    决定 verdict 主体;check_entailment 包在 try/except StructuredCallError,失败则
+    degraded=True、记 trace,verdict 仅由确定性闸决定。
+    retry_count 仅在「带着上一轮 qc_result 进来」时 +1(每轮唯一计数点,避免双重计数)。
+    """
+    def qc_node(state, config):
+        run_id = config["configurable"]["thread_id"]
+        t0 = time.monotonic()
+        analysis = CompetitorAnalysis(**state["analysis"])
+        evidence = [Evidence(**d) for d in state["evidence"]]
+        issues = qc.check_traceability(analysis, evidence)
+        issues += qc.check_ontology(analysis, evidence)
+        issues += qc.check_coverage(analysis)
+        degraded = False
+        try:
+            issues += qc.check_entailment(analysis, evidence, client=client, model=model)
+        except Exception as e:  # noqa: BLE001 — 蕴含是尽力而为辅助闸,任何失败(解析/网络/限流)都降级,绝不崩整图(必办项①/spec §5)
+            degraded = True
+            append_trace(conn, run_id, "qc",
+                         output_summary=f"entailment degraded: {e}")
+        verdict = qc.decide_verdict(issues)
+        result = QCResult(verdict=verdict, issues=issues)
+        prior = state.get("qc_result")
+        new_rc = state["retry_count"] + (1 if prior is not None else 0)
+        append_trace(conn, run_id, "qc",
+                     input_summary=f"{len(evidence)} evidence",
+                     output_summary=f"verdict={verdict} issues={len(issues)} "
+                                    f"degraded={degraded} retry={new_rc}",
+                     latency_ms=int((time.monotonic() - t0) * 1000))
+        return {"qc_result": result.model_dump(), "retry_count": new_rc, "degraded": degraded}
+    return qc_node
