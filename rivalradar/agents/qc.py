@@ -6,7 +6,7 @@ from pydantic import BaseModel
 
 from rivalradar.llm.structured import structured_call
 from rivalradar.schema.models import (
-    CONTROLLED_DIMENSIONS, CompetitorAnalysis, Evidence, EvidenceRef, QCIssue,
+    CONTROLLED_DIMENSIONS, CompetitorAnalysis, Evidence, EvidenceRef, QCIssue, QCResult, QCVerdict,
 )
 
 
@@ -112,3 +112,24 @@ def check_entailment(
                                   problem_type="hallucination",
                                   detail=f"证据不支撑结论({text}):{verdict.reason}"))
     return issues
+
+
+def decide_verdict(issues: list[QCIssue]) -> QCVerdict:
+    """单遍质检 issues → verdict(纯逻辑)。
+    insufficient_evidence 由 Lane D 路由在有界重试耗尽后赋予,不在此产出。"""
+    if not issues:
+        return "pass"
+    kinds = {i.problem_type for i in issues}
+    if "missing_evidence" in kinds or "low_coverage" in kinds:
+        return "retry_collect"   # 缺证据/覆盖不足 → 先补采集(优先于重分析)
+    return "retry_analyze"        # hallucination / schema_incomplete → 重新分析现有证据
+
+
+def check(analysis: CompetitorAnalysis, evidence: list[Evidence], *, client, model) -> QCResult:
+    """质检入口:确定性硬闸(溯源+本体+覆盖)+ LLM 蕴含 → QCResult。"""
+    issues: list[QCIssue] = []
+    issues += check_traceability(analysis, evidence)
+    issues += check_ontology(analysis, evidence)
+    issues += check_coverage(analysis)
+    issues += check_entailment(analysis, evidence, client=client, model=model)
+    return QCResult(verdict=decide_verdict(issues), issues=issues)

@@ -3,10 +3,12 @@ from types import SimpleNamespace
 
 from rivalradar.agents.qc import (
     check_traceability, check_ontology, check_coverage, EntailmentVerdict, check_entailment,
+    decide_verdict, check,
 )
 from rivalradar.schema.models import (
     CompetitorAnalysis, CompetitorProfile, FeatureItem, PricingModel,
     SWOT, SWOTPoint, ComparisonRow, ComparisonCell, EvidenceRef, Evidence,
+    QCIssue, QCResult,
 )
 
 
@@ -113,3 +115,48 @@ def test_check_entailment_skips_empty_refs():
         name="Notion", pricing=PricingModel(model_type="x", evidence_refs=[]), swot=SWOT())])
     client = _FakeClient([])
     assert check_entailment(analysis, [_ev("e1")], client=client, model="m") == []
+
+
+def test_decide_verdict_pass_when_no_issues():
+    assert decide_verdict([]) == "pass"
+
+
+def test_decide_verdict_retry_collect_for_missing_or_coverage():
+    miss = [QCIssue(competitor="N", dimension="pricing", problem_type="missing_evidence", detail="")]
+    cov = [QCIssue(competitor="N", dimension="deployment", problem_type="low_coverage", detail="")]
+    assert decide_verdict(miss) == "retry_collect"
+    assert decide_verdict(cov) == "retry_collect"
+
+
+def test_decide_verdict_retry_analyze_for_hallucination_or_schema():
+    hall = [QCIssue(competitor="N", dimension="pricing", problem_type="hallucination", detail="")]
+    schema = [QCIssue(competitor="*", dimension="天气", problem_type="schema_incomplete", detail="")]
+    assert decide_verdict(hall) == "retry_analyze"
+    assert decide_verdict(schema) == "retry_analyze"
+
+
+def test_decide_verdict_collect_takes_priority_over_analyze():
+    mixed = [
+        QCIssue(competitor="N", dimension="pricing", problem_type="hallucination", detail=""),
+        QCIssue(competitor="N", dimension="pricing", problem_type="missing_evidence", detail=""),
+    ]
+    assert decide_verdict(mixed) == "retry_collect"  # 缺证据优先于重分析
+
+
+def test_check_end_to_end_clean_passes():
+    # 全受控维度都覆盖 + 所有结论引用有效(含 pricing 结论)+ 蕴含 supported → pass
+    dims = ("pricing", "deployment", "integrations", "target_users", "core_workflows", "review_sentiment")
+    rows = [ComparisonRow(dimension=d, cells=[
+        ComparisonCell(competitor="Notion", value_type="enum", value="v", evidence_refs=[_ref("e1")])])
+        for d in dims]
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(
+            name="Notion",
+            pricing=PricingModel(model_type="freemium", evidence_refs=[_ref("e1")]),
+            swot=SWOT())],
+        comparison=rows)
+    # 结论数 = pricing 1 条 + 6 个对比 cell = 7 → 蕴含 7 次 supported(空引用结论会被跳过,此处无)
+    client = _FakeClient([json.dumps({"supported": True, "reason": ""}) for _ in range(7)])
+    result = check(analysis, [_ev("e1")], client=client, model="m")
+    assert isinstance(result, QCResult)
+    assert result.verdict == "pass" and result.issues == []
