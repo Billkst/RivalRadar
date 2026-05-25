@@ -97,6 +97,7 @@ def make_qc_node(*, conn, client, model):
         issues += qc.check_coverage(analysis)
         degraded = False
         try:
+            # TODO(Lane E/Day-4): 多竞品时 check_entailment 调用数=结论数,可并行/抽样降本(spec §13 ⑤)
             issues += qc.check_entailment(analysis, evidence, client=client, model=model)
         except Exception as e:  # noqa: BLE001 — 蕴含是尽力而为辅助闸,任何失败(解析/网络/限流)都降级,绝不崩整图(必办项①/spec §5)
             degraded = True
