@@ -64,3 +64,23 @@ spec §11.4 的"实时 DAG 把等待做成可看的协作"依旧成立(多 Agent
    - 明确**不引入 MediaCrawler 等反爬工具**(需真实账号 cookie、违 ToS、易封号、易碎)。
 4. **demo 竞品(锁定)**:Notion(en)+ 飞书 Lark(zh)。
 5. **DATA_SOURCES.md**:Lane C 落地时创建,按 绿/灰/红 三级声明数据源与排除理由,运行时记录实际访问 URL 以备审计。
+
+## Spike D — 分析 Agent 真实 E2E ✅ GO(2026-05-25,Lane C-2a)
+
+运行:`.venv/bin/python spikes/spike_d_analyze_real.py`(对 2 条 canned Notion 证据真打 Doubao)
+
+验证目标:`analyze()` 整条链(逐项抽取 features/pricing/personas/swot + 跨竞品对比)在**真实 Doubao**
+上拿到合法 `CompetitorAnalysis`,且结论真挂上取自给定证据的 `evidence_refs`(不是 FakeClient 模拟)。
+
+**实测输出(单竞品 = 5 次真实调用)**:
+- features:抽出 5 项(模型自动归纳,英文证据→中文功能名)
+- pricing:`model_type=Tiered subscription pricing`,tiers=`['Free','Plus','Business']`(正确取自证据)
+- comparison:受控本体下产出 `['pricing','core_workflows']` 两行
+- **cited evidence_ids:`{e1, e2}`** —— 两条证据都被引用
+
+**结论:GO**。`tools` 结构化路径在四种业务 schema 上均通过 Pydantic 校验;**句级溯源契约在真模型上成立**
+(`_REFS_RULE` + 编号证据块这套 prompt 设计 work),为 C-2b 的 QC Agent "结论是否有据" 判定打底。
+判定 **GO**。
+
+**给 C-2b/Lane D 的提醒**:`PricingModel.model_type` 实测返回自由串(非受控枚举),如需口径统一由 QC/本体校验把关;
+单竞品 ~5 次调用串行累加(~十余秒),并行化留给 Lane D。
