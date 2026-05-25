@@ -13,6 +13,7 @@ class _Completions:
         self.calls = 0
 
     def create(self, **kwargs):
+        self.last_kwargs = kwargs
         content = self.responses[self.calls]
         self.calls += 1
         return SimpleNamespace(
@@ -61,3 +62,24 @@ def test_none_content_retries_then_succeeds():
                           client=client, model="m", max_retries=2)
     assert out.evidence_id == "e1"
     assert client.chat.completions.calls == 2
+
+
+def test_strips_markdown_fences():
+    fenced = "```json\n" + _VALID + "\n```"
+    client = FakeClient([fenced])
+    out = structured_call(EvidenceRef, [{"role": "user", "content": "x"}],
+                          client=client, model="m")
+    assert out.evidence_id == "e1"
+    assert client.chat.completions.calls == 1
+
+
+def test_injects_schema_as_system_and_sends_no_response_format():
+    # 目标模型不支持 response_format(json_schema/json_object 均 400);
+    # 改为把 schema 注入 system 消息。锁定这一行为,防回归。
+    client = FakeClient([_VALID])
+    structured_call(EvidenceRef, [{"role": "user", "content": "x"}],
+                    client=client, model="m")
+    kwargs = client.chat.completions.last_kwargs
+    assert "response_format" not in kwargs
+    assert kwargs["messages"][0]["role"] == "system"
+    assert "JSON Schema" in kwargs["messages"][0]["content"]
