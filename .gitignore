@@ -6,3 +6,10 @@
 .env.*
 !.env.example
 .venv/
+
+# Python 构建产物
+__pycache__/
+*.py[cod]
+
+# 本地 SQLite(RIVALRADAR_DB 默认 rivalradar.db)
+*.db
