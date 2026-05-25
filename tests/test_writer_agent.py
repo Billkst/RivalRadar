@@ -124,6 +124,7 @@ def test_generate_summary_returns_text():
     client = _FakeClient([json.dumps({"summary": "Notion 提供 freemium 定价。"})])
     out = generate_summary("正文……", client=client, model="m")
     assert out == "Notion 提供 freemium 定价。"
+    assert client.chat.completions.calls == 1  # 导语恰一次 LLM 调用(预算锁)
 
 
 def test_write_report_combines_summary_and_deterministic_body():
