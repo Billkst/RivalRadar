@@ -160,3 +160,16 @@ def test_check_end_to_end_clean_passes():
     result = check(analysis, [_ev("e1")], client=client, model="m")
     assert isinstance(result, QCResult)
     assert result.verdict == "pass" and result.issues == []
+
+
+def test_check_end_to_end_retry_collect_with_issues_flowing_through():
+    # pricing 空引用(traceability→missing_evidence)+ 无对比(coverage→6×low_coverage)
+    # 空引用结论被 entailment 跳过 → 0 次 LLM 调用 → verdict=retry_collect
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[])
+    client = _FakeClient([])  # 不应触发任何蕴含调用
+    result = check(analysis, [_ev("e1")], client=client, model="m")
+    assert result.verdict == "retry_collect"
+    assert any(i.problem_type == "missing_evidence" for i in result.issues)
+    assert client.chat.completions.calls == 0  # 空引用结论不调 LLM
