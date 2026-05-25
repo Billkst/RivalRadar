@@ -42,7 +42,7 @@ def structured_call(
         raw = resp.choices[0].message.content
         try:
             return model_cls.model_validate(json.loads(raw))
-        except (json.JSONDecodeError, ValidationError) as err:
+        except (json.JSONDecodeError, ValidationError, TypeError) as err:
             last_err = err
             convo = convo + [
                 {"role": "assistant", "content": raw or ""},

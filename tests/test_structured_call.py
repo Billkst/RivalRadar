@@ -53,3 +53,11 @@ def test_raises_explicitly_after_cap():
         structured_call(EvidenceRef, [{"role": "user", "content": "x"}],
                         client=client, model="m", max_retries=2)
     assert client.chat.completions.calls == 3
+
+
+def test_none_content_retries_then_succeeds():
+    client = FakeClient([None, _VALID])
+    out = structured_call(EvidenceRef, [{"role": "user", "content": "x"}],
+                          client=client, model="m", max_retries=2)
+    assert out.evidence_id == "e1"
+    assert client.chat.completions.calls == 2
