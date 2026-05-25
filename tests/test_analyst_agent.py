@@ -1,7 +1,11 @@
+import json
+from types import SimpleNamespace
+
 from rivalradar.agents.analyst import (
     evidence_for, FeatureExtraction, PersonaExtraction, ComparisonExtraction,
+    extract_features, extract_pricing, build_evidence_block,
 )
-from rivalradar.schema.models import Evidence, FeatureItem
+from rivalradar.schema.models import Evidence, FeatureItem, PricingModel
 
 
 def _ev(eid, competitor, dimension):
@@ -28,15 +32,6 @@ def test_wrapper_models_hold_lists():
     assert ComparisonExtraction(rows=[]).rows == []
 
 
-import json
-from types import SimpleNamespace
-
-from rivalradar.agents.analyst import (
-    extract_features, extract_pricing, build_evidence_block,
-)
-from rivalradar.schema.models import PricingModel
-
-
 class _Completions:
     def __init__(self, payloads):
         self.payloads = list(payloads); self.calls = 0; self.last_kwargs = None
@@ -56,7 +51,8 @@ class _FakeClient:
 
 def test_build_evidence_block_numbers_and_ids():
     block = build_evidence_block([_ev("e1", "Notion", "pricing"), _ev("e2", "Notion", "pricing")])
-    assert "e1" in block and "e2" in block  # evidence_id 出现,供模型引用
+    # 校验格式标记而非裸 id,避免 content 恰含 "e1" 时假阳性
+    assert "[evidence_id=e1]" in block and "[evidence_id=e2]" in block
 
 
 def test_extract_features_returns_feature_items():
