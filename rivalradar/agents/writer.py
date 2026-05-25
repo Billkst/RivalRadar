@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from pydantic import BaseModel
+
+from rivalradar.llm.structured import structured_call
 from rivalradar.schema.feature_tree import assemble_tree
 from rivalradar.schema.models import CompetitorAnalysis, CompetitorProfile, ComparisonRow, EvidenceRef, Evidence, FeatureItem
 
@@ -127,3 +130,23 @@ def render_body(analysis: CompetitorAnalysis, evidence: list[Evidence], *, as_of
     parts.append(render_comparison(analysis.comparison, [p.name for p in analysis.competitors]))
     parts.append(render_sources(analysis, evidence))
     return "\n\n".join(parts)
+
+
+class ReportSummary(BaseModel):
+    summary: str
+
+
+def generate_summary(body: str, *, client, model) -> str:
+    """LLM 导语:基于已成稿正文写 3-5 句中文摘要,只许概括正文已有事实,不得引入新数字/结论。"""
+    msgs = [{"role": "user", "content":
+             "下面是一份已成稿的竞品分析报告正文(含数据与引用)。请写一段 3-5 句中文执行摘要(导语),"
+             "只能概括正文已经出现的事实,不得引入正文没有的数字、结论或竞品。\n\n正文:\n" + body}]
+    return structured_call(ReportSummary, msgs, client=client, model=model).summary
+
+
+def write_report(analysis: CompetitorAnalysis, evidence: list[Evidence], *,
+                 as_of: str, client, model) -> str:
+    """撰写 Agent 入口(混合):LLM 导语摘要 + 确定性正文(所有引用在正文)。"""
+    body = render_body(analysis, evidence, as_of=as_of)
+    summary = generate_summary(body, client=client, model=model)
+    return f"# 竞品分析报告\n\n## 摘要(AI 生成,仅概括下方结论)\n\n{summary}\n\n{body}"

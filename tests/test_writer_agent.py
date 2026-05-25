@@ -1,4 +1,7 @@
-from rivalradar.agents.writer import _fmt_refs, render_competitor, render_comparison, render_sources, render_body
+import json
+from types import SimpleNamespace
+
+from rivalradar.agents.writer import _fmt_refs, render_competitor, render_comparison, render_sources, render_body, ReportSummary, generate_summary, write_report
 from rivalradar.schema.models import (
     CompetitorProfile, FeatureItem, PricingModel, PricingTier,
     UserPersona, SWOT, SWOTPoint, EvidenceRef,
@@ -99,3 +102,42 @@ def test_render_body_stamps_as_of_and_preserves_all_cited_ids():
     # 引用忠实度:analysis 里每个被引 id 都出现在正文
     for eid in ("e1", "e3"):
         assert f"[{eid}]" in body or f"[{eid}," in body or f", {eid}]" in body
+
+
+class _Completions:
+    def __init__(self, payloads):
+        self.payloads = list(payloads); self.calls = 0
+    def create(self, **kwargs):
+        p = self.payloads[self.calls]; self.calls += 1
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(
+                tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=p))]))],
+            usage=SimpleNamespace(total_tokens=10))
+
+
+class _FakeClient:
+    def __init__(self, payloads):
+        self.chat = SimpleNamespace(completions=_Completions(payloads))
+
+
+def test_generate_summary_returns_text():
+    client = _FakeClient([json.dumps({"summary": "Notion 提供 freemium 定价。"})])
+    out = generate_summary("正文……", client=client, model="m")
+    assert out == "Notion 提供 freemium 定价。"
+
+
+def test_write_report_combines_summary_and_deterministic_body():
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(
+            name="Notion",
+            pricing=PricingModel(model_type="freemium", evidence_refs=[_ref("e3")]),
+            swot=SWOT())],
+        comparison=[],
+    )
+    client = _FakeClient([json.dumps({"summary": "导语:Notion 走 freemium。"})])
+    report = write_report(analysis, [_ev("e3")], as_of="2026-05-25", client=client, model="m")
+    assert report.startswith("# 竞品分析报告")
+    assert "导语:Notion 走 freemium。" in report   # LLM 摘要
+    assert "## Notion" in report                    # 确定性正文
+    assert "[e3]" in report                         # 引用在正文
+    assert "as of 2026-05-25" in report
