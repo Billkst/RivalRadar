@@ -20,6 +20,14 @@ def _seed_run(db_path):
     c = connect(db_path)
     init_db(c)
     repo.create_run(c, "r1", ["Notion"], ["pricing"])
+    # 同时 seed evidence "ev1" 用于 evidence_id 关联测试(annotations.py 现在校验
+    # evidence_id 存在,reviewer adversarial 7/10 揪到的孤儿 evidence 链)
+    from rivalradar.schema.models import Evidence
+    repo.insert_evidence(c, "r1", Evidence(
+        id="ev1", competitor="Notion", dimension="pricing", content="$10/mo",
+        source_url="https://notion.so/pricing", source_title="Pricing",
+        language="en", fetched_at="2026-05-25T00:00:00Z",
+    ))
     c.close()
 
 
@@ -54,6 +62,18 @@ def test_post_annotation_rejects_empty_note(db_path, client):
         "conclusion_path": None, "note": "",
     })
     assert r.status_code == 422
+
+
+def test_post_annotation_404_when_evidence_does_not_exist(db_path, client):
+    """/review fix(adversarial 7/10):evidence_id 给了但不存在 → 必须 404,
+    防孤儿 annotation 指向不存在的 evidence 污染 §17 质疑率"""
+    _seed_run(db_path)  # 只 seed run + ev1
+    r = client.post("/annotations", json={
+        "run_id": "r1", "evidence_id": "ev_ghost",  # 不存在
+        "conclusion_path": None, "note": "悬空证据",
+    })
+    assert r.status_code == 404
+    assert "evidence not found" in r.json()["detail"]
 
 
 def test_post_annotation_404_when_run_does_not_exist(db_path, client):

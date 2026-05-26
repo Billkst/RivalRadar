@@ -280,6 +280,22 @@ def test_post_run_rejects_too_many_competitors(stubbed_client):
     assert "competitors" in r.json()["detail"]
 
 
+def test_post_run_competitor_string_boundary_200_201(stubbed_client):
+    """/review fix(testing specialist 7/10):锁住临界值 — 防止 max_length 被
+    悄悄收紧(如改成 50)而无人察觉。200 char 应过,201 char 应 422。"""
+    # 200 char 边界 — 应该被接受(进入业务流,SSE 流开始即可,不必跑完图)
+    r_ok = stubbed_client.post("/run",
+                               json={"competitors": ["X" * 200],
+                                     "dimensions": ["pricing"]})
+    assert r_ok.status_code == 200  # SSE 协议头不算 4xx
+    # 201 char — 必须 422
+    r_bad = stubbed_client.post("/run",
+                                json={"competitors": ["X" * 201],
+                                      "dimensions": ["pricing"]})
+    assert r_bad.status_code == 422
+    assert "competitors" in r_bad.json()["detail"]
+
+
 def test_post_run_rejects_oversized_competitor_string(stubbed_client):
     """ship round-2 (Codex High #3):per-item max_length=200 必须实际生效
     (而非只在 docstring 写) — 200KB 的"竞品名"通过 list max_length=5 但仍能打爆 prompt。"""

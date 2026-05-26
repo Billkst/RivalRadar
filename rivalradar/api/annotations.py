@@ -25,6 +25,10 @@ def post_annotation(
     # 防孤儿 annotation:run_id 必须存在(否则 §17 人工质疑率统计被污染)
     if repo.get_run(conn, body.run_id) is None:
         raise HTTPException(404, "run not found")
+    # 若指定 evidence_id,也必须存在(同上 §17 完整性 + adversarial 7/10 揪到)
+    if body.evidence_id is not None:
+        if repo.get_evidence(conn, body.evidence_id) is None:
+            raise HTTPException(404, "evidence not found")
     aid = repo.insert_annotation(
         conn,
         run_id=body.run_id,

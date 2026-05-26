@@ -1,6 +1,6 @@
 [project]
 name = "rivalradar"
-version = "0.1.0"
+version = "0.1.0.0"
 description = "AI 多 Agent 竞品分析协作系统"
 requires-python = ">=3.11"
 dependencies = [

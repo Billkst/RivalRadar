@@ -92,13 +92,14 @@ RIVALRADAR_HOST=       # 可选,默认 127.0.0.1(跨主机访问设 0.0.0.0)
 | `POST` | `/annotations` | 添加人工质疑标注(§17 质疑率统计) |
 | `GET` | `/healthz` | 健康检查 |
 
-**SSE 事件类型:**`start` / `node` / `error` / `done` / `trace`
+**SSE 事件类型:**
+- Live `POST /run`:`start` / `node` / `error` / `done`
+- Replay `GET /stream/:run_id`:`start` / `trace` / `done`
 
 **请求体示例(`POST /run`):**
 
 ```json
 {
-  "product": "我的 SaaS 产品",
   "competitors": ["竞品A", "竞品B"],
   "dimensions": ["features", "pricing"]
 }
@@ -126,7 +127,7 @@ RIVALRADAR_HOST=       # 可选,默认 127.0.0.1(跨主机访问设 0.0.0.0)
 | Agent 编排 | LangGraph `StateGraph`(5 节点 + 5 分支路由 + SqliteSaver checkpointer) |
 | LLM | Doubao(字节跳动 ARK 平台,function-calling / tools 路径) |
 | 搜索 | Tavily(主)+ Exa(兜底),`FallbackSearch` 自动切换 |
-| 存储 | SQLite,WAL 模式,5 表 schema(`runs / evidence / analysis / report / trace`)+ `annotations` |
+| 存储 | SQLite,WAL 模式,6 表 schema(`runs / evidence / analysis / report / trace / annotations`) |
 | 数据校验 | Pydantic v2,`Evidence / CompetitorAnalysis / QCResult` schema |
 | 依赖管理 | `pyproject.toml`(PEP 517),Python ≥ 3.11 |
 

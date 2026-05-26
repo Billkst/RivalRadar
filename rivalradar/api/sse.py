@@ -15,11 +15,14 @@ from __future__ import annotations
 
 import asyncio
 import json
+import logging
 import sqlite3
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 from rivalradar.storage import repository as repo
+
+logger = logging.getLogger(__name__)
 
 
 def _now() -> str:
@@ -100,16 +103,21 @@ async def graph_event_stream(
     # cancel_on_finish 触发的清理路径,必须让 cancel 直接退出生成器、不被 yield "error"
     # 拦截。**切勿改成 except BaseException** 会吞掉 cancel、导致孤儿任务堆积。
     except Exception as e:  # noqa: BLE001 — yield error 给客户端后 clean exit(不 re-raise)
-        # 关键:把 run 标 failed,否则任何 Tavily 429/Doubao 限流/解析错误会让
-        # runs.status 永久卡 "running",积累 zombie run 干扰统计 + dashboard 可读性
+        # 先把完整 traceback 写 server log(运维必须能 debug,与下面 sanitize 配对)
+        logger.exception("graph pipeline error for run %s", run_id)
+        # 关键 1:用 mark_run_failed CAS 把 'running' 标 'failed',但**绝不覆盖**已 finalize
+        # 的 done/insufficient_evidence/degraded — 防 finalize 部分完成后被覆盖(reviewer
+        # adversarial 9/10 揪到的 ship round-2 引入的 race)
         try:
-            repo.update_run_status(conn, run_id, "failed")
-        except Exception:  # noqa: BLE001 — DB 写失败不能再 raise,只能继续往下 yield error
-            pass
-        # 只暴露 type(e).__name__ 给客户端,**绝不**透传 str(e):
+            if not repo.mark_run_failed(conn, run_id):
+                logger.info("run %s already in terminal state, not overwriting", run_id)
+        except Exception as db_err:  # noqa: BLE001 — DB 写失败不能再 raise(SSE 必须 clean exit)
+            logger.warning("failed to mark run %s as failed: %s",
+                           run_id, type(db_err).__name__)
+        # 关键 2:只暴露 type(e).__name__ 给客户端,**绝不**透传 str(e):
         # OpenAI/Tavily SDK 的 APIStatusError str() 可能含 Authorization: Bearer <key>
         # header(Codex Critical #1 + FastAPI 官方 handling-errors 强调"不直接转 exception
-        # str 给客户端,会泄露内部细节")。server log 已记完整 traceback(server-side 审计用)。
+        # str 给客户端,会泄露内部细节")。完整 traceback 已上面 logger.exception 落 server log。
         yield {"event": "error",
                "data": json.dumps({"error": f"pipeline error: {type(e).__name__}",
                                    "ts": _now()})}

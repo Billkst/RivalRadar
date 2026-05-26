@@ -117,6 +117,32 @@ def test_graph_event_stream_emits_error_and_clean_exits(tmp_path):
     assert repo.get_run(c, "r1")["status"] == "failed"
 
 
+def test_graph_event_stream_failed_status_does_not_overwrite_finalized(tmp_path):
+    """/review fix(critical 9/10):adversarial 实测:finalize 节点 update_run_status(done)
+    成功后,若 update_run_degraded 抛(DB locked / disk full),sse.py except 不能把
+    'done' 覆盖成 'failed'(否则前端拒绝渲染已存好的报告)。
+    `mark_run_failed` CAS 模式:WHERE status='running' 让终态不被覆盖。"""
+    class _BoomAfterFinalize:
+        def astream(self, _input, *, config, stream_mode):
+            async def gen():
+                yield {"collect": {"evidence": []}}
+                # 模拟 finalize 成功后续步骤抛
+                raise RuntimeError("post-finalize step crashed")
+                yield  # unreachable
+            return gen()
+
+    c = connect(str(tmp_path / "finalized.db"))
+    init_db(c)
+    repo.create_run(c, "r1", ["Notion"], ["pricing"])
+    # 关键:模拟 finalize 已经把 status 设成 done(典型 race 场景)
+    repo.update_run_status(c, "r1", "done")
+    asyncio.run(_collect(graph_event_stream(
+        _BoomAfterFinalize(), {}, {}, "r1", conn=c)))
+    # 期望:CAS 防覆盖,run 保持 'done',不被改成 'failed'
+    assert repo.get_run(c, "r1")["status"] == "done", \
+        "CAS BUG: 'done' 被覆盖成 'failed' → 前端拒绝渲染已存好的报告"
+
+
 def test_graph_event_stream_done_event_carries_status(tmp_path):
     """ship 修复:live 流 done event 必须含 status 字段(与 replay 路径对称),
     前端可一处取终态,不再需 done 后再 GET /run/:id 拉详情。"""

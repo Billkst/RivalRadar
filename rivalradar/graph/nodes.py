@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import logging
 import time
 
 from rivalradar.agents.analyst import analyze
@@ -12,6 +13,8 @@ from rivalradar.storage.repository import (
     append_trace, insert_evidence, save_analysis, save_report,
     update_run_degraded, update_run_status,
 )
+
+logger = logging.getLogger(__name__)
 
 
 def make_collect_node(*, conn, provider, official_domains, max_results: int = 5):
@@ -105,8 +108,7 @@ def make_qc_node(*, conn, client, model):
             # 只记 type(e).__name__,**绝不**写 str(e) 入 trace(GET /trace/:run 公开
             # 暴露,Codex Critical #1:OpenAI APIStatusError str() 可能含 Authorization
             # header → 泄 ARK_API_KEY。server log 已记完整 traceback 给运维)
-            import logging
-            logging.getLogger(__name__).exception("qc entailment failed")
+            logger.exception("qc entailment failed for run %s", run_id)
             append_trace(conn, run_id, "qc",
                          output_summary=f"entailment degraded: {type(e).__name__}")
         # degraded sticky OR 累积:一旦任何一轮发生蕴含降级,持续标记到 finalize

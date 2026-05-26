@@ -41,6 +41,24 @@ def update_run_status(conn: sqlite3.Connection, run_id: str, status: str) -> Non
     conn.commit()
 
 
+def mark_run_failed(conn: sqlite3.Connection, run_id: str) -> bool:
+    """把 'running' 状态的 run 标 'failed'(CAS 防覆盖已 finalize 的状态)。
+
+    场景:SSE graph 主流 except 分支调此函数标 failed,但若 finalize 节点已
+    update_run_status(done) 成功后,后续步骤(update_run_degraded 等)又抛,
+    sse.py except 不应该把 'done' 覆盖成 'failed' — 否则前端拒绝渲染已存好的报告。
+    返回 True if 真的改了一行(原 status='running'),False 表示已是终态没动。
+
+    Reviewer 揪到的 ship round-2 race(adversarial 9/10:fix made it worse)。
+    """
+    cursor = conn.execute(
+        "UPDATE runs SET status='failed' WHERE run_id=? AND status='running'",
+        (run_id,),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
 def update_run_degraded(conn: sqlite3.Connection, run_id: str, degraded: bool) -> None:
     """持久化「蕴含降级」标志(Lane D state["degraded"] → 落 SQLite,spec §11.5 横幅依赖)。"""
     conn.execute("UPDATE runs SET degraded=? WHERE run_id=?",
