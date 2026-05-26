@@ -84,7 +84,9 @@ def test_graph_event_stream_yields_start_node_done():
     assert events[-1]["event"] == "done"
 
 
-def test_graph_event_stream_emits_error_on_exception():
+def test_graph_event_stream_emits_error_and_clean_exits():
+    """graph 跑挂时:先 yield error 给客户端,然后 clean exit(不 re-raise),
+    让 sse-starlette task group 自然走优雅关停。"""
     class _BoomGraph:
         def astream(self, _input, *, config, stream_mode):
             async def gen():
@@ -93,18 +95,12 @@ def test_graph_event_stream_emits_error_on_exception():
                 yield  # unreachable
             return gen()
 
-    async def _run():
-        events = []
-        with pytest.raises(RuntimeError):
-            async for ev in graph_event_stream(_BoomGraph(), {}, {}, "r1"):
-                events.append(ev)
-        return events
-
-    events = asyncio.run(_run())
-    # 应当先有 start + collect node,然后 error,再让异常上抛
+    events = asyncio.run(_collect(graph_event_stream(_BoomGraph(), {}, {}, "r1")))
+    # clean exit:start + collect + error,**不应**有 done event
     assert events[0]["event"] == "start"
     assert any(e["event"] == "error" and "upstream LLM down" in e["data"]
                for e in events)
+    assert not any(e["event"] == "done" for e in events)
 
 
 def test_replay_from_trace_yields_trace_events(tmp_path):

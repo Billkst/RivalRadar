@@ -12,6 +12,7 @@ from contextlib import asynccontextmanager
 from typing import Any
 
 from fastapi import FastAPI
+from fastapi.exceptions import RequestValidationError
 from fastapi.middleware.cors import CORSMiddleware
 from fastapi.responses import JSONResponse
 from starlette.exceptions import HTTPException as StarletteHTTPException
@@ -54,10 +55,20 @@ def create_app(
     app.state.as_of = as_of or _dt.date.today().isoformat()
     app.state.max_retries = max_retries
 
-    # 统一异常 → ErrorOut 形状
+    # 统一异常 → ErrorOut 形状(detail: str)
     @app.exception_handler(StarletteHTTPException)
     async def _http_exc(_req, exc: StarletteHTTPException):
         return JSONResponse({"detail": str(exc.detail)}, status_code=exc.status_code)
+
+    @app.exception_handler(RequestValidationError)
+    async def _validation_exc(_req, exc: RequestValidationError):
+        # 把 Pydantic detail 列表压成单字符串,与 ErrorOut.detail: str 契约一致
+        # (Lane F 前端按统一形状解析所有 4xx,避免 [object Object] 渲染)
+        summary = "; ".join(
+            f"{'.'.join(str(p) for p in e.get('loc', []))}: {e.get('msg', '')}"
+            for e in exc.errors()
+        )
+        return JSONResponse({"detail": summary or "validation error"}, status_code=422)
 
     @app.get("/healthz")
     def healthz() -> dict:

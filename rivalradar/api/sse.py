@@ -4,8 +4,12 @@
 - 事件本身只携带「前端动画必需的轻量摘要」(node + 计数/verdict/status),不
   传整张 state(几 KB → 几十 B),给 §11.4 实时 DAG 用。前端需要详情时另调
   GET /evidence/:id / /analysis/:run / /report/:run / /trace/:run。
-- 任何 astream 异常先发 'error' 事件给前端,**再上抛** —— 前端能显示「失败原因」
-  而非「连接突然断了」,且 sse-starlette 的 _listen_for_disconnect 仍能正常清理。
+- 任何 astream 异常先发 'error' 事件给前端,然后 **clean exit**(不 re-raise)——
+  前端能显示「失败原因」而非「连接突然断了」;sse-starlette task group 因
+  body_iterator 自然完成走优雅关停,error chunk 已 flush 给客户端。
+- **绝不 re-raise**:会让 ASGI 错误路径介入(TestClient 直接抛回调用方,
+  uvicorn log + abort 连接),既无收益又把 e2e 路径搞乱;CancelledError 是
+  BaseException 不入此分支,客户端断连仍由 task_group cancel_on_finish 清理。
 """
 from __future__ import annotations
 
@@ -64,9 +68,12 @@ async def graph_event_stream(
     config: dict,
     run_id: str,
 ) -> AsyncIterator[dict]:
-    """SSE 主流:start → 每节点 update → done(或 error → 上抛)。
+    """SSE 主流:start → 每节点 update → done(或 error → clean exit)。
 
     yield 出的 dict 给 sse-starlette EventSourceResponse,字段 'event'/'data'。
+
+    ⚠️ done event 只含 run_id + ts,**不含**终态 status(done/insufficient_evidence/degraded)。
+    前端 onDone 后应 GET /run/:id 拉详情,而非靠 done event 本身判定终态(动画与详情分离)。
 
     ⚠️ LangGraph **stream_mode="updates"**(默认 v1 行为)契约:chunk 形状是
     `{node_name: state_delta}`(逐 task 直接 yield),与 stream_events(version="v3")
@@ -90,10 +97,10 @@ async def graph_event_stream(
     # 分支)—— 这是 sse-starlette task group 在客户端断连时通过 _listen_for_disconnect
     # cancel_on_finish 触发的清理路径,必须让 cancel 直接退出生成器、不被 yield "error"
     # 拦截。**切勿改成 except BaseException** 会吞掉 cancel、导致孤儿任务堆积。
-    except Exception as e:  # noqa: BLE001 — 上抛前先让前端拿到 error 事件
+    except Exception as e:  # noqa: BLE001 — yield error 给客户端后 clean exit(不 re-raise)
         yield {"event": "error",
                "data": json.dumps({"error": str(e), "ts": _now()})}
-        raise
+        return
     yield {"event": "done",
            "data": json.dumps({"run_id": run_id, "ts": _now()})}
 

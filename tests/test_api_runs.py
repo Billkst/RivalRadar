@@ -185,3 +185,28 @@ def test_post_run_persists_state_after_stream(stubbed_client, db_path):
 def test_post_run_rejects_empty_competitors(stubbed_client):
     r = stubbed_client.post("/run", json={"competitors": [], "dimensions": ["pricing"]})
     assert r.status_code == 422
+
+
+def test_post_run_422_returns_error_out_string_shape(stubbed_client):
+    """422 体形必须与 ErrorOut(detail: str)一致,Lane F 前端契约统一。"""
+    r = stubbed_client.post("/run", json={"competitors": [], "dimensions": ["pricing"]})
+    assert r.status_code == 422
+    body = r.json()
+    assert isinstance(body["detail"], str)
+    assert "competitors" in body["detail"]
+
+
+def test_post_run_emits_error_event_when_graph_crashes(stubbed_client, monkeypatch):
+    """money shot 诚实失败:graph 跑崩时 SSE 必须发 error event 给客户端
+    (而非连接突然断掉,前端能显示失败原因)。"""
+    def _boom(*a, **k):
+        raise RuntimeError("boom in analyze")
+    monkeypatch.setattr("rivalradar.graph.nodes.analyze", _boom)
+    r = stubbed_client.post("/run",
+                            json={"competitors": ["Notion"],
+                                  "dimensions": ["pricing"]})
+    # SSE 协议头还是 200(streaming 本身不算 HTTP error)
+    assert r.status_code == 200
+    events = _parse_sse(r.content)
+    assert any(e.get("event") == "error" and "boom in analyze" in e.get("data", "")
+               for e in events), f"no error event in stream: {events}"
