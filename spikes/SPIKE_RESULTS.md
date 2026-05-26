@@ -114,3 +114,22 @@ spec §11.4 的"实时 DAG 把等待做成可看的协作"依旧成立(多 Agent
 
 **结论:GO**。Lane D 编排在真模型上成立;真闭环回归(§13 ★★★)由 `tests/test_graph_loop.py` 机器可验证
 (改善→pass、耗尽→insufficient_evidence,retry_count 封顶)。
+
+## Spike G — Lane E 真实 API + Doubao 集成(2026-05-26)
+
+**目的:** 验证 Lane E 后端 API + SSE 在真实 Doubao + Tavily 上跑通端到端单竞品调研。
+
+**做法:** `spikes/spike_g_api_real_doubao.py` 用 TestClient 调 POST /run,消费 SSE,
+然后逐一 GET /run/:id、/trace/:run、/report/:run、/analysis/:run。
+
+**实际输出:**
+- run_id=run_a21cb91ef1e5
+- SSE bytes=2935;events seen: {start, node, done}
+- status=insufficient_evidence  degraded=False
+- trace entries=9
+- report chars=9631
+- competitors=1
+
+**结论:** GO。SSE 事件 start/node/done 齐全;run 终态合法(insufficient_evidence,max_retries=1);
+trace ≥5 条(9 条);report 非空 markdown(9631 chars);analysis 含 ≥1 competitor。Lane E
+与 Lane D 接驳通了,为 Lane F 前端铺好可消费 API。
