@@ -24,14 +24,21 @@ def test_summarize_write_returns_chars():
     assert s == {"node": "write", "report_chars": 6}
 
 
-def test_summarize_qc_returns_verdict_and_retry():
+def test_summarize_qc_returns_verdict_and_retry_with_issue_types():
+    """35% money shot:issue_types 让前端 DAG 能区分『缺证据』vs『假说不支撑』。"""
     s = _summarize_delta("qc", {
         "qc_result": {"verdict": "retry_collect",
-                      "issues": [{"problem_type": "missing_evidence"}]},
+                      "issues": [
+                          {"problem_type": "missing_evidence"},
+                          {"problem_type": "missing_evidence"},
+                          {"problem_type": "hallucination"},
+                      ]},
         "retry_count": 1,
         "degraded": False,
     })
-    assert s == {"node": "qc", "verdict": "retry_collect", "issues": 1,
+    assert s == {"node": "qc", "verdict": "retry_collect",
+                 "issues": 3,
+                 "issue_types": {"missing_evidence": 2, "hallucination": 1},
                  "retry_count": 1, "degraded": False}
 
 
