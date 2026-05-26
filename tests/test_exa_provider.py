@@ -35,3 +35,17 @@ def test_handles_missing_optional_fields():
     fake = _FakeExa([_r("u", "t", "body")])
     out = ExaProvider(client=fake).search("q")
     assert out[0].published_date is None and out[0].score is None
+
+
+def test_empty_text_gives_none_raw_content():
+    """text='' → raw_content=None(不存 empty string),content=''[:_SNIPPET_CHARS]。"""
+    fake = _FakeExa([_r("u", "t", "")])
+    out = ExaProvider(client=fake).search("q")
+    assert out[0].raw_content is None  # "" or None → None
+
+
+def test_empty_results_returns_empty_list():
+    """Exa 返回无结果时 → 空列表,不崩。"""
+    fake = _FakeExa([])
+    out = ExaProvider(client=fake).search("q")
+    assert out == []

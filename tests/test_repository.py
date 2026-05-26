@@ -104,3 +104,21 @@ def test_annotation_evidence_id_optional(conn):
                            conclusion_path="competitors[0]", note="整体可疑")
     rows = repo.list_annotations(conn, "r1")
     assert rows[0]["evidence_id"] is None
+
+
+def test_update_run_degraded(conn):
+    """update_run_degraded 持久化蕴含降级标志;False 后再 True 可覆写。"""
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    assert repo.get_run(conn, "r1")["degraded"] is False  # 默认 0
+    repo.update_run_degraded(conn, "r1", True)
+    assert repo.get_run(conn, "r1")["degraded"] is True
+    repo.update_run_degraded(conn, "r1", False)
+    assert repo.get_run(conn, "r1")["degraded"] is False
+
+
+def test_list_runs_respects_limit(conn):
+    """list_runs(limit=N) 只返最多 N 条。"""
+    for i in range(5):
+        repo.create_run(conn, f"r{i}", ["Notion"], ["pricing"])
+    runs = repo.list_runs(conn, limit=3)
+    assert len(runs) == 3

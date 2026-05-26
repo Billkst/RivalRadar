@@ -45,3 +45,9 @@ def test_raises_when_all_fail():
     p2 = _StubProvider("exa", error=RuntimeError("y"))
     with pytest.raises(AllProvidersFailedError):
         FallbackSearch([p1, p2]).search("q")
+
+
+def test_raises_value_error_when_no_providers():
+    """FallbackSearch 构造无 provider → ValueError(快速失败,防配置错误静默)。"""
+    with pytest.raises(ValueError):
+        FallbackSearch([])

@@ -41,3 +41,24 @@ def test_safe_fetch_allowed_returns_text():
 
 class _NoWait:
     def wait(self, domain): pass
+
+
+class _ErrorResp:
+    def raise_for_status(self):
+        raise RuntimeError("HTTP 403")
+    text = "forbidden"
+
+
+class _ErrorHTTP:
+    def __init__(self): self.got = None
+    def get(self, url, headers=None, timeout=None):
+        self.got = url
+        return _ErrorResp()
+
+
+def test_safe_fetch_http_error_returns_none():
+    """raise_for_status 抛错 → safe_fetch 返 None 而非上抛(合规自抓 silent fallback)。"""
+    http = _ErrorHTTP()
+    out = safe_fetch("https://example.com/b", http=http,
+                     allowed=lambda u: True, limiter=_NoWait())
+    assert out is None

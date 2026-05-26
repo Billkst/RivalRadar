@@ -33,3 +33,11 @@ def test_self_fetch_respects_robots_for_normal_site():
 
 def test_user_agent_is_honest_identifier():
     assert "RivalRadar" in USER_AGENT
+
+
+def test_self_fetch_allowed_when_robots_fetch_fails():
+    """robots.txt 取不到(网络/SSL 异常)→ _default_robots_for 返 None → 保守视为可读。"""
+    def _failing_robots(domain):
+        return None  # 模拟 _default_robots_for 的异常分支返回 None
+    assert is_self_fetch_allowed(
+        "https://example.com/c", robots_for=_failing_robots) is True

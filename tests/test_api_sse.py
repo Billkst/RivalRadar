@@ -118,3 +118,24 @@ def test_replay_from_trace_yields_trace_events(tmp_path):
     assert [json.loads(e["data"])["node"] for e in trace_events] == ["collect", "qc"]
     assert events[-1]["event"] == "done"
     assert json.loads(events[-1]["data"])["status"] == "done"
+
+
+def test_summarize_delta_unknown_node_passthrough():
+    """未识别节点名只透传 node 名,不崩、不 KeyError。"""
+    s = _summarize_delta("new_node_future", {"foo": "bar"})
+    assert s == {"node": "new_node_future"}
+
+
+def test_replay_from_trace_no_trace_yields_only_start_done(tmp_path):
+    """run 存在但 trace 表为空 → 只有 start + done 两条事件,无 trace 事件。"""
+    c = connect(str(tmp_path / "empty_trace.db"))
+    init_db(c)
+    repo.create_run(c, "r2", ["Notion"], ["pricing"])
+    repo.update_run_status(c, "r2", "done")
+
+    events = asyncio.run(_collect(_replay_from_trace(c, "r2", pacing=0.0)))
+    assert events[0]["event"] == "start"
+    assert json.loads(events[0]["data"])["replay"] is True
+    trace_events = [e for e in events if e["event"] == "trace"]
+    assert trace_events == []
+    assert events[-1]["event"] == "done"

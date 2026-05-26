@@ -239,6 +239,15 @@ def test_get_stream_404_for_unknown_run(client):
     assert r.status_code == 404
 
 
+def test_post_run_422_empty_dimensions(stubbed_client):
+    """POST /run 空 dimensions 也应 422 — RunRequest 双字段都有 min_length=1。"""
+    r = stubbed_client.post("/run", json={"competitors": ["Notion"], "dimensions": []})
+    assert r.status_code == 422
+    body = r.json()
+    assert isinstance(body["detail"], str)
+    assert "dimensions" in body["detail"]
+
+
 def test_get_run_returns_degraded_true_when_persisted(db_path, client):
     """蕴含降级路径(verdict=pass + state.degraded=True)持久化后,API 必须暴露
     degraded=True 给前端做 §11.5 警示横幅 —— 这是 Lane D 遗留(state.degraded
