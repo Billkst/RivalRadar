@@ -9,7 +9,8 @@ from rivalradar.graph.router import extract_collect_targets
 from rivalradar.agents import qc
 from rivalradar.schema.models import CompetitorAnalysis, Evidence, QCResult
 from rivalradar.storage.repository import (
-    append_trace, insert_evidence, save_analysis, save_report, update_run_status,
+    append_trace, insert_evidence, save_analysis, save_report,
+    update_run_degraded, update_run_status,
 )
 
 
@@ -147,6 +148,8 @@ def make_finalize_node(*, conn, max_retries):
             status = "degraded"
         save_report(conn, run_id, report)
         update_run_status(conn, run_id, status)
+        # 持久化蕴含降级标志(Lane D 遗留收口,spec §11.5 前端横幅依赖)
+        update_run_degraded(conn, run_id, state.get("degraded", False))
         append_trace(conn, run_id, "finalize",
                      output_summary=f"status={status} verdict={result['verdict']}")
         return {"report": report, "qc_result": result, "status": status}

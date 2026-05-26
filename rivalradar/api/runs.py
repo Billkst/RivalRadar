@@ -75,6 +75,7 @@ def get_run(run_id: str,
     r = repo.get_run(conn, run_id)
     if r is None:
         raise HTTPException(404, "run not found")
-    # degraded 状态在 repo 层没单字段,从 status 反推(spec §8 + Lane D 遗留)
-    r["degraded"] = (r["status"] == "degraded")
+    # degraded:repo.get_run 已返 db 持久化的「蕴含降级」标志,再 OR status==degraded
+    # 兼容种数据(只 update_run_status 没经 finalize 的路径,如 fixture 直接造的)
+    r["degraded"] = r["degraded"] or r["status"] == "degraded"
     return r

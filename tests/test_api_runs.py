@@ -237,3 +237,20 @@ def test_get_stream_404_for_unknown_run(client):
     """没种 run + 没 POST 过,纯空 db,GET 不存在的 run_id 必须 404。"""
     r = client.get("/stream/no_such_run")
     assert r.status_code == 404
+
+
+def test_get_run_returns_degraded_true_when_persisted(db_path, client):
+    """蕴含降级路径(verdict=pass + state.degraded=True)持久化后,API 必须暴露
+    degraded=True 给前端做 §11.5 警示横幅 —— 这是 Lane D 遗留(state.degraded
+    在 pass 路径不暴露)被 Lane E 正面收口的关键测试。"""
+    c = connect(db_path); init_db(c)
+    repo.create_run(c, "r_done_degr", ["Notion"], ["pricing"])
+    repo.update_run_status(c, "r_done_degr", "done")
+    repo.update_run_degraded(c, "r_done_degr", True)
+    c.close()
+
+    r = client.get("/run/r_done_degr")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["status"] == "done"
+    assert body["degraded"] is True  # 前端据此显示警示横幅(蕴含降级但 verdict=pass)

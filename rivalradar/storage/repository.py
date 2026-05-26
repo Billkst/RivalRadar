@@ -31,12 +31,20 @@ def get_run(conn: sqlite3.Connection, run_id: str) -> dict | None:
         "competitors": json.loads(row["competitors"]),
         "dimensions": json.loads(row["dimensions"]),
         "status": row["status"],
+        "degraded": bool(row["degraded"]),
         "created_at": row["created_at"],
     }
 
 
 def update_run_status(conn: sqlite3.Connection, run_id: str, status: str) -> None:
     conn.execute("UPDATE runs SET status=? WHERE run_id=?", (status, run_id))
+    conn.commit()
+
+
+def update_run_degraded(conn: sqlite3.Connection, run_id: str, degraded: bool) -> None:
+    """持久化「蕴含降级」标志(Lane D state["degraded"] → 落 SQLite,spec §11.5 横幅依赖)。"""
+    conn.execute("UPDATE runs SET degraded=? WHERE run_id=?",
+                 (1 if degraded else 0, run_id))
     conn.commit()
 
 
@@ -135,6 +143,7 @@ def list_runs(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
             "competitors": json.loads(r["competitors"]),
             "dimensions": json.loads(r["dimensions"]),
             "status": r["status"],
+            "degraded": bool(r["degraded"]),
             "created_at": r["created_at"],
         }
         for r in rows

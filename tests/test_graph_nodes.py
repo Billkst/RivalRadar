@@ -235,3 +235,22 @@ def test_finalize_exhausted_analyze_becomes_degraded(conn):
     out = node(state, _CFG)
     assert "未达质检标准" in out["report"]
     assert out["status"] == "degraded"
+
+
+def test_finalize_persists_state_degraded_with_pass_verdict(conn):
+    """state.degraded=True 但 verdict=pass:db.runs.degraded 必须被持久化为 True。
+
+    Lane D 遗留收口(spec §11.5 前端横幅依赖):蕴含闸跑挂被降级、但确定性闸 pass 时,
+    status=done 但 db.degraded=1,Lane E GET /run/:id.degraded 据此暴露给前端。
+    """
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    node = make_finalize_node(conn=conn, max_retries=2)
+    state = {"analysis": _full_clean_analysis().model_dump(),
+             "report": "# 竞品分析报告\n正文",
+             "qc_result": {"verdict": "pass", "issues": []},
+             "retry_count": 0,
+             "degraded": True}
+    out = node(state, _CFG)
+    assert out["status"] == "done"  # verdict=pass → status=done
+    run = repo.get_run(conn, "r1")
+    assert run["degraded"] is True  # 关键:state.degraded → db.degraded 持久化
