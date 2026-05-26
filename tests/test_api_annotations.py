@@ -1,0 +1,69 @@
+import pytest
+from fastapi.testclient import TestClient
+
+from rivalradar.api.app import create_app
+from rivalradar.storage import repository as repo
+from rivalradar.storage.db import connect, init_db
+
+
+@pytest.fixture()
+def db_path(tmp_path):
+    return str(tmp_path / "anno.db")
+
+
+@pytest.fixture()
+def client(db_path):
+    return TestClient(create_app(db_path=db_path))
+
+
+def _seed_run(db_path):
+    c = connect(db_path)
+    init_db(c)
+    repo.create_run(c, "r1", ["Notion"], ["pricing"])
+    c.close()
+
+
+def test_post_annotation_creates_and_returns_id(db_path, client):
+    _seed_run(db_path)
+    r = client.post("/annotations", json={
+        "run_id": "r1", "evidence_id": "ev1",
+        "conclusion_path": "competitors[0].swot.strengths[0]",
+        "note": "此处存疑,缺直接证据",
+    })
+    assert r.status_code == 201
+    body = r.json()
+    assert body["id"] > 0
+    assert body["note"] == "此处存疑,缺直接证据"
+    assert body["evidence_id"] == "ev1"
+
+
+def test_post_annotation_evidence_id_optional(db_path, client):
+    _seed_run(db_path)
+    r = client.post("/annotations", json={
+        "run_id": "r1", "evidence_id": None,
+        "conclusion_path": "competitors[0]", "note": "整体可疑",
+    })
+    assert r.status_code == 201
+    assert r.json()["evidence_id"] is None
+
+
+def test_post_annotation_rejects_empty_note(db_path, client):
+    _seed_run(db_path)
+    r = client.post("/annotations", json={
+        "run_id": "r1", "evidence_id": None,
+        "conclusion_path": None, "note": "",
+    })
+    assert r.status_code == 422
+
+
+def test_post_annotation_does_not_mutate_run_state(db_path, client):
+    """§11.6 桩:只记日志、不写回 state、不重跑。"""
+    _seed_run(db_path)
+    client.post("/annotations", json={
+        "run_id": "r1", "evidence_id": "ev1",
+        "conclusion_path": "x", "note": "y"})
+    c = connect(db_path)
+    init_db(c)
+    run = repo.get_run(c, "r1")
+    assert run["status"] == "running"  # 未被任何方式改动
+    c.close()
