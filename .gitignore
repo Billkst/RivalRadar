@@ -10,6 +10,7 @@
 # Python 构建产物
 __pycache__/
 *.py[cod]
+*.egg-info/
 
 # 本地 SQLite(RIVALRADAR_DB 默认 rivalradar.db)
 *.db
