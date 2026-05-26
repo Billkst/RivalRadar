@@ -76,3 +76,31 @@ def test_update_run_status(conn):
     repo.create_run(conn, "r1", ["Notion"], ["pricing"])
     repo.update_run_status(conn, "r1", "done")
     assert repo.get_run(conn, "r1")["status"] == "done"
+
+
+def test_list_runs_orders_newest_first(conn):
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    repo.create_run(conn, "r2", ["Linear"], ["pricing"])
+    runs = repo.list_runs(conn)
+    assert [r["run_id"] for r in runs] == ["r2", "r1"]
+    assert runs[0]["status"] == "running"
+
+
+def test_annotation_roundtrip(conn):
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    aid = repo.insert_annotation(
+        conn, run_id="r1", evidence_id="ev1",
+        conclusion_path="competitors[0].swot.strengths[0]", note="此处存疑")
+    assert isinstance(aid, int) and aid > 0
+    rows = repo.list_annotations(conn, "r1")
+    assert len(rows) == 1
+    assert rows[0]["note"] == "此处存疑"
+    assert rows[0]["evidence_id"] == "ev1"
+
+
+def test_annotation_evidence_id_optional(conn):
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    repo.insert_annotation(conn, run_id="r1", evidence_id=None,
+                           conclusion_path="competitors[0]", note="整体可疑")
+    rows = repo.list_annotations(conn, "r1")
+    assert rows[0]["evidence_id"] is None

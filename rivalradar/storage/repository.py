@@ -123,3 +123,48 @@ def append_trace(conn: sqlite3.Connection, run_id: str, node: str, *,
 def list_trace(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     rows = conn.execute("SELECT * FROM trace WHERE run_id=? ORDER BY id", (run_id,))
     return [dict(r) for r in rows]
+
+
+# ---- runs list ----
+def list_runs(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM runs ORDER BY created_at DESC LIMIT ?", (limit,)).fetchall()
+    return [
+        {
+            "run_id": r["run_id"],
+            "competitors": json.loads(r["competitors"]),
+            "dimensions": json.loads(r["dimensions"]),
+            "status": r["status"],
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]
+
+
+# ---- annotations(spec §11.6 D10 桩,§17 人工质疑率)----
+def insert_annotation(conn: sqlite3.Connection, *, run_id: str,
+                      evidence_id: str | None, conclusion_path: str | None,
+                      note: str) -> int:
+    cur = conn.execute(
+        "INSERT INTO annotations (run_id, evidence_id, conclusion_path, note, created_at) "
+        "VALUES (?, ?, ?, ?, ?)",
+        (run_id, evidence_id, conclusion_path, note, _now()),
+    )
+    conn.commit()
+    return int(cur.lastrowid)
+
+
+def list_annotations(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT * FROM annotations WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
+    return [
+        {
+            "id": r["id"],
+            "run_id": r["run_id"],
+            "evidence_id": r["evidence_id"],
+            "conclusion_path": r["conclusion_path"],
+            "note": r["note"],
+            "created_at": r["created_at"],
+        }
+        for r in rows
+    ]

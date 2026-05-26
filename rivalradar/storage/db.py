@@ -44,6 +44,15 @@ CREATE TABLE IF NOT EXISTS trace (
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_run ON evidence(run_id);
 CREATE INDEX IF NOT EXISTS idx_trace_run ON trace(run_id);
+CREATE TABLE IF NOT EXISTS annotations (
+    id              INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id          TEXT NOT NULL,
+    evidence_id     TEXT,
+    conclusion_path TEXT,
+    note            TEXT NOT NULL,
+    created_at      TEXT NOT NULL
+);
+CREATE INDEX IF NOT EXISTS idx_annotations_run ON annotations(run_id);
 """
 
 
@@ -54,5 +63,6 @@ def connect(path: str) -> sqlite3.Connection:
 
 
 def init_db(conn: sqlite3.Connection) -> None:
+    conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)
     conn.commit()
