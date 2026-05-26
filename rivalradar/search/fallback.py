@@ -27,6 +27,9 @@ class FallbackSearch:
             try:
                 return p.search(query, max_results=max_results)
             except Exception as e:  # noqa: BLE001 — 故意兜所有 provider 异常以切换
+                # logger 写完整(server 内审计用);errors list 只存 type 不带 raw msg,
+                # 防 OpenAI/Tavily APIStatusError str() 含 Authorization header → 被
+                # AllProvidersFailedError 透传到 SSE 流泄露 key(Codex Critical #1)
                 logger.warning("search provider %s failed: %s", getattr(p, "name", "?"), e)
-                errors.append(f"{getattr(p, 'name', '?')}: {e}")
+                errors.append(f"{getattr(p, 'name', '?')}: {type(e).__name__}")
         raise AllProvidersFailedError("; ".join(errors))

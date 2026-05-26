@@ -106,8 +106,13 @@ async def graph_event_stream(
             repo.update_run_status(conn, run_id, "failed")
         except Exception:  # noqa: BLE001 — DB 写失败不能再 raise,只能继续往下 yield error
             pass
+        # 只暴露 type(e).__name__ 给客户端,**绝不**透传 str(e):
+        # OpenAI/Tavily SDK 的 APIStatusError str() 可能含 Authorization: Bearer <key>
+        # header(Codex Critical #1 + FastAPI 官方 handling-errors 强调"不直接转 exception
+        # str 给客户端,会泄露内部细节")。server log 已记完整 traceback(server-side 审计用)。
         yield {"event": "error",
-               "data": json.dumps({"error": str(e), "ts": _now()})}
+               "data": json.dumps({"error": f"pipeline error: {type(e).__name__}",
+                                   "ts": _now()})}
         return
     # done 携带终态 status,与 replay 路径对称(前端可用 onDone 一处取终态)
     run = repo.get_run(conn, run_id)
@@ -133,12 +138,17 @@ async def _replay_from_trace(
     yield {"event": "start",
            "data": json.dumps({"run_id": run_id, "replay": True, "ts": _now()})}
     for t in repo.list_trace(conn, run_id):
+        # 与 live 流 'node' event 同形状 `{node, summary:{...}, ts}`,前端可用同一
+        # 解析路径处理 live + replay(context7 调研:sse-starlette 不强 opinion event
+        # shape,application 级决策由 Lane F 消费便利度决定 → 统一更简)
         yield {"event": "trace",
                "data": json.dumps({
                    "node": t["node"],
-                   "input": t.get("input_summary", ""),
-                   "output": t.get("output_summary", ""),
-                   "latency_ms": t.get("latency_ms", 0),
+                   "summary": {
+                       "input": t.get("input_summary", ""),
+                       "output": t.get("output_summary", ""),
+                       "latency_ms": t.get("latency_ms", 0),
+                   },
                    "ts": t["ts"],
                })}
         if pacing > 0:

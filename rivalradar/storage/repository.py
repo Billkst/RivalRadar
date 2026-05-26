@@ -50,8 +50,10 @@ def update_run_degraded(conn: sqlite3.Connection, run_id: str, degraded: bool) -
 
 # ---- evidence ----
 def insert_evidence(conn: sqlite3.Connection, run_id: str, ev: Evidence) -> None:
+    # OR IGNORE:同 run 内重复 (id) 被 reducer 防过,这里是双保险防止意外
+    # IntegrityError 让 SSE 流崩(Codex 实测:重跑同 competitor+dim+url 会触发)
     conn.execute(
-        "INSERT INTO evidence (id, run_id, competitor, dimension, content, "
+        "INSERT OR IGNORE INTO evidence (id, run_id, competitor, dimension, content, "
         "source_url, source_title, language, fetched_at) "
         "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
         (ev.id, run_id, ev.competitor, ev.dimension, ev.content,

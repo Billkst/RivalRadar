@@ -106,8 +106,12 @@ def test_graph_event_stream_emits_error_and_clean_exits(tmp_path):
         _BoomGraph(), {}, {}, "r1", conn=c)))
     # clean exit:start + collect + error,**不应**有 done event
     assert events[0]["event"] == "start"
-    assert any(e["event"] == "error" and "upstream LLM down" in e["data"]
-               for e in events)
+    # ship round-2 修复:error event 含 type(e).__name__ 但**不**含 raw str(e)
+    # 防 OpenAI APIStatusError str() 泄露 Authorization Bearer key(Codex Critical #1)
+    error_evt = next(e for e in events if e["event"] == "error")
+    assert "RuntimeError" in error_evt["data"]
+    assert "upstream LLM down" not in error_evt["data"], \
+        "raw exception message leaked — re-introduces KEY leak risk"
     assert not any(e["event"] == "done" for e in events)
     # 关键 zombie-fix 断言:run 必须被标 failed,而非保留 'running'
     assert repo.get_run(c, "r1")["status"] == "failed"
@@ -150,6 +154,30 @@ def test_summarize_delta_unknown_node_passthrough():
     """未识别节点名只透传 node 名,不崩、不 KeyError。"""
     s = _summarize_delta("new_node_future", {"foo": "bar"})
     assert s == {"node": "new_node_future"}
+
+
+def test_replay_trace_event_uses_unified_summary_shape(tmp_path):
+    """ship round-2 (api-contract specialist CRITICAL):replay 'trace' event 必须
+    与 live 'node' event 同形状 `{node, summary:{...}, ts}`(context7 调研后决定:
+    sse-starlette 无 application 级 opinion,统一形状让前端单解析路径处理 live + replay,
+    Lane F DAG 动画消费便利度优先)。"""
+    c = connect(str(tmp_path / "shape.db"))
+    init_db(c)
+    repo.create_run(c, "r1", ["Notion"], ["pricing"])
+    repo.update_run_status(c, "r1", "done")
+    repo.append_trace(c, "r1", "collect", input_summary="targets=all",
+                      output_summary="+3", latency_ms=42)
+
+    events = asyncio.run(_collect(_replay_from_trace(c, "r1", pacing=0.0)))
+    trace_evt = next(e for e in events if e["event"] == "trace")
+    payload = json.loads(trace_evt["data"])
+    # 关键:必须是 summary 嵌套形状(与 live 'node' event 对齐),不是 flat shape
+    assert "summary" in payload, f"replay event missing summary nesting: {payload}"
+    assert "input" in payload["summary"]
+    assert "output" in payload["summary"]
+    assert "latency_ms" in payload["summary"]
+    # 旧 flat shape 不应再存在(老前端代码会取不到值)
+    assert "input" not in payload, "flat shape leaked — frontend dual-parsing risk"
 
 
 def test_replay_from_trace_no_trace_yields_only_start_done(tmp_path):

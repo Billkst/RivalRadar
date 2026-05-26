@@ -3,9 +3,13 @@
 """
 from __future__ import annotations
 
-from typing import Optional
+from typing import Annotated, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, StringConstraints
+
+
+# 复用类型别名:per-item 字符串长度上限,放 prompt + DB 都安全
+_BoundedStr = Annotated[str, StringConstraints(min_length=1, max_length=200)]
 
 
 class RunRequest(BaseModel):
@@ -14,10 +18,10 @@ class RunRequest(BaseModel):
     上限保护(防恶意/误用打爆 LLM + 搜索 API 配额):
     - competitors 最多 5 个(spec §3 "1-5 个竞品")
     - dimensions 最多 6 个(覆盖 CONTROLLED_DIMENSIONS 全集)
-    - 每项字符串最多 200 字符(防超长 prompt 注入面)
+    - 每项字符串 1-200 字符(防超长 prompt 注入面 + 空白字符串)
     """
-    competitors: list[str] = Field(min_length=1, max_length=5)
-    dimensions: list[str] = Field(min_length=1, max_length=6)
+    competitors: list[_BoundedStr] = Field(min_length=1, max_length=5)
+    dimensions: list[_BoundedStr] = Field(min_length=1, max_length=6)
 
 
 class RunSummary(BaseModel):

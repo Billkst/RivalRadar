@@ -12,7 +12,7 @@ CREATE TABLE IF NOT EXISTS runs (
     created_at  TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS evidence (
-    id           TEXT PRIMARY KEY,
+    id           TEXT NOT NULL,
     run_id       TEXT NOT NULL,
     competitor   TEXT NOT NULL,
     dimension    TEXT NOT NULL,
@@ -20,7 +20,10 @@ CREATE TABLE IF NOT EXISTS evidence (
     source_url   TEXT NOT NULL,
     source_title TEXT NOT NULL,
     language     TEXT NOT NULL,
-    fetched_at   TEXT NOT NULL
+    fetched_at   TEXT NOT NULL,
+    -- 复合 PK:同 (competitor|dim|url) 派生的 id 在多个 run 中各持一份(per-run snapshot)。
+    -- Codex 实测:旧 schema (id) 单列 PK + 重跑同 url → IntegrityError 让 SSE 流崩。
+    PRIMARY KEY (run_id, id)
 );
 CREATE TABLE IF NOT EXISTS analysis (
     run_id     TEXT PRIMARY KEY,

@@ -198,7 +198,9 @@ def test_post_run_422_returns_error_out_string_shape(stubbed_client):
 
 def test_post_run_emits_error_event_when_graph_crashes(stubbed_client, monkeypatch):
     """money shot 诚实失败:graph 跑崩时 SSE 必须发 error event 给客户端
-    (而非连接突然断掉,前端能显示失败原因)。"""
+    (而非连接突然断掉,前端能显示失败原因)。
+    ship round-2:error 只暴露 type(e).__name__,**不**透传 raw str(e)
+    (防 OpenAI APIStatusError str() 泄 Authorization Bearer key,Codex Critical #1)。"""
     def _boom(*a, **k):
         raise RuntimeError("boom in analyze")
     monkeypatch.setattr("rivalradar.graph.nodes.analyze", _boom)
@@ -208,8 +210,11 @@ def test_post_run_emits_error_event_when_graph_crashes(stubbed_client, monkeypat
     # SSE 协议头还是 200(streaming 本身不算 HTTP error)
     assert r.status_code == 200
     events = _parse_sse(r.content)
-    assert any(e.get("event") == "error" and "boom in analyze" in e.get("data", "")
-               for e in events), f"no error event in stream: {events}"
+    error_evt = next((e for e in events if e.get("event") == "error"), None)
+    assert error_evt is not None, f"no error event in stream: {events}"
+    assert "RuntimeError" in error_evt["data"]  # 含 type
+    assert "boom in analyze" not in error_evt["data"], \
+        "raw msg leaked — 重新引入 KEY 泄露面"
 
 
 def test_get_stream_replays_finished_run(stubbed_client, db_path):
@@ -270,6 +275,17 @@ def test_post_run_rejects_too_many_competitors(stubbed_client):
     防恶意/误用 POST 100 个竞品打爆 LLM + 搜索 API 配额(KEY 纪律间接面)。"""
     r = stubbed_client.post("/run",
                             json={"competitors": ["a"] * 10,  # 超 max_length=5
+                                  "dimensions": ["pricing"]})
+    assert r.status_code == 422
+    assert "competitors" in r.json()["detail"]
+
+
+def test_post_run_rejects_oversized_competitor_string(stubbed_client):
+    """ship round-2 (Codex High #3):per-item max_length=200 必须实际生效
+    (而非只在 docstring 写) — 200KB 的"竞品名"通过 list max_length=5 但仍能打爆 prompt。"""
+    huge = "X" * 1000  # 超 200 字符上限
+    r = stubbed_client.post("/run",
+                            json={"competitors": [huge],
                                   "dimensions": ["pricing"]})
     assert r.status_code == 422
     assert "competitors" in r.json()["detail"]

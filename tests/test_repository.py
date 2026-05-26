@@ -35,6 +35,25 @@ def test_evidence_roundtrip(conn):
     assert {e.id for e in repo.list_evidence(conn, "r1")} == {"e1", "e2"}
 
 
+def test_insert_evidence_same_id_across_runs_no_integrity_error(conn):
+    """ship round-2 (Codex Critical #2):evidence.id 派生自 (comp|dim|url),
+    多次跑同 competitor+dimension+url 必然撞同 id。旧 schema 单列 PRIMARY KEY (id)
+    会触 IntegrityError 让 SSE 流崩(Codex 实测复现)。
+    新 schema 复合 PRIMARY KEY (run_id, id) 让不同 run 各持一份 evidence 副本,
+    重跑无冲突;同 run 重插同 id 走 INSERT OR IGNORE 安全降级。"""
+    repo.create_run(conn, "r_a", ["Notion"], ["pricing"])
+    repo.create_run(conn, "r_b", ["Notion"], ["pricing"])
+    # run_a 和 run_b 都 insert 同一个 evidence id（重跑同 competitor+dim+url 的真实场景）
+    repo.insert_evidence(conn, "r_a", _evidence("ev_shared"))
+    repo.insert_evidence(conn, "r_b", _evidence("ev_shared"))  # 旧 schema 会 IntegrityError
+    # 两个 run 各自能查到 evidence
+    assert {e.id for e in repo.list_evidence(conn, "r_a")} == {"ev_shared"}
+    assert {e.id for e in repo.list_evidence(conn, "r_b")} == {"ev_shared"}
+    # 同 run 重插同 id 走 OR IGNORE,不报错,不重复
+    repo.insert_evidence(conn, "r_a", _evidence("ev_shared"))
+    assert len(repo.list_evidence(conn, "r_a")) == 1
+
+
 def test_get_missing_evidence_returns_none(conn):
     assert repo.get_evidence(conn, "nope") is None
 
