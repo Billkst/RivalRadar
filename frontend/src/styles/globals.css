@@ -1,0 +1,88 @@
+/* Tailwind v3 directives — order matters: base → components → utilities */
+@tailwind base;
+@tailwind components;
+@tailwind utilities;
+
+/* -----------------------------------------------------------------------------
+   DESIGN.md tokens — CSS variables.
+   Light by default; .dark on <html> swaps to the dark palette.
+   See DESIGN.md §Color for canonical hex values.
+   ----------------------------------------------------------------------------- */
+:root {
+  /* Light palette */
+  --bg: #f6f5f1;
+  --surface: #ffffff;
+  --surface-subtle: #f0efea;
+  --border: #d8d5cc;
+  --text-primary: #1e2428;
+  --text-muted: #667178;
+  --accent: #0f6b5f;
+  --accent-soft: #ddebe7;
+  --success: #237a4b;
+  --warning: #a96f00;
+  --error: #b23a36;
+  --info: #2f6f9f;
+  --evidence-highlight: #fff1a8;
+  --source-line: #c7a400;
+
+  /* Layout */
+  --rail-width: 208px;
+  --evidence-panel-min: 420px;
+  --evidence-panel-max: 520px;
+
+  /* Spacing scale (DESIGN.md base 8px; provides named aliases for inline use) */
+  --space-2xs: 2px;
+  --space-xs: 4px;
+  --space-sm: 8px;
+  --space-md: 16px;
+  --space-lg: 24px;
+  --space-xl: 32px;
+  --space-2xl: 48px;
+  --space-3xl: 64px;
+}
+
+.dark {
+  --bg: #141817;
+  --surface: #1c2220;
+  --surface-subtle: #242b28;
+  --border: #39423e;
+  --text-primary: #ecebe4;
+  --text-muted: #a8b0ab;
+  --accent: #4fb7a5;
+  --accent-soft: #173b35;
+  --success: #62ba80;
+  --warning: #d7a33d;
+  --error: #e06b67;
+  --info: #78aeda;
+  --evidence-highlight: #5a4b10;
+  --source-line: #d4b83f;
+}
+
+/* -----------------------------------------------------------------------------
+   Global base styles
+   ----------------------------------------------------------------------------- */
+html,
+body,
+#root {
+  height: 100%;
+}
+
+body {
+  background-color: var(--bg);
+  color: var(--text-primary);
+  font-family:
+    'IBM Plex Sans', 'IBM Plex Sans SC', 'PingFang SC', 'Microsoft YaHei', 'Noto Sans CJK SC',
+    'Source Han Sans SC', system-ui, sans-serif;
+  font-size: 15px;
+  line-height: 1.35;
+  /* DESIGN.md: tabular-nums 全局给指标和矩阵单元格 */
+  font-variant-numeric: tabular-nums;
+  -webkit-font-smoothing: antialiased;
+  -moz-osx-font-smoothing: grayscale;
+}
+
+/* DESIGN.md: 边框优先于阴影 — link/button default focus ring uses accent */
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 2px;
+}

@@ -1,0 +1,2 @@
+/* Entry point — actual tokens + Tailwind directives live in styles/globals.css */
+@import './styles/globals.css';
