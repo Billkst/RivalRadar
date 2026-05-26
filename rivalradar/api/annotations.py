@@ -7,7 +7,7 @@ from __future__ import annotations
 
 import sqlite3
 
-from fastapi import APIRouter, Depends, status
+from fastapi import APIRouter, Depends, HTTPException, status
 
 from rivalradar.api.deps import get_db_conn
 from rivalradar.api.schemas import AnnotationCreate, AnnotationOut
@@ -22,6 +22,9 @@ def post_annotation(
     body: AnnotationCreate,
     conn: sqlite3.Connection = Depends(get_db_conn),
 ) -> dict:
+    # 防孤儿 annotation:run_id 必须存在(否则 §17 人工质疑率统计被污染)
+    if repo.get_run(conn, body.run_id) is None:
+        raise HTTPException(404, "run not found")
     aid = repo.insert_annotation(
         conn,
         run_id=body.run_id,

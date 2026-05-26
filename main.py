@@ -42,8 +42,11 @@ def main():
         provider=_build_provider(),
     )
     port = int(os.getenv("RIVALRADAR_PORT", "8000"))
-    print(f"[RivalRadar] starting on http://0.0.0.0:{port}  (key configured: {bool(cfg.ark_api_key())})")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    # 默认绑 127.0.0.1 防 LAN 暴露(POST /run 无 auth + 无上限会被同网络用户烧 API 配额);
+    # 真要跨主机访问设 RIVALRADAR_HOST=0.0.0.0(知情前提)
+    host = os.getenv("RIVALRADAR_HOST", "127.0.0.1")
+    print(f"[RivalRadar] starting on http://{host}:{port}  (key configured: {bool(cfg.ark_api_key())})")
+    uvicorn.run(app, host=host, port=port, log_level="info")
 
 
 if __name__ == "__main__":

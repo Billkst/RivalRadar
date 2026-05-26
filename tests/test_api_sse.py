@@ -71,10 +71,14 @@ async def _collect(gen):
     return out
 
 
-def test_graph_event_stream_yields_start_node_done():
+def test_graph_event_stream_yields_start_node_done(tmp_path):
+    c = connect(str(tmp_path / "sse.db"))
+    init_db(c)
+    repo.create_run(c, "r1", ["Notion"], ["pricing"])
+    repo.update_run_status(c, "r1", "done")  # 让 done event 能读到终态
     events = asyncio.run(_collect(graph_event_stream(
         _StubGraph(), initial={}, config={"configurable": {"thread_id": "r1"}},
-        run_id="r1")))
+        run_id="r1", conn=c)))
     # 期望:start + 5 node events + done = 7 条
     assert events[0]["event"] == "start"
     assert json.loads(events[0]["data"])["run_id"] == "r1"
@@ -84,9 +88,9 @@ def test_graph_event_stream_yields_start_node_done():
     assert events[-1]["event"] == "done"
 
 
-def test_graph_event_stream_emits_error_and_clean_exits():
-    """graph 跑挂时:先 yield error 给客户端,然后 clean exit(不 re-raise),
-    让 sse-starlette task group 自然走优雅关停。"""
+def test_graph_event_stream_emits_error_and_clean_exits(tmp_path):
+    """graph 跑挂时:(1) 先 yield error 给客户端,然后 clean exit(不 re-raise);
+    (2) 把 run.status 标 'failed' 防 zombie run 永久卡 'running'(关键 ship 修复)。"""
     class _BoomGraph:
         def astream(self, _input, *, config, stream_mode):
             async def gen():
@@ -95,12 +99,34 @@ def test_graph_event_stream_emits_error_and_clean_exits():
                 yield  # unreachable
             return gen()
 
-    events = asyncio.run(_collect(graph_event_stream(_BoomGraph(), {}, {}, "r1")))
+    c = connect(str(tmp_path / "boom.db"))
+    init_db(c)
+    repo.create_run(c, "r1", ["Notion"], ["pricing"])
+    events = asyncio.run(_collect(graph_event_stream(
+        _BoomGraph(), {}, {}, "r1", conn=c)))
     # clean exit:start + collect + error,**不应**有 done event
     assert events[0]["event"] == "start"
     assert any(e["event"] == "error" and "upstream LLM down" in e["data"]
                for e in events)
     assert not any(e["event"] == "done" for e in events)
+    # 关键 zombie-fix 断言:run 必须被标 failed,而非保留 'running'
+    assert repo.get_run(c, "r1")["status"] == "failed"
+
+
+def test_graph_event_stream_done_event_carries_status(tmp_path):
+    """ship 修复:live 流 done event 必须含 status 字段(与 replay 路径对称),
+    前端可一处取终态,不再需 done 后再 GET /run/:id 拉详情。"""
+    c = connect(str(tmp_path / "done_status.db"))
+    init_db(c)
+    repo.create_run(c, "r1", ["Notion"], ["pricing"])
+    repo.update_run_status(c, "r1", "insufficient_evidence")
+    events = asyncio.run(_collect(graph_event_stream(
+        _StubGraph(), initial={}, config={"configurable": {"thread_id": "r1"}},
+        run_id="r1", conn=c)))
+    done = next(e for e in events if e["event"] == "done")
+    payload = json.loads(done["data"])
+    assert payload["status"] == "insufficient_evidence"
+    assert payload["run_id"] == "r1"
 
 
 def test_replay_from_trace_yields_trace_events(tmp_path):

@@ -263,3 +263,32 @@ def test_get_run_returns_degraded_true_when_persisted(db_path, client):
     body = r.json()
     assert body["status"] == "done"
     assert body["degraded"] is True  # 前端据此显示警示横幅(蕴含降级但 verdict=pass)
+
+
+def test_post_run_rejects_too_many_competitors(stubbed_client):
+    """ship 修复 — RunRequest.competitors 上限 5(spec §3 "1-5 个竞品"),
+    防恶意/误用 POST 100 个竞品打爆 LLM + 搜索 API 配额(KEY 纪律间接面)。"""
+    r = stubbed_client.post("/run",
+                            json={"competitors": ["a"] * 10,  # 超 max_length=5
+                                  "dimensions": ["pricing"]})
+    assert r.status_code == 422
+    assert "competitors" in r.json()["detail"]
+
+
+def test_list_runs_summary_includes_degraded_field(db_path, client):
+    """ship 修复 — RunSummary 含 degraded 字段(原 Lane E 盲点:只加到 RunDetail)。
+    /runs 列表的降级横幅 §11.5 依赖此字段,缺失会被 FastAPI response_model 静默剥除。"""
+    c = connect(db_path); init_db(c)
+    repo.create_run(c, "r_normal", ["Notion"], ["pricing"])
+    repo.update_run_status(c, "r_normal", "done")
+    repo.create_run(c, "r_degraded", ["Linear"], ["pricing"])
+    repo.update_run_status(c, "r_degraded", "done")
+    repo.update_run_degraded(c, "r_degraded", True)
+    c.close()
+
+    r = client.get("/runs")
+    assert r.status_code == 200
+    items = {x["run_id"]: x for x in r.json()}
+    # 关键:degraded 字段必须在 list 项里出现(否则 Pydantic response_model 剥掉)
+    assert items["r_normal"]["degraded"] is False
+    assert items["r_degraded"]["degraded"] is True

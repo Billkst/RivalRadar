@@ -67,13 +67,15 @@ async def graph_event_stream(
     initial: dict,
     config: dict,
     run_id: str,
+    *,
+    conn: sqlite3.Connection,
 ) -> AsyncIterator[dict]:
     """SSE 主流:start → 每节点 update → done(或 error → clean exit)。
 
     yield 出的 dict 给 sse-starlette EventSourceResponse,字段 'event'/'data'。
 
-    ⚠️ done event 只含 run_id + ts,**不含**终态 status(done/insufficient_evidence/degraded)。
-    前端 onDone 后应 GET /run/:id 拉详情,而非靠 done event 本身判定终态(动画与详情分离)。
+    `conn` 用于 (1) graph 崩溃时把 run.status 置为 "failed" 防 zombie run
+    永久卡在 "running",以及 (2) done event 携带终态 status 与 replay 路径对称。
 
     ⚠️ LangGraph **stream_mode="updates"**(默认 v1 行为)契约:chunk 形状是
     `{node_name: state_delta}`(逐 task 直接 yield),与 stream_events(version="v3")
@@ -98,11 +100,22 @@ async def graph_event_stream(
     # cancel_on_finish 触发的清理路径,必须让 cancel 直接退出生成器、不被 yield "error"
     # 拦截。**切勿改成 except BaseException** 会吞掉 cancel、导致孤儿任务堆积。
     except Exception as e:  # noqa: BLE001 — yield error 给客户端后 clean exit(不 re-raise)
+        # 关键:把 run 标 failed,否则任何 Tavily 429/Doubao 限流/解析错误会让
+        # runs.status 永久卡 "running",积累 zombie run 干扰统计 + dashboard 可读性
+        try:
+            repo.update_run_status(conn, run_id, "failed")
+        except Exception:  # noqa: BLE001 — DB 写失败不能再 raise,只能继续往下 yield error
+            pass
         yield {"event": "error",
                "data": json.dumps({"error": str(e), "ts": _now()})}
         return
+    # done 携带终态 status,与 replay 路径对称(前端可用 onDone 一处取终态)
+    run = repo.get_run(conn, run_id)
     yield {"event": "done",
-           "data": json.dumps({"run_id": run_id, "ts": _now()})}
+           "data": json.dumps({
+               "run_id": run_id,
+               "status": run["status"] if run else "unknown",
+               "ts": _now()})}
 
 
 async def _replay_from_trace(

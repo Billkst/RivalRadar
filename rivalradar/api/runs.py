@@ -45,7 +45,7 @@ def post_run(
     }
     config = {"configurable": {"thread_id": run_id}}
     return EventSourceResponse(
-        graph_event_stream(graph, initial, config, run_id),
+        graph_event_stream(graph, initial, config, run_id, conn=conn),
         ping=15,  # context7 验证的 keep-alive 默认,投影场景必备
     )
 

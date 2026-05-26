@@ -56,6 +56,18 @@ def test_post_annotation_rejects_empty_note(db_path, client):
     assert r.status_code == 422
 
 
+def test_post_annotation_404_when_run_does_not_exist(db_path, client):
+    """ship 修复 — 防孤儿 annotation:对不存在的 run_id 必须 404,
+    否则 §17 人工质疑率被未关联的 phantom 标注污染。"""
+    # 不 seed run,直接 POST
+    r = client.post("/annotations", json={
+        "run_id": "ghost_run", "evidence_id": None,
+        "conclusion_path": None, "note": "悬空标注",
+    })
+    assert r.status_code == 404
+    assert "run not found" in r.json()["detail"]
+
+
 def test_post_annotation_does_not_mutate_run_state(db_path, client):
     """§11.6 桩:只记日志、不写回 state、不重跑。"""
     _seed_run(db_path)

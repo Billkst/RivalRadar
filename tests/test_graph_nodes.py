@@ -237,6 +237,28 @@ def test_finalize_exhausted_analyze_becomes_degraded(conn):
     assert out["status"] == "degraded"
 
 
+def test_qc_node_degraded_sticky_across_rounds(conn, monkeypatch):
+    """ship 修复 — degraded 必须 sticky OR 累积:round 1 entailment 降级,
+    round 2 entailment 成功,终态 state.degraded 必须仍为 True(不能被 round 2 overwrite)。
+    否则 finalize 把 db.degraded 写 False,前端 §11.5 警示横幅消失、对用户隐瞒降级事实。"""
+    # round 1: entailment boom → local degraded=True
+    def _boom(*a, **k):
+        raise RuntimeError("round 1 rate limit")
+    monkeypatch.setattr(qc, "check_entailment", _boom)
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    node = make_qc_node(conn=conn, client=None, model="m")
+    base = {"analysis": _full_clean_analysis().model_dump(),
+            "evidence": _evidence_all_dims(), "retry_count": 0}
+    r1 = node(base, _CFG)
+    assert r1["degraded"] is True  # round 1 降级 ✓
+
+    # round 2: entailment 成功 — 但 prior state.degraded=True 必须 sticky
+    monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
+    r2 = node({**base, "degraded": True, "qc_result": r1["qc_result"]}, _CFG)
+    assert r2["degraded"] is True, \
+        "BUG: degraded 被 round 2 成功 overwrite 为 False → 前端横幅消失"
+
+
 def test_finalize_persists_state_degraded_with_pass_verdict(conn):
     """state.degraded=True 但 verdict=pass:db.runs.degraded 必须被持久化为 True。
 

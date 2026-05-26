@@ -96,14 +96,18 @@ def make_qc_node(*, conn, client, model):
         issues = qc.check_traceability(analysis, evidence)
         issues += qc.check_ontology(analysis, evidence)
         issues += qc.check_coverage(analysis)
-        degraded = False
+        local_degraded = False
         try:
             # TODO(Lane E/Day-4): 多竞品时 check_entailment 调用数=结论数,可并行/抽样降本(spec §13 ⑤)
             issues += qc.check_entailment(analysis, evidence, client=client, model=model)
         except Exception as e:  # noqa: BLE001 — 蕴含是尽力而为辅助闸,任何失败(解析/网络/限流)都降级,绝不崩整图(必办项①/spec §5)
-            degraded = True
+            local_degraded = True
             append_trace(conn, run_id, "qc",
-                         output_summary=f"entailment degraded: {e}")
+                         output_summary=f"entailment degraded: {str(e)[:500]}")
+        # degraded sticky OR 累积:一旦任何一轮发生蕴含降级,持续标记到 finalize
+        # (而非每轮覆盖)— 防止 round 1 降级 / round 2 成功 → 终态 degraded=False
+        # 让前端 §11.5 警示横幅消失、对用户隐瞒"曾发生过降级"的事实
+        degraded = bool(state.get("degraded", False)) or local_degraded
         verdict = qc.decide_verdict(issues)
         result = QCResult(verdict=verdict, issues=issues)
         prior = state.get("qc_result")
