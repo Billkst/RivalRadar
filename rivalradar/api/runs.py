@@ -11,11 +11,12 @@ from rivalradar.api.deps import (
     get_db_conn, get_doubao_client, get_provider, get_as_of, get_max_retries,
 )
 from rivalradar.api.schemas import RunDetail, RunRequest, RunSummary
-from rivalradar.api.sse import graph_event_stream
+from rivalradar.api.sse import graph_event_stream, _replay_from_trace
 from rivalradar.config import doubao_model
 from rivalradar.graph.build import build_research_graph
 from rivalradar.storage import repository as repo
 from rivalradar.storage.repository import create_run
+from rivalradar.storage.repository import get_run as _get_run
 
 router = APIRouter(tags=["runs"])
 
@@ -46,6 +47,20 @@ def post_run(
     return EventSourceResponse(
         graph_event_stream(graph, initial, config, run_id),
         ping=15,  # context7 验证的 keep-alive 默认,投影场景必备
+    )
+
+
+@router.get("/stream/{run_id}")
+def get_stream(
+    run_id: str,
+    conn: sqlite3.Connection = Depends(get_db_conn),
+) -> EventSourceResponse:
+    """从 trace 表回放已结束 run 的事件流(§11.4 'Play 回放')。"""
+    if _get_run(conn, run_id) is None:
+        raise HTTPException(404, "run not found")
+    return EventSourceResponse(
+        _replay_from_trace(conn, run_id),
+        ping=15,
     )
 
 

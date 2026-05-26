@@ -210,3 +210,30 @@ def test_post_run_emits_error_event_when_graph_crashes(stubbed_client, monkeypat
     events = _parse_sse(r.content)
     assert any(e.get("event") == "error" and "boom in analyze" in e.get("data", "")
                for e in events), f"no error event in stream: {events}"
+
+
+def test_get_stream_replays_finished_run(stubbed_client, db_path):
+    """先 POST /run 让 trace 落库,再 GET /stream/:run 从 trace 表回放。"""
+    r = stubbed_client.post("/run",
+                            json={"competitors": ["Notion"],
+                                  "dimensions": list(CONTROLLED_DIMENSIONS)})
+    events = _parse_sse(r.content)
+    run_id = json.loads(events[-1]["data"])["run_id"]
+
+    r2 = stubbed_client.get(f"/stream/{run_id}")
+    assert r2.status_code == 200
+    replay = _parse_sse(r2.content)
+    assert replay[0]["event"] == "start"
+    assert json.loads(replay[0]["data"])["replay"] is True
+    trace_events = [e for e in replay if e["event"] == "trace"]
+    assert len(trace_events) > 0
+    nodes = [json.loads(e["data"])["node"] for e in trace_events]
+    for n in ("collect", "analyze", "write", "qc", "finalize"):
+        assert n in nodes, f"node {n} missing in replay; got {nodes}"
+    assert replay[-1]["event"] == "done"
+
+
+def test_get_stream_404_for_unknown_run(client):
+    """没种 run + 没 POST 过,纯空 db,GET 不存在的 run_id 必须 404。"""
+    r = client.get("/stream/no_such_run")
+    assert r.status_code == 404
