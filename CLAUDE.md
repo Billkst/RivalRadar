@@ -115,3 +115,61 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - `/unfreeze` — 解除 /freeze 的目录限制
 - `/gstack-upgrade` — 升级 gstack 到最新版
 - `/learn` — 管理项目的"学习记录"
+
+## Design System
+
+做任何视觉 / UI 决策前,先读 `DESIGN.md`。字体、配色、间距、布局、动效、美学方向都在那里定义。
+未经用户明确同意不得偏离。QA 时标记任何不符合 `DESIGN.md` 的代码。
+
+## Testing
+
+**测试命令:**
+
+```bash
+.venv/bin/python -m pytest
+```
+
+198 个测试,约 7 秒通过。覆盖率 94%(58/62 路径)。
+
+**测试哲学:**
+
+- 目标 100% 路径覆盖。每个 bug 修复必须先写一个能复现 bug 的测试,再让测试通过。
+- 分支必须两条都测:成功路径 + 失败路径,缺一不可。
+- 新功能先写测试(TDD),不允许"以后补测试"。
+- spike 文件(真打外部 API)放 `spikes/` 目录,不跑进 `pytest`。
+
+**测试框架:**
+
+- `pytest` + `pytest-asyncio`(asyncio_mode = auto)
+- `monkeypatch` 打桩外部调用(Doubao、Tavily、Exa)
+- `tmp_path` 隔离 SQLite db 文件,防测试间污染
+- `bool(config.X)` 检查 key 是否配置,而非读取 key 值本身(KEY 纪律)
+
+**测试目录布局:**
+
+```
+tests/
+  test_config.py           # 配置层(环境变量读取)
+  test_db.py               # SQLite schema + repository CRUD
+  test_doubao_schema.py    # Pydantic schema + $ref 内联
+  test_structured_call.py  # Doubao function-calling 包装器
+  test_collect_pipeline.py # 采集管线(并行 + 速率限制)
+  test_analyst_agent.py    # Analyst Agent 结构化抽取
+  test_writer_agent.py     # Writer Agent Markdown 渲染
+  test_qc_agent.py         # QC Agent 闸 + verdict
+  test_graph_build.py      # LangGraph StateGraph 构建
+  test_api_app.py          # FastAPI app 工厂 + 健康检查
+  test_api_runs.py         # POST /run + GET /runs + GET /run/:id
+  test_api_sse.py          # SSE 推流 + replay
+  test_api_reads.py        # evidence / analysis / report / trace 端点
+  test_api_annotations.py  # POST /annotations + run_id 存在校验
+  test_api_concurrent.py   # WAL 并发写写安全
+  ...                      # 其他单元 + 集成测试
+```
+
+**已知测试缺口(见 TODOS.md):**
+
+- eval 框架(LLM 输出质量自动评测)
+- 高强度并发写写(`busy_timeout` 竞争)
+- SDK timeout / 熔断路径
+- Lane F 前端 E2E 测试

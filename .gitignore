@@ -1,0 +1,22 @@
+# gstack 本地工具状态
+.gstack/
+
+# 密钥 / 环境变量(Doubao API key 等)
+.env
+.env.*
+!.env.example
+.venv/
+
+# Python 构建产物
+__pycache__/
+*.py[cod]
+*.egg-info/
+
+# 本地 SQLite(RIVALRADAR_DB 默认 rivalradar.db)
+*.db
+
+# 编辑器本地历史(可能含 .env 快照 → 绝不入库,防 key 泄露)
+.history/
+
+# 用户原始需求材料(是否纳入 git 由用户决定;默认不入库,防误 add)
+原始材料.md
