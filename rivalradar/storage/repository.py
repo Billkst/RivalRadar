@@ -59,6 +59,25 @@ def mark_run_failed(conn: sqlite3.Connection, run_id: str) -> bool:
     return cursor.rowcount > 0
 
 
+def mark_run_cancelled(conn: sqlite3.Connection, run_id: str) -> bool:
+    """把 'running' 状态的 run 标 'cancelled'(CAS 同 mark_run_failed,F4 修订)。
+
+    场景:user POST /run/:id/cancel,backend task.cancel() 中断 in-flight LLM 同时
+    此函数持久化 status='cancelled' — 后续 GET /run/:id / GET /stream/:id 返回
+    cancelled 让前端切 cancelled UI(也供 partial 状态聚合用)。
+
+    CAS 防覆盖:已 finalize 到 done / insufficient_evidence / failed 的 run 不被
+    cancelled 覆盖(timing race:user 点 cancel 时 run 刚好 finalize 完;CAS 只
+    在 status='running' 时更新)。
+    """
+    cursor = conn.execute(
+        "UPDATE runs SET status='cancelled' WHERE run_id=? AND status='running'",
+        (run_id,),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
 def update_run_degraded(conn: sqlite3.Connection, run_id: str, degraded: bool) -> None:
     """持久化「蕴含降级」标志(Lane D state["degraded"] → 落 SQLite,spec §11.5 横幅依赖)。"""
     conn.execute("UPDATE runs SET degraded=? WHERE run_id=?",

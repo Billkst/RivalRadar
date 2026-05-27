@@ -2,6 +2,7 @@ import * as React from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Loader2, Play, Plus } from 'lucide-react'
 import { fetchRuns } from '@/lib/api'
+import { dimensionLabel } from '@/lib/dimensions'
 import { useSSE } from '@/hooks/useSSE'
 import { CONTROLLED_DIMENSIONS, type RunSummary } from '@/types/api'
 import { Button } from '@/components/ui/button'
@@ -119,7 +120,7 @@ function CreateRunForm() {
                       className="sr-only"
                       disabled={submitting}
                     />
-                    {dim}
+                    {dimensionLabel(dim)}
                   </label>
                 )
               })}

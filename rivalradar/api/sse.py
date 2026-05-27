@@ -25,6 +25,17 @@ from rivalradar.storage import repository as repo
 logger = logging.getLogger(__name__)
 
 
+# ── F4 修订:cancel 真中断 ─────────────────────────────────────────────────
+# 全局 SSE 生成器 task 注册表,key = run_id。POST /run/{id}/cancel 通过这查找
+# task 并调 task.cancel(),抛 CancelledError 到生成器执行栈,中断 in-flight
+# `await llm_client.chat.create(...)` / `await provider.search(...)` —— sqlite
+# flag 只在 step 之间生效(等 60-120s),无法切断网络层 await。
+#
+# in-memory 不持久化(进程崩了 task 也没了 OK);cancelled 状态由
+# storage.repository.mark_run_cancelled CAS 写入 sqlite,供 GET /run/:id 取。
+_ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
+
+
 def _now() -> str:
     return datetime.now(timezone.utc).isoformat()
 
@@ -86,49 +97,64 @@ async def graph_event_stream(
     返回值与本实现都按 v1 updates 契约对齐。**切勿改成 stream_events 或 v2/v3
     包装**(会让前端 DAG 整套节点-名 → 动画的对应关系断裂)。
     """
-    yield {"event": "start",
-           "data": json.dumps({"run_id": run_id, "ts": _now()})}
+    # F4 修订:注册当前 ASGI generator task 到 _ACTIVE_RUN_TASKS,让
+    # POST /run/{id}/cancel 能 task.cancel() 中断 in-flight LLM。
+    # `asyncio.current_task()` 在 async generator 内拿到的是 sse-starlette
+    # 拉这个 body_iterator 的那个 ASGI task—— cancel 它会顺着 await 链中断
+    # `graph.astream(...)` 内部正在 await 的 LLM/network call。
+    current = asyncio.current_task()
+    if current is not None:
+        _ACTIVE_RUN_TASKS[run_id] = current
     try:
-        async for chunk in graph.astream(initial, config=config,
-                                          stream_mode="updates"):
-            for node_name, delta in chunk.items():
-                yield {"event": "node",
-                       "data": json.dumps({
-                           "node": node_name,
-                           "summary": _summarize_delta(node_name, delta),
-                           "ts": _now(),
-                       })}
-    # 注意:**不**捕获 asyncio.CancelledError(BaseException 子类,不入 Exception
-    # 分支)—— 这是 sse-starlette task group 在客户端断连时通过 _listen_for_disconnect
-    # cancel_on_finish 触发的清理路径,必须让 cancel 直接退出生成器、不被 yield "error"
-    # 拦截。**切勿改成 except BaseException** 会吞掉 cancel、导致孤儿任务堆积。
-    except Exception as e:  # noqa: BLE001 — yield error 给客户端后 clean exit(不 re-raise)
-        # 先把完整 traceback 写 server log(运维必须能 debug,与下面 sanitize 配对)
-        logger.exception("graph pipeline error for run %s", run_id)
-        # 关键 1:用 mark_run_failed CAS 把 'running' 标 'failed',但**绝不覆盖**已 finalize
-        # 的 done/insufficient_evidence/degraded — 防 finalize 部分完成后被覆盖(reviewer
-        # adversarial 9/10 揪到的 ship round-2 引入的 race)
+        yield {"event": "start",
+               "data": json.dumps({"run_id": run_id, "ts": _now()})}
         try:
-            if not repo.mark_run_failed(conn, run_id):
-                logger.info("run %s already in terminal state, not overwriting", run_id)
-        except Exception as db_err:  # noqa: BLE001 — DB 写失败不能再 raise(SSE 必须 clean exit)
-            logger.warning("failed to mark run %s as failed: %s",
-                           run_id, type(db_err).__name__)
-        # 关键 2:只暴露 type(e).__name__ 给客户端,**绝不**透传 str(e):
-        # OpenAI/Tavily SDK 的 APIStatusError str() 可能含 Authorization: Bearer <key>
-        # header(Codex Critical #1 + FastAPI 官方 handling-errors 强调"不直接转 exception
-        # str 给客户端,会泄露内部细节")。完整 traceback 已上面 logger.exception 落 server log。
-        yield {"event": "error",
-               "data": json.dumps({"error": f"pipeline error: {type(e).__name__}",
-                                   "ts": _now()})}
-        return
-    # done 携带终态 status,与 replay 路径对称(前端可用 onDone 一处取终态)
-    run = repo.get_run(conn, run_id)
-    yield {"event": "done",
-           "data": json.dumps({
-               "run_id": run_id,
-               "status": run["status"] if run else "unknown",
-               "ts": _now()})}
+            async for chunk in graph.astream(initial, config=config,
+                                              stream_mode="updates"):
+                for node_name, delta in chunk.items():
+                    yield {"event": "node",
+                           "data": json.dumps({
+                               "node": node_name,
+                               "summary": _summarize_delta(node_name, delta),
+                               "ts": _now(),
+                           })}
+        # 注意:**不**捕获 asyncio.CancelledError(BaseException 子类,不入 Exception
+        # 分支)—— 这是 sse-starlette task group 在客户端断连时通过 _listen_for_disconnect
+        # cancel_on_finish 触发的清理路径,也是 F4 POST /cancel 通过 _ACTIVE_RUN_TASKS
+        # task.cancel() 触发的中断路径——两者都必须让 cancel 直接退出生成器、不被
+        # yield "error" 拦截。**切勿改成 except BaseException** 会吞掉 cancel、导致
+        # 孤儿任务堆积 + cancel 反馈丢失。
+        except Exception as e:  # noqa: BLE001 — yield error 给客户端后 clean exit(不 re-raise)
+            # 先把完整 traceback 写 server log(运维必须能 debug,与下面 sanitize 配对)
+            logger.exception("graph pipeline error for run %s", run_id)
+            # 关键 1:用 mark_run_failed CAS 把 'running' 标 'failed',但**绝不覆盖**已 finalize
+            # 的 done/insufficient_evidence/degraded — 防 finalize 部分完成后被覆盖(reviewer
+            # adversarial 9/10 揪到的 ship round-2 引入的 race)
+            try:
+                if not repo.mark_run_failed(conn, run_id):
+                    logger.info("run %s already in terminal state, not overwriting", run_id)
+            except Exception as db_err:  # noqa: BLE001 — DB 写失败不能再 raise(SSE 必须 clean exit)
+                logger.warning("failed to mark run %s as failed: %s",
+                               run_id, type(db_err).__name__)
+            # 关键 2:只暴露 type(e).__name__ 给客户端,**绝不**透传 str(e):
+            # OpenAI/Tavily SDK 的 APIStatusError str() 可能含 Authorization: Bearer <key>
+            # header(Codex Critical #1 + FastAPI 官方 handling-errors 强调"不直接转 exception
+            # str 给客户端,会泄露内部细节")。完整 traceback 已上面 logger.exception 落 server log。
+            yield {"event": "error",
+                   "data": json.dumps({"error": f"pipeline error: {type(e).__name__}",
+                                       "ts": _now()})}
+            return
+        # done 携带终态 status,与 replay 路径对称(前端可用 onDone 一处取终态)
+        run = repo.get_run(conn, run_id)
+        yield {"event": "done",
+               "data": json.dumps({
+                   "run_id": run_id,
+                   "status": run["status"] if run else "unknown",
+                   "ts": _now()})}
+    finally:
+        # F4: 清理 _ACTIVE_RUN_TASKS 防 leak —— 无论 graph 正常结束 / Exception
+        # clean exit / CancelledError bubble out 都执行。pop with default 防 KeyError。
+        _ACTIVE_RUN_TASKS.pop(run_id, None)
 
 
 async def _replay_from_trace(

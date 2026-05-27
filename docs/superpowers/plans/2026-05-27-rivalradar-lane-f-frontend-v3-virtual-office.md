@@ -121,6 +121,36 @@ plan v2 设计 35% money shot = "实时 DAG 4 节点 + retry 弧",代码层 Task
 
 (注:动物 + 名字 + persona 是 P1 决策,plan v3 propose,user review 时定)
 
+### 5 User-Visible UI State Spec(D17,Epic 0.0b)
+
+5 状态覆盖 RunPage 全 lifecycle,UI 决不留空。
+
+| State | Trigger | 4 Agent 状态 | 中央区域 | 主操作 | DESIGN.md 元素 |
+|---|---|---|---|---|---|
+| **loading** | POST /run 后等待 SSE start event | 4 agent 都 idle 坐工位 | 顶部 16px progress bar "正在创建调研..." | 灰 disabled CancelButton | `--accent` progress + IBM Plex Sans 13px |
+| **empty** | 第一次打开 /run/:id 无 SSE / 直链 invalid id | 4 agent 都 idle 坐工位 | 中央占位 "等待你提交调研" + "回到调研列表" link | `→ /runs` button | `--text-muted` 15px + accent CTA |
+| **error** | SSE error event(LLM 5xx / Tavily down / Doubao timeout) | 全 agent warning state(`--seat-N` opacity → `--warning`) | 红 banner "agent 网络异常 · [retry]" + 出错 agent SpeechBubble 显示具体错误 | "重试" button | `--error` banner + `--warning` agent overlay |
+| **cancelled** | POST /run/:id/cancel + SSE 收到 cancelled event | 全 agent 立刻停动作(切 idle,无 typing) | 中央 "已停止 · 已收集 N 条证据" + 引导"新调研" / "查看部分结果" | 2 button | `--text-muted` 15px + accent CTA |
+| **partial** | 部分 agent done 部分 running(正常进行中) | done agent 切 idle 但保留最后 SpeechBubble narrative;running agent 保 working 动画 | LiveFeedPanel 继续 scroll | running CancelButton + done agent 头像 ✓ chip | done overlay ✓ `--success` chip + running `--seat-N` highlight |
+
+**实装范围(Epic 4.x)**:VirtualOfficeView + AgentTeamRoster 共用 `UIState` enum (`'loading' | 'empty' | 'error' | 'cancelled' | 'partial'`)+ runStore selector `deriveUIState(store)` + 每 state 一段 JSX branch。约 30 min 实装。
+
+### Accessibility Baseline(D18,Epic 0.0c)
+
+不做完整 mobile 支持(D18 决策 B),只保 keyboard + ARIA + 对比度 baseline。
+
+| Domain | 要求 | 实施 | 验证 |
+|---|---|---|---|
+| **Tab 顺序** | CancelButton → AgentCharacter ×4(z-order 左下/左上/右上/右下)→ ReportSheet toggle → DAG tab → AgentTeamRoster ×4 → footer | `tabIndex={0}` 显式标 + `:focus-visible` accent ring 2px | 手测 Tab 顺序 + visual ring 清晰 |
+| **Enter** | AgentCharacter Enter → 展开 SpeechBubble 完整 narrative drawer;ReportSheet Enter = 切 expand/collapse;CancelButton Enter = cancel API | `onKeyDown={(e) => e.key === 'Enter' && handler()}` 各 component | 键盘 Enter = 鼠标 click 等效 |
+| **Escape** | running 中 Escape = CancelButton.click()(快捷停止);ReportSheet expanded 时 Escape = collapse | RunPage 顶层 useEffect `window.addEventListener('keydown', handleEsc)` | 键盘 Escape 行为符合用户心智 |
+| **ARIA landmarks** | `<header>` / `<nav role="navigation">` AgentTeamRoster / `<main role="main">` Office / `<aside role="complementary">` LiveFeedPanel / `<footer>` | Layout.tsx 顶层 5 landmark + RunPage 子组件继承 | screen reader rotor 列出 5 个 landmark |
+| **ARIA labels** | AgentCharacter `aria-label="${name} ${role} · ${state}"`;CancelButton `aria-label="停止当前调研"`;ReportSheet `aria-expanded={open}` | 各 component prop | screen reader 念出语义化标签 |
+| **对比度** | text-primary on bg ≥ 7:1(AAA);text-muted on bg ≥ 4.5:1(AA);accent UI 元素 on surface ≥ 3:1(AA) | DESIGN.md 24 vars 已满足;office tokens(`--seat-N` on `--office-bg`)需重测 | Chrome DevTools 取色 + WCAG calculator |
+| **Mobile fallback** | Layout.tsx ≤ 768px 不坍(三栏改单栏 stack,Office 居中 fit viewport,LiveFeed/AgentTeam collapsible)| Tailwind `md:grid-cols-3 grid-cols-1` + `md:flex flex-col` | DevTools 切 iPhone 14 viewport 不出现横滚 |
+
+**实装范围**:Epic 1.x Layout.tsx ARIA 改造(15 min)+ Epic 3.x AgentCharacter / SpeechBubble / CancelButton 加 ARIA props(15 min)+ Day-5 上午 a11y manual smoke test(已计入 Day-5 check-in)。约 30 min 实装。
+
 ---
 
 ## Agent 抽象层 Design

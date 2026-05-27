@@ -2,6 +2,7 @@ import * as React from 'react'
 import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import { ApiError, fetchRun } from '@/lib/api'
+import { dimensionLabel } from '@/lib/dimensions'
 import { useSSE } from '@/hooks/useSSE'
 import { useRunStore } from '@/stores/runStore'
 import type { RunDetail } from '@/types/api'
@@ -10,6 +11,7 @@ import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { DagCanvas } from '@/components/dag/DagCanvas'
 import { DagDrawer } from '@/components/dag/DagDrawer'
 import { QCIssuePanel } from '@/components/QCIssuePanel'
+import { CancelButton } from '@/components/office/CancelButton'
 import {
   ComparisonMatrixRowPlaceholder,
   CompetitorOverviewPlaceholder,
@@ -63,12 +65,15 @@ export function RunPage() {
 
   return (
     <div className="space-y-4">
-      <Button variant="ghost" size="sm" asChild>
-        <Link to="/runs" className="gap-1">
-          <ArrowLeft className="h-3 w-3" />
-          返回列表
-        </Link>
-      </Button>
+      <div className="flex items-center justify-between gap-2">
+        <Button variant="ghost" size="sm" asChild>
+          <Link to="/runs" className="gap-1">
+            <ArrowLeft className="h-3 w-3" />
+            返回列表
+          </Link>
+        </Button>
+        {run_id && <CancelButton runId={run_id} />}
+      </div>
 
       <Card>
         <CardHeader>
@@ -97,10 +102,14 @@ export function RunPage() {
                 ))}
               </div>
               <div>
-                <span className="text-xs text-text-muted">维度:</span> {run.dimensions.join(' · ')}
+                <span className="text-xs text-text-muted">维度:</span>{' '}
+                {run.dimensions.map(dimensionLabel).join(' · ')}
               </div>
               <div>
-                <span className="text-xs text-text-muted">状态:</span> {run.status}
+                <span className="text-xs text-text-muted">状态:</span>{' '}
+                {/* 0.3 修订:store live status 优先(SSE 已 done 但 fetchRun stale 'running'),
+                    fallback fetchRun.status(初始化/直链刷新时 store 还 idle)。 */}
+                {storeRunId === run_id && storeStatus !== 'idle' ? storeStatus : run.status}
                 {run.degraded && <span className="ml-2 text-warning">· 降级</span>}
               </div>
               <div>

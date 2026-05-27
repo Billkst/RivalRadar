@@ -74,3 +74,41 @@ class TraceEntry(BaseModel):
 class ErrorOut(BaseModel):
     """404/422 等错误统一形状。"""
     detail: str
+
+
+# ── SSE event v2 schema(plan v3.2 §5 — Epic 0.7)─────────────────────────
+# v2 6 类 event:start / node / progress(NEW)/ chunk(NEW)/ error / done。
+# start / node / error / done / cancelled 已在 sse.py 直接 yield dict;本节
+# 给出 progress + chunk 的 type-safe schema 让 Epic 2 backend agent 发时
+# 校验 payload 形状,sse.py forward 时直接 model_dump_json()。
+#
+# Frontend mirror 在 frontend/src/types/api.ts(Epic 1.7,Day-1 下午加)。
+
+
+class SSEProgressData(BaseModel):
+    """progress event payload — 节点内 step-level 进度(plan v3.2 §5)。
+
+    场景:agent 在一个节点内多步推进("正在搜索 Notion pricing" → "已抽取
+    3/7 feature"),评委 5 秒看到 agent 在做什么具体动作。Backend agent 通过
+    emit("progress", {...}) yield,sse.py forward 到 SSE 流给前端 LiveFeedPanel。
+    """
+    agent_id: str                    # AGENTS hardcode id: collector/analyst/writer/qc
+    step: str                        # 节点内 step 名:search/extract/write/validate
+    summary: str                     # 用户可见 narrative(中文已 i18n):"夜枭正在搜索 Notion"
+    metric: dict[str, int] | None = None  # 可选进度 metric:{"current":3,"total":7}
+    ts: str                          # ISO8601
+
+
+class SSEChunkData(BaseModel):
+    """chunk event payload — LLM 字符 stream(plan v3.2 §5,reasoning typing 效果)。
+
+    场景:reasoning step / narrative writing 时 LLM stream=True,sse.py forward
+    每个 delta chunk 给前端,前端 typingStore(D7 throttle window 50 + 16ms batch
+    防爆炸)累积渲染 SpeechBubble + LiveFeedPanel typing 光标动画。
+
+    Forward 不限速,~30-50 chunk/s 是典型 LLM 输出节奏。
+    """
+    agent_id: str                    # AGENTS hardcode id
+    step: str                        # thinking / drafting / reasoning
+    delta: str                       # LLM 增量 token(几个字符)
+    ts: str                          # ISO8601

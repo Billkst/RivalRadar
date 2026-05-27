@@ -73,3 +73,14 @@ export const fetchTrace = (runId: string) => jsonFetch<TraceEntry[]>(`/trace/${r
 // ─── Annotations ──────────────────────────────────────────────────────────
 export const createAnnotation = (payload: AnnotationCreate) =>
   jsonFetch<AnnotationOut>('/annotations', { method: 'POST', body: JSON.stringify(payload) })
+
+// ─── Cancel (F4 修订:真中断 in-flight LLM) ─────────────────────────────
+// POST /run/:id/cancel — backend task.cancel() 中断 in-flight LLM/network
+// + CAS mark run cancelled。前端 F4 mitigation 不必 await 此响应即可切 UI。
+export interface CancelRunResponse {
+  run_id: string
+  cancelled: boolean      // 是否实际 cancel 了 in-flight task
+  db_cancelled: boolean   // 是否实际写了 cancelled 状态(CAS)
+}
+export const cancelRun = (runId: string) =>
+  jsonFetch<CancelRunResponse>(`/run/${runId}/cancel`, { method: 'POST' })

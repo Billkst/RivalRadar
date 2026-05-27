@@ -11,7 +11,7 @@ from rivalradar.api.deps import (
     get_db_conn, get_doubao_client, get_provider, get_as_of, get_max_retries,
 )
 from rivalradar.api.schemas import RunDetail, RunRequest, RunSummary
-from rivalradar.api.sse import graph_event_stream, _replay_from_trace
+from rivalradar.api.sse import _ACTIVE_RUN_TASKS, _replay_from_trace, graph_event_stream
 from rivalradar.config import doubao_model
 from rivalradar.graph.build import build_research_graph
 from rivalradar.storage import repository as repo
@@ -79,3 +79,34 @@ def get_run(run_id: str,
     # 兼容种数据(只 update_run_status 没经 finalize 的路径,如 fixture 直接造的)
     r["degraded"] = r["degraded"] or r["status"] == "degraded"
     return r
+
+
+@router.post("/run/{run_id}/cancel")
+def cancel_run(
+    run_id: str,
+    conn: sqlite3.Connection = Depends(get_db_conn),
+) -> dict:
+    """F4 修订:真中断 in-flight LLM stream + 持久化 cancelled 状态。
+
+    实施:
+      1. 从 _ACTIVE_RUN_TASKS 查 SSE 生成器 task,call task.cancel() 抛 CancelledError
+         到生成器执行栈,顺着 await 链中断 in-flight `await llm.chat.create(...)` /
+         `await provider.search(...)`(sqlite flag 只在 step 间生效,无法切网络层 await)
+      2. DB CAS `mark_run_cancelled('running' → 'cancelled')`,即使 task 已结束也尝试
+         (timing race:user 点 cancel 时 run 刚好 finalize 完;CAS 保证不覆盖终态)
+      3. 返回 {run_id, cancelled, db_cancelled} — 前端 F4 mitigation 不等此响应即切 UI
+         cancelled state,响应仅作 source of truth 让后续 GET /run/:id 一致
+
+    无需 404:已结束的 run cancel 是 no-op,语义清晰返 cancelled=False / db_cancelled=False。
+    """
+    task = _ACTIVE_RUN_TASKS.get(run_id)
+    cancelled = False
+    if task is not None and not task.done():
+        task.cancel()
+        cancelled = True
+    db_cancelled = repo.mark_run_cancelled(conn, run_id)
+    return {
+        "run_id": run_id,
+        "cancelled": cancelled,        # 是否实际 cancel 了 in-flight task
+        "db_cancelled": db_cancelled,  # 是否实际写了 cancelled 状态(CAS)
+    }
