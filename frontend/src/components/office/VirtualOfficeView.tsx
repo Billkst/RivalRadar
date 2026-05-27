@@ -45,7 +45,7 @@ export function VirtualOfficeView() {
     <div
       className="relative w-full overflow-hidden rounded-lg border border-border"
       style={{ aspectRatio: '4 / 3' }}
-      role="main"
+      role="region"
       aria-label="虚拟办公室 · 4 agent 实时协作"
     >
       {/* Background SVG 全填充 */}

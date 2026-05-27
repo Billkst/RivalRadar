@@ -8,10 +8,11 @@ import { useRunStore } from '@/stores/runStore'
 import type { RunDetail } from '@/types/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
-import { DagCanvas } from '@/components/dag/DagCanvas'
-import { DagDrawer } from '@/components/dag/DagDrawer'
-import { QCIssuePanel } from '@/components/QCIssuePanel'
 import { CancelButton } from '@/components/office/CancelButton'
+import { ViewSwitcher, type OfficeView } from '@/components/office/ViewSwitcher'
+import { VirtualOfficeView } from '@/components/office/VirtualOfficeView'
+import { DagDetailView } from '@/components/office/DagDetailView'
+import { LiveFeedPanel } from '@/components/office/LiveFeedPanel'
 import {
   ComparisonMatrixRowPlaceholder,
   CompetitorOverviewPlaceholder,
@@ -19,14 +20,13 @@ import {
 } from '@/components/placeholders'
 
 /**
- * /run/:run_id — 单 run 详情页(Task 6 vertical slice MVP)。
+ * /run/:run_id — 单 run 详情页(plan v3.2 P0-3 双视图叙事 + Epic 5 集成)。
  *
- * 布局(spec §11.1 主画布):
- *   - 顶部:RunSummary (back / run_id / 竞品 / 维度 / 状态 / 创建)
- *   - DAG 区:DagCanvas (左 8 col) + QCIssuePanel (右 4 col)
- *   - 占位区:CompetitorOverview + ComparisonMatrix (2 col)
- *   - EvidenceSheet 占位(Task 9 引用 chip 实装)
- *   - DagDrawer Sheet:点 DAG 节点 → 拉 trace 详情(input/output/tokens/latency/retry index)
+ * 布局(DESIGN.md §虚拟办公室 layout):
+ *   顶部:返回按钮 + CancelButton(只 running 时显示)
+ *   RunSummary 卡(中文维度 + storeStatus 优先)
+ *   ViewSwitcher + 主画布(office 默认 / DAG 切换)+ 右侧 LiveFeedPanel
+ *   Placeholders(Day-3+ Epic 6 实装 TeamRoster + ReportSheet)
  *
  * SSE 接入策略(Task 5):
  *   - store 已 tracking 此 run_id 且 running/done → live 流在背后继续,不重启
@@ -40,7 +40,7 @@ export function RunPage() {
 
   const [run, setRun] = React.useState<RunDetail | null>(null)
   const [error, setError] = React.useState<string | null>(null)
-  const [drawerNode, setDrawerNode] = React.useState<string | null>(null)
+  const [view, setView] = React.useState<OfficeView>('office')
 
   // Fetch RunSummary metadata (independent of SSE stream).
   React.useEffect(() => {
@@ -107,8 +107,6 @@ export function RunPage() {
               </div>
               <div>
                 <span className="text-xs text-text-muted">状态:</span>{' '}
-                {/* 0.3 修订:store live status 优先(SSE 已 done 但 fetchRun stale 'running'),
-                    fallback fetchRun.status(初始化/直链刷新时 store 还 idle)。 */}
                 {storeRunId === run_id && storeStatus !== 'idle' ? storeStatus : run.status}
                 {run.degraded && <span className="ml-2 text-warning">· 降级</span>}
               </div>
@@ -121,30 +119,35 @@ export function RunPage() {
         </CardContent>
       </Card>
 
-      {/* DAG money shot + QC panel */}
+      <div className="flex items-center justify-between">
+        <ViewSwitcher value={view} onChange={setView} />
+        <span className="text-[10px] text-text-muted">
+          {view === 'office' ? '虚拟办公室 · 4 agent 实时协作' : '流程图详情 · 工程深度'}
+        </span>
+      </div>
+
+      {/* 主画布 8 col + LiveFeedPanel 4 col */}
       <div className="grid grid-cols-12 gap-4">
         <div className="col-span-12 lg:col-span-8">
-          <DagCanvas onNodeClick={setDrawerNode} />
+          {view === 'office' ? (
+            <VirtualOfficeView />
+          ) : (
+            <DagDetailView runId={run_id ?? null} />
+          )}
         </div>
         <div className="col-span-12 lg:col-span-4">
-          <QCIssuePanel />
+          <div className="h-[480px] lg:h-[540px]">
+            <LiveFeedPanel />
+          </div>
         </div>
       </div>
 
-      {/* Vertical slice 占位 (Task 8/9/10 实装) */}
+      {/* Vertical slice 占位(Day-3+ Epic 6 实装 TeamRoster + ReportSheet) */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <CompetitorOverviewPlaceholder />
         <ComparisonMatrixRowPlaceholder />
       </div>
       <EvidenceSheetPlaceholder />
-
-      {/* Trace drawer (右侧 Sheet) */}
-      <DagDrawer
-        runId={run_id ?? null}
-        nodeName={drawerNode}
-        open={drawerNode !== null}
-        onClose={() => setDrawerNode(null)}
-      />
     </div>
   )
 }
