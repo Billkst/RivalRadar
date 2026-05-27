@@ -44,6 +44,8 @@ export function DagNode({ name, label, x, y, r, state, onOpen }: DagNodeProps) {
       <motion.circle
         cx={x}
         cy={y}
+        r={r}
+        initial={{ r }}
         animate={{
           r: isActive ? [r, r + 4, r] : r,
         }}
