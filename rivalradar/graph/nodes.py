@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import logging
 import time
+from typing import Any, Callable
 
 from rivalradar.agents.analyst import analyze
 from rivalradar.agents.collector import collect_evidence
@@ -17,21 +18,64 @@ from rivalradar.storage.repository import (
 logger = logging.getLogger(__name__)
 
 
+# ── Epic 2.3-2.6:emit-driven progress events(plan v3.2 §5)─────────────────
+# emit callback 由 sse.py 通过 config["configurable"]["emit"] 注入。Tests 不传
+# emit,_get_emit 返 None,_emit_progress 是 no-op,backward compat。
+def _get_emit(config: dict) -> Callable[[str, dict[str, Any]], None] | None:
+    """从 langgraph config 取 emit callback;tests 不传 emit 时返 None。"""
+    return config.get("configurable", {}).get("emit")
+
+
+def _emit_progress(
+    emit: Callable[[str, dict[str, Any]], None] | None,
+    agent_id: str,
+    step: str,
+    summary: str,
+    metric: dict[str, int] | None = None,
+) -> None:
+    """发 progress event(no-op if emit is None — tests / CLI 调用 path)。
+
+    payload 跟 backend api/schemas.py SSEProgressData + frontend types/api.ts
+    SSEProgressData 字段一致:agent_id / step / summary / metric / ts。ts 由
+    sse.py emit() 自动注入。
+    """
+    if emit is None:
+        return
+    payload: dict[str, Any] = {
+        "agent_id": agent_id,
+        "step": step,
+        "summary": summary,
+    }
+    if metric is not None:
+        payload["metric"] = metric
+    emit("progress", payload)
+
+
 def make_collect_node(*, conn, provider, official_domains, max_results: int = 5):
     """采集节点:首遍全量采;retry 时按 qc issues 只补缺口 + broaden 广搜。
     只 insert 真新增(对 state 已有 id 去重),证据 dict 由 reducer 累加去重。"""
     def collect_node(state, config):
         run_id = config["configurable"]["thread_id"]
+        emit = _get_emit(config)
         t0 = time.monotonic()
         existing = {e["id"] for e in state.get("evidence", [])}
         qc_result = state.get("qc_result")
         if qc_result is None:
+            _emit_progress(
+                emit, "collector", "search",
+                f"夜枭开始搜索 {len(state['competitors'])} 个竞品 × {len(state['dimensions'])} 个维度",
+            )
             evs = collect_evidence(state["competitors"], state["dimensions"],
                                    provider=provider, official_domains=official_domains,
                                    max_results=max_results)
             tgt_desc = "all"
         else:
             targets = extract_collect_targets(qc_result["issues"], state["competitors"])
+            _emit_progress(
+                emit, "collector", "broaden",
+                f"夜枭按质检反馈广搜 {len(targets)} 个证据缺口",
+                metric={"current": 0, "total": len(targets)},
+            )
             evs = []
             for comp, dim in targets:
                 evs += collect_evidence([comp], [dim], provider=provider,
@@ -41,6 +85,11 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
         fresh = [e for e in evs if e.id not in existing]
         for e in fresh:
             insert_evidence(conn, run_id, e)
+        _emit_progress(
+            emit, "collector", "done",
+            f"夜枭找到 {len(fresh)} 条新证据,累计 {len(existing) + len(fresh)} 条",
+            metric={"current": len(fresh), "total": len(existing) + len(fresh)},
+        )
         append_trace(conn, run_id, "collect",
                      input_summary=f"targets={tgt_desc}",
                      output_summary=f"+{len(fresh)} (total {len(existing) + len(fresh)})",
@@ -53,10 +102,20 @@ def make_analyze_node(*, conn, client, model):
     """分析节点:state 证据 dict → Evidence → analyze() → CompetitorAnalysis → 落库。"""
     def analyze_node(state, config):
         run_id = config["configurable"]["thread_id"]
+        emit = _get_emit(config)
         t0 = time.monotonic()
         evidence = [Evidence(**d) for d in state["evidence"]]
+        _emit_progress(
+            emit, "analyst", "thinking",
+            f"灵犀正在分析 {len(evidence)} 条证据,提取 {len(state['competitors'])} 个竞品的特征",
+        )
         analysis = analyze(evidence, state["competitors"], client=client, model=model)
         save_analysis(conn, run_id, analysis)
+        _emit_progress(
+            emit, "analyst", "done",
+            f"灵犀完成分析:{len(analysis.competitors)} 个竞品 profile + {len(analysis.comparison)} 维对比",
+            metric={"current": len(analysis.competitors), "total": len(state["competitors"])},
+        )
         append_trace(conn, run_id, "analyze",
                      input_summary=f"{len(evidence)} evidence",
                      output_summary=f"{len(analysis.competitors)} profiles, "
@@ -70,11 +129,21 @@ def make_write_node(*, conn, client, model, as_of):
     """撰写节点:CompetitorAnalysis + 证据 → 混合报告 → 落库。"""
     def write_node(state, config):
         run_id = config["configurable"]["thread_id"]
+        emit = _get_emit(config)
         t0 = time.monotonic()
         analysis = CompetitorAnalysis(**state["analysis"])
         evidence = [Evidence(**d) for d in state["evidence"]]
+        _emit_progress(
+            emit, "writer", "drafting",
+            f"灵巧正在撰写 {len(analysis.competitors)} 个竞品的对比报告",
+        )
         report = write_report(analysis, evidence, as_of=as_of, client=client, model=model)
         save_report(conn, run_id, report)
+        _emit_progress(
+            emit, "writer", "done",
+            f"灵巧完成报告 {len(report)} 字",
+            metric={"current": len(report), "total": len(report)},
+        )
         append_trace(conn, run_id, "write",
                      input_summary=f"analysis of {len(state['analysis'].get('competitors', []))} competitors",
                      output_summary=f"report {len(report)} chars",
@@ -93,9 +162,14 @@ def make_qc_node(*, conn, client, model):
     """
     def qc_node(state, config):
         run_id = config["configurable"]["thread_id"]
+        emit = _get_emit(config)
         t0 = time.monotonic()
         analysis = CompetitorAnalysis(**state["analysis"])
         evidence = [Evidence(**d) for d in state["evidence"]]
+        _emit_progress(
+            emit, "qc", "validate",
+            f"镜湖开始质检 {len(analysis.competitors)} 个竞品 profile",
+        )
         issues = qc.check_traceability(analysis, evidence)
         issues += qc.check_ontology(analysis, evidence)
         issues += qc.check_coverage(analysis)
@@ -119,6 +193,18 @@ def make_qc_node(*, conn, client, model):
         result = QCResult(verdict=verdict, issues=issues)
         prior = state.get("qc_result")
         new_rc = state["retry_count"] + (1 if prior is not None else 0)
+        # 中文 verdict 映射(plan v3.2 §3 5 UI state cancelled 风格):告诉用户镜湖的裁决。
+        verdict_zh = {
+            "pass": "通过",
+            "retry_collect": "证据不足,打回收集",
+            "retry_analyze": "分析有误,打回分析",
+            "insufficient_evidence": "证据耗尽,标降级",
+        }.get(verdict, verdict)
+        _emit_progress(
+            emit, "qc", "done",
+            f"镜湖裁决:{verdict_zh}(发现 {len(issues)} 项问题,第 {new_rc + 1} 轮)",
+            metric={"current": len(issues), "total": len(issues)},
+        )
         append_trace(conn, run_id, "qc",
                      input_summary=f"{len(evidence)} evidence",
                      output_summary=f"verdict={verdict} issues={len(issues)} "

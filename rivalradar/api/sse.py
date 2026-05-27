@@ -84,7 +84,7 @@ async def graph_event_stream(
     *,
     conn: sqlite3.Connection,
 ) -> AsyncIterator[dict]:
-    """SSE 主流:start → 每节点 update → done(或 error → clean exit)。
+    """SSE 主流:start → node/progress/chunk events → done(或 error → clean exit)。
 
     yield 出的 dict 给 sse-starlette EventSourceResponse,字段 'event'/'data'。
 
@@ -96,34 +96,92 @@ async def graph_event_stream(
     的 `{"params":{...},"method":...}` 协议层包装**完全不同**。Lane D 的 nodes
     返回值与本实现都按 v1 updates 契约对齐。**切勿改成 stream_events 或 v2/v3
     包装**(会让前端 DAG 整套节点-名 → 动画的对应关系断裂)。
+
+    ── v2 改造(plan v3.2 §5 + Epic 2.2) ────────────────────────────────────
+    Queue-driven architecture:
+      1. 创建 asyncio.Queue + sync emit() callback
+      2. 把 emit 注入 config["configurable"]["emit"],节点可通过 config 取用
+         emit("progress",{...}) / emit("chunk",{...}) 实时推 events 进 queue
+         (节点不传 emit → 节点 .get("emit") = None,backward compat 测试不破)
+      3. Background task 跑 graph.astream(),每个 chunk emit('node', ...) 进 queue
+      4. Main task drain queue + yield events 给 SSE,见 DONE_SENTINEL 退出
+      5. F4 _ACTIVE_RUN_TASKS[run_id] = graph_task(背景 task),POST /cancel
+         调 task.cancel() 顺 await 链中断 in-flight LLM
     """
-    # F4 修订:注册当前 ASGI generator task 到 _ACTIVE_RUN_TASKS,让
-    # POST /run/{id}/cancel 能 task.cancel() 中断 in-flight LLM。
-    # `asyncio.current_task()` 在 async generator 内拿到的是 sse-starlette
-    # 拉这个 body_iterator 的那个 ASGI task—— cancel 它会顺着 await 链中断
-    # `graph.astream(...)` 内部正在 await 的 LLM/network call。
-    current = asyncio.current_task()
-    if current is not None:
-        _ACTIVE_RUN_TASKS[run_id] = current
+    queue: asyncio.Queue = asyncio.Queue()
+    _DONE_SENTINEL: object = object()
+
+    def emit(ev_type: str, data: dict) -> None:
+        """Sync emit —— graph nodes 是 sync function,emit 不能 await。
+        put_nowait 不 block(asyncio.Queue 无 maxsize 时永不满)。
+
+        Auto-add ts:若 data 未带 ts(node 通常不带),自动注 _now()。reduces
+        每个 emit caller 写 `"ts": _now()` 的样板;'node' event 在 run_graph
+        内显式给 ts 保持原行为(已带的不覆盖)。
+        """
+        if "ts" not in data:
+            data = {**data, "ts": _now()}
+        queue.put_nowait({"event": ev_type, "data": json.dumps(data)})
+
+    # 把 emit 注入 config["configurable"],节点通过 config 取用(non-destructive 浅复制)。
+    cfg: dict = dict(config)
+    cfg["configurable"] = {**cfg.get("configurable", {}), "emit": emit}
+
+    async def run_graph() -> None:
+        """Background task:跑 graph.astream,每 chunk emit 'node' event 进 queue。
+        finally put DONE_SENTINEL 让 main task 退出 drain loop(无论正常 / Exception /
+        CancelledError 都 put SENTINEL,保 main task 不死锁在 await queue.get())。"""
+        try:
+            async for chunk in graph.astream(initial, config=cfg, stream_mode="updates"):
+                for node_name, delta in chunk.items():
+                    emit("node", {
+                        "node": node_name,
+                        "summary": _summarize_delta(node_name, delta),
+                        "ts": _now(),
+                    })
+        finally:
+            queue.put_nowait(_DONE_SENTINEL)
+
+    graph_task: asyncio.Task = asyncio.create_task(run_graph())
+    # F4: _ACTIVE_RUN_TASKS 存的是 graph_task(背景 task),POST /cancel 调
+    # graph_task.cancel() 抛 CancelledError 到 graph.astream() 内部的 await,
+    # 顺着 await 链中断 in-flight LLM/network call。比 current_task(ASGI 生成器
+    # task)更精准 —— cancel ASGI task 会关 connection,cancel graph_task 只停 graph。
+    _ACTIVE_RUN_TASKS[run_id] = graph_task
+
     try:
         yield {"event": "start",
                "data": json.dumps({"run_id": run_id, "ts": _now()})}
         try:
-            async for chunk in graph.astream(initial, config=config,
-                                              stream_mode="updates"):
-                for node_name, delta in chunk.items():
-                    yield {"event": "node",
-                           "data": json.dumps({
-                               "node": node_name,
-                               "summary": _summarize_delta(node_name, delta),
-                               "ts": _now(),
-                           })}
+            # Drain queue → 收到 _DONE_SENTINEL 就 break。graph 出的 node /
+            # progress / chunk events 都通过 queue forward 给 SSE,顺序保持
+            # FIFO(asyncio.Queue 保证)。
+            while True:
+                ev = await queue.get()
+                if ev is _DONE_SENTINEL:
+                    break
+                yield ev
+            # Graph task done(可能 raise 了)—— 这里 await propagate 任何 exception
+            # 让下面 except 接住。正常完则 await 立即返回 None,继续 yield done event。
+            await graph_task
         # 注意:**不**捕获 asyncio.CancelledError(BaseException 子类,不入 Exception
-        # 分支)—— 这是 sse-starlette task group 在客户端断连时通过 _listen_for_disconnect
-        # cancel_on_finish 触发的清理路径,也是 F4 POST /cancel 通过 _ACTIVE_RUN_TASKS
-        # task.cancel() 触发的中断路径——两者都必须让 cancel 直接退出生成器、不被
-        # yield "error" 拦截。**切勿改成 except BaseException** 会吞掉 cancel、导致
-        # 孤儿任务堆积 + cancel 反馈丢失。
+        # 分支)—— sse-starlette task group 在客户端断连 + F4 POST /cancel 触发的中断
+        # 路径都通过 CancelledError 直接退出生成器。但 cancel 来时我们仍要清理 graph_task
+        # + emit 一个 'cancelled' event 给前端看;见下面 except CancelledError。
+        except asyncio.CancelledError:
+            # F4: 主 task 被 cancel(client disconnect 或 cancel API task.cancel())。
+            # 取消 graph_task 防 leak —— graph 内 await 抛 CancelledError 顺 cancel 链
+            # 中断 in-flight LLM。yield cancelled event 给前端 confirm(F4 mitigation
+            # 不依赖此 event,但有则更 graceful)。然后 re-raise 让 sse-starlette
+            # task_group 接管清理(不吞 cancel 防孤儿 task)。
+            if not graph_task.done():
+                graph_task.cancel()
+            try:
+                yield {"event": "cancelled",
+                       "data": json.dumps({"run_id": run_id, "ts": _now()})}
+            except Exception:  # noqa: BLE001 — yield 失败也要 raise CancelledError
+                pass
+            raise
         except Exception as e:  # noqa: BLE001 — yield error 给客户端后 clean exit(不 re-raise)
             # 先把完整 traceback 写 server log(运维必须能 debug,与下面 sanitize 配对)
             logger.exception("graph pipeline error for run %s", run_id)
@@ -152,9 +210,16 @@ async def graph_event_stream(
                    "status": run["status"] if run else "unknown",
                    "ts": _now()})}
     finally:
-        # F4: 清理 _ACTIVE_RUN_TASKS 防 leak —— 无论 graph 正常结束 / Exception
-        # clean exit / CancelledError bubble out 都执行。pop with default 防 KeyError。
+        # 清理 _ACTIVE_RUN_TASKS 防 leak —— 无论 graph 正常结束 / Exception clean exit /
+        # CancelledError bubble out 都执行(F4)。同时确保 graph_task 也 cleanup
+        # 不留孤儿 task(D8 修订:graph crash 后 listener 应识别 + drain on exit)。
         _ACTIVE_RUN_TASKS.pop(run_id, None)
+        if not graph_task.done():
+            graph_task.cancel()
+            try:
+                await graph_task
+            except (Exception, asyncio.CancelledError):
+                pass  # 静默 cleanup,异常已上面 handled / cancel 是预期
 
 
 async def _replay_from_trace(
