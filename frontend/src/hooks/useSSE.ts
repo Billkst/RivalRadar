@@ -47,6 +47,10 @@ function parseSSE(msg: { event: string; data: string }): SSEEvent | null {
         return { type: 'node', data }
       case 'trace':
         return { type: 'trace', data }
+      case 'progress':
+        return { type: 'progress', data }
+      case 'chunk':
+        return { type: 'chunk', data }
       case 'error':
         return { type: 'error', data }
       case 'done':

@@ -3,6 +3,7 @@
  *
  * 设计要点:
  *   1. events 保留所有原始 SSE event(供 ObservabilityPanel 原始 timeline + retry index 推导)
+ *      **chunk event 不存 events[]**(plan v3.2 §6:chunk 100/s,会爆 array,forward typingStore)
  *   2. NodeState = idle/running/done/failed/retrying (spec §11.4 5 状态)
  *   3. 语义:**node event 到达 = 该节点 done**(后端节点完成时 yield);
  *      "running" 中间态由 Task 6 DAG canvas 用过渡视觉呈现,store 不存
@@ -10,8 +11,17 @@
  *   5. retry_index 不存字段,从 events.filter 推导(Codex #2)
  *   6. qcIssueCount/qcIssueTypes — 后端 SSE 只暴露 count + types map,不带 detail;
  *      issue text 详情等 Task 16 后端 schema 补强(plan v2 Day-4 S9)
+ *
+ * v2 修订(plan v3.2 §6 + Epic 1.5):
+ *   7. **chunk event**:forward 给 typingStore.appendChunk(throttle 50 + 16ms batch);
+ *      不存 events[](太频繁)。
+ *   8. **progress event**:存 events[] + push perAgentNarrative + 第一次到达记
+ *      nodeStartTs(用于 useElapsed "已工作 12s")。
+ *   9. **node event**:nodes[node]='done' 时同时记 nodeEndTs(LiveFeedPanel 显示
+ *      "完成于 14:32")。retry 时覆盖(只保留最后一次 done ts)。
  */
 import { create } from 'zustand'
+import { useTypingStore } from '@/stores/typingStore'
 import type { QCVerdict, SSEEvent } from '@/types/api'
 
 export type NodeState = 'idle' | 'running' | 'done' | 'failed' | 'retrying'
@@ -44,6 +54,11 @@ interface RunStore {
   qcIssueTypes: Record<string, number>
   evidenceCountSnapshots: EvidenceCountSnapshot[]
 
+  // v2 新增(Epic 1.5):
+  perAgentNarrative: Record<string, string[]>      // agent_id → progress summaries
+  nodeStartTs: Partial<Record<NodeName, string>>   // node → 第一次 progress event ts
+  nodeEndTs: Partial<Record<NodeName, string>>     // node → 最后一次 node event ts
+
   startRun: (runId: string) => void
   handleEvent: (ev: SSEEvent) => void
   reset: () => void
@@ -55,6 +70,9 @@ const initialNodes = (): Record<NodeName, NodeState> => ({
   write: 'idle',
   qc: 'idle',
 })
+
+const initialPerAgentNarrative = (): Record<string, string[]> => ({})
+const initialNodeTs = (): Partial<Record<NodeName, string>> => ({})
 
 const isKnownNode = (name: string): name is NodeName =>
   (NODE_NAMES as readonly string[]).includes(name)
@@ -80,6 +98,9 @@ export const useRunStore = create<RunStore>((set, get) => ({
   qcIssueCount: 0,
   qcIssueTypes: {},
   evidenceCountSnapshots: [],
+  perAgentNarrative: initialPerAgentNarrative(),
+  nodeStartTs: initialNodeTs(),
+  nodeEndTs: initialNodeTs(),
 
   startRun: (runId) =>
     set({
@@ -93,10 +114,22 @@ export const useRunStore = create<RunStore>((set, get) => ({
       qcIssueCount: 0,
       qcIssueTypes: {},
       evidenceCountSnapshots: [],
+      perAgentNarrative: initialPerAgentNarrative(),
+      nodeStartTs: initialNodeTs(),
+      nodeEndTs: initialNodeTs(),
     }),
 
   handleEvent: (ev) => {
     const state = get()
+
+    // ── chunk event(v2 新增)─────────────────────────────────────────────
+    // chunk 频率 ~30-50/s,存 events[] 会爆 array → forward typingStore 即可,
+    // typingStore 内部 throttle window 50 + 16ms batch setState 防 re-render storm。
+    if (ev.type === 'chunk') {
+      useTypingStore.getState().appendChunk(ev.data.agent_id, ev.data.delta)
+      return
+    }
+
     const events = [...state.events, ev]
 
     // ── start event ──────────────────────────────────────────────────────
@@ -112,7 +145,28 @@ export const useRunStore = create<RunStore>((set, get) => ({
         qcIssueCount: 0,
         qcIssueTypes: {},
         evidenceCountSnapshots: [],
+        perAgentNarrative: initialPerAgentNarrative(),
+        nodeStartTs: initialNodeTs(),
+        nodeEndTs: initialNodeTs(),
       })
+      return
+    }
+
+    // ── progress event(v2 新增)──────────────────────────────────────────
+    // 节点内 step-level 进度("正在搜索 Notion pricing")。累积到 events[] 给
+    // ObservabilityPanel,push perAgentNarrative 给 LiveFeedPanel,第一次到达
+    // 记 nodeStartTs(agent_id 1:1 NodeName,用于 useElapsed 算"已工作 N 秒")。
+    if (ev.type === 'progress') {
+      const agentId = ev.data.agent_id
+      const perAgentNarrative = {
+        ...state.perAgentNarrative,
+        [agentId]: [...(state.perAgentNarrative[agentId] || []), ev.data.summary],
+      }
+      const nodeStartTs = { ...state.nodeStartTs }
+      if (isKnownNode(agentId) && nodeStartTs[agentId] === undefined) {
+        nodeStartTs[agentId] = ev.data.ts
+      }
+      set({ events, perAgentNarrative, nodeStartTs })
       return
     }
 
@@ -199,6 +253,10 @@ export const useRunStore = create<RunStore>((set, get) => ({
     // handled by Task 6 DAG canvas based on event ordering.)
     nodes[nodeName] = 'done'
 
+    // v2 新增:记 nodeEndTs(retry 时覆盖,只保最后一次 done ts —— LiveFeedPanel
+    // 显示 "完成于 14:32" / DagDetailView 算节点耗时 = endTs - startTs)。
+    const nodeEndTs = { ...state.nodeEndTs, [nodeName]: ev.data.ts }
+
     set({
       events,
       nodes,
@@ -208,6 +266,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
       qcIssueTypes,
       evidenceCountSnapshots,
       degraded,
+      nodeEndTs,
     })
   },
 
@@ -223,5 +282,8 @@ export const useRunStore = create<RunStore>((set, get) => ({
       qcIssueCount: 0,
       qcIssueTypes: {},
       evidenceCountSnapshots: [],
+      perAgentNarrative: initialPerAgentNarrative(),
+      nodeStartTs: initialNodeTs(),
+      nodeEndTs: initialNodeTs(),
     }),
 }))

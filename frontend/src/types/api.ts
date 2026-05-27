@@ -229,9 +229,29 @@ export interface SSEDoneData {
   ts: string
 }
 
+// ── v2 新增:progress + chunk(plan v3.2 §5 + backend api/schemas.py mirror)──
+// backend SSEProgressData + SSEChunkData 同字段同结构,DO NOT diverge。
+
+export interface SSEProgressData {
+  agent_id: string                       // collector / analyst / writer / qc
+  step: string                           // 节点内 step 名:search / extract / write / validate
+  summary: string                        // 用户可见 narrative,中文已 i18n
+  metric?: Record<string, number>        // 可选进度:{ current: 3, total: 7 }
+  ts: string
+}
+
+export interface SSEChunkData {
+  agent_id: string
+  step: string                           // thinking / drafting / reasoning
+  delta: string                          // LLM 增量 token(几个字符)
+  ts: string
+}
+
 export type SSEEvent =
   | { type: 'start'; data: SSEStartData }
   | { type: 'node'; data: SSENodeData }
   | { type: 'trace'; data: SSETraceData }
+  | { type: 'progress'; data: SSEProgressData }
+  | { type: 'chunk'; data: SSEChunkData }
   | { type: 'error'; data: SSEErrorData }
   | { type: 'done'; data: SSEDoneData }
