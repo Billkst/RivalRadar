@@ -31,10 +31,19 @@ interface SpeechBubbleProps {
   visible?: boolean
 }
 
-export function SpeechBubble({ agentId, xPercent, yPercent, visible = true }: SpeechBubbleProps) {
-  const typingText = useTypingStore((s) => s.byAgent[agentId] || '')
-  const narratives = useRunStore((s) => s.perAgentNarrative[agentId] || [])
+// Module-level stable empty array — zustand selector 用 inline `|| []` 会每次返新 array,
+// React useSyncExternalStore 认为 store 变 → infinite re-render → "Maximum update depth"。
+// 用 stable reference 让 selector 返回 cached value。
+const EMPTY_NARRATIVES: readonly string[] = []
 
+export function SpeechBubble({ agentId, xPercent, yPercent, visible = true }: SpeechBubbleProps) {
+  // Selectors 返 raw store value(undefined or actual);fallback 在 render body 内处理,
+  // 避免 selector 每次创建新引用引发的 infinite loop。
+  const typingTextRaw = useTypingStore((s) => s.byAgent[agentId])
+  const narrativesRaw = useRunStore((s) => s.perAgentNarrative[agentId])
+
+  const typingText = typingTextRaw ?? ''
+  const narratives = narrativesRaw ?? EMPTY_NARRATIVES
   const lastNarrative = narratives.length > 0 ? narratives[narratives.length - 1] : ''
   const text = typingText || lastNarrative
   const isTyping = !!typingText
