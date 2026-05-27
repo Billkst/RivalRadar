@@ -15,8 +15,8 @@
  */
 import * as React from 'react'
 import { useRunStore } from '@/stores/runStore'
-import { AGENT_BY_ID } from '@/lib/agentConstants'
 import type { AgentId } from '@/types/agents'
+import { AGENT_BY_ID } from '@/lib/agentConstants'
 import type { SSEEvent } from '@/types/api'
 
 interface LiveFeedItem {
@@ -41,11 +41,11 @@ function eventToFeedItem(ev: SSEEvent): LiveFeedItem | null {
   if (ev.type === 'node') {
     const agentId = NODE_TO_AGENT[ev.data.node]
     if (!agentId) return null
-    const agent = AGENT_BY_ID[agentId]
+    // chip 已显示 agent name(职责名),summary 只标动作 done = "已完成 ✓"
     return {
       ts: ev.data.ts,
       agent_id: agentId,
-      summary: `${agent?.name ?? agentId} 完成 ${agent?.role ?? ''}`,
+      summary: '已完成',
       done: true,
     }
   }

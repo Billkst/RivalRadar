@@ -135,7 +135,9 @@ export function RunPage() {
             </button>
           )}
           <span>
-            {view === 'office' ? '虚拟办公室 · 4 agent 实时协作' : '流程图详情 · 工程深度'}
+            {view === 'office'
+              ? '看 4 个 agent 在你面前实时工作'
+              : 'agent 协作流程 + 节点详情 + 质检报告'}
           </span>
         </div>
       </div>

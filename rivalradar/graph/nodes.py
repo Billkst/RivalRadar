@@ -63,7 +63,7 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
         if qc_result is None:
             _emit_progress(
                 emit, "collector", "search",
-                f"夜枭开始搜索 {len(state['competitors'])} 个竞品 × {len(state['dimensions'])} 个维度",
+                f"开始搜索 {len(state['competitors'])} 个竞品 × {len(state['dimensions'])} 个维度",
             )
             evs = collect_evidence(state["competitors"], state["dimensions"],
                                    provider=provider, official_domains=official_domains,
@@ -73,7 +73,7 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
             targets = extract_collect_targets(qc_result["issues"], state["competitors"])
             _emit_progress(
                 emit, "collector", "broaden",
-                f"夜枭按质检反馈广搜 {len(targets)} 个证据缺口",
+                f"按质检反馈广搜 {len(targets)} 个证据缺口",
                 metric={"current": 0, "total": len(targets)},
             )
             evs = []
@@ -87,7 +87,7 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
             insert_evidence(conn, run_id, e)
         _emit_progress(
             emit, "collector", "done",
-            f"夜枭找到 {len(fresh)} 条新证据,累计 {len(existing) + len(fresh)} 条",
+            f"找到 {len(fresh)} 条新证据,累计 {len(existing) + len(fresh)} 条",
             metric={"current": len(fresh), "total": len(existing) + len(fresh)},
         )
         append_trace(conn, run_id, "collect",
@@ -107,13 +107,13 @@ def make_analyze_node(*, conn, client, model):
         evidence = [Evidence(**d) for d in state["evidence"]]
         _emit_progress(
             emit, "analyst", "thinking",
-            f"灵犀正在分析 {len(evidence)} 条证据,提取 {len(state['competitors'])} 个竞品的特征",
+            f"正在分析 {len(evidence)} 条证据,提取 {len(state['competitors'])} 个竞品的特征",
         )
         analysis = analyze(evidence, state["competitors"], client=client, model=model)
         save_analysis(conn, run_id, analysis)
         _emit_progress(
             emit, "analyst", "done",
-            f"灵犀完成分析:{len(analysis.competitors)} 个竞品 profile + {len(analysis.comparison)} 维对比",
+            f"完成分析:{len(analysis.competitors)} 个竞品 profile + {len(analysis.comparison)} 维对比",
             metric={"current": len(analysis.competitors), "total": len(state["competitors"])},
         )
         append_trace(conn, run_id, "analyze",
@@ -135,13 +135,13 @@ def make_write_node(*, conn, client, model, as_of):
         evidence = [Evidence(**d) for d in state["evidence"]]
         _emit_progress(
             emit, "writer", "drafting",
-            f"灵巧正在撰写 {len(analysis.competitors)} 个竞品的对比报告",
+            f"正在撰写 {len(analysis.competitors)} 个竞品的对比报告",
         )
         report = write_report(analysis, evidence, as_of=as_of, client=client, model=model)
         save_report(conn, run_id, report)
         _emit_progress(
             emit, "writer", "done",
-            f"灵巧完成报告 {len(report)} 字",
+            f"完成报告 {len(report)} 字",
             metric={"current": len(report), "total": len(report)},
         )
         append_trace(conn, run_id, "write",
@@ -168,7 +168,7 @@ def make_qc_node(*, conn, client, model):
         evidence = [Evidence(**d) for d in state["evidence"]]
         _emit_progress(
             emit, "qc", "validate",
-            f"镜湖开始质检 {len(analysis.competitors)} 个竞品 profile",
+            f"开始质检 {len(analysis.competitors)} 个竞品 profile",
         )
         issues = qc.check_traceability(analysis, evidence)
         issues += qc.check_ontology(analysis, evidence)
@@ -202,7 +202,7 @@ def make_qc_node(*, conn, client, model):
         }.get(verdict, verdict)
         _emit_progress(
             emit, "qc", "done",
-            f"镜湖裁决:{verdict_zh}(发现 {len(issues)} 项问题,第 {new_rc + 1} 轮)",
+            f"裁决:{verdict_zh}(发现 {len(issues)} 项问题,第 {new_rc + 1} 轮)",
             metric={"current": len(issues), "total": len(issues)},
         )
         append_trace(conn, run_id, "qc",

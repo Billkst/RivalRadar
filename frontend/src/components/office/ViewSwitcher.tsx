@@ -25,14 +25,16 @@ export function ViewSwitcher({ value, onChange }: ViewSwitcherProps) {
       <TabButton
         active={value === 'office'}
         onClick={() => onChange('office')}
-        label="🏢 办公室"
-        ariaLabel="虚拟办公室视图"
+        label="🏢 实时画面"
+        ariaLabel="实时画面 — 看 4 个 agent 正在做什么"
+        title="看 4 个 agent 正在做什么"
       />
       <TabButton
         active={value === 'dag'}
         onClick={() => onChange('dag')}
-        label="🔗 流程图"
-        ariaLabel="DAG 流程图详情视图"
+        label="📊 流程详情"
+        ariaLabel="流程详情 — agent 协作流程 + 节点输入输出 + 质检报告"
+        title="查看 agent 协作流程 + 节点输入输出 + 质检详情"
       />
     </div>
   )
@@ -43,11 +45,13 @@ function TabButton({
   onClick,
   label,
   ariaLabel,
+  title,
 }: {
   active: boolean
   onClick: () => void
   label: string
   ariaLabel: string
+  title?: string
 }) {
   return (
     <button
@@ -55,6 +59,7 @@ function TabButton({
       role="tab"
       aria-selected={active}
       aria-label={ariaLabel}
+      title={title}
       onClick={onClick}
       className={
         active
