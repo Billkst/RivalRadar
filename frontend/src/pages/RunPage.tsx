@@ -121,9 +121,23 @@ export function RunPage() {
 
       <div className="flex items-center justify-between">
         <ViewSwitcher value={view} onChange={setView} />
-        <span className="text-[10px] text-text-muted">
-          {view === 'office' ? '虚拟办公室 · 4 agent 实时协作' : '流程图详情 · 工程深度'}
-        </span>
+        <div className="flex items-center gap-3 text-[10px] text-text-muted">
+          {import.meta.env.DEV && (
+            <button
+              type="button"
+              onClick={() => {
+                void import('@/dev/fakeSSEPlayer').then((m) => m.playFakeSSE())
+              }}
+              className="rounded border border-dashed border-warning px-2 py-0.5 text-[10px] text-warning hover:bg-warning/10"
+              title="dev-only: 跑一遍内嵌 SSE fixture 看 office UI 真效果"
+            >
+              🧪 Play fake SSE
+            </button>
+          )}
+          <span>
+            {view === 'office' ? '虚拟办公室 · 4 agent 实时协作' : '流程图详情 · 工程深度'}
+          </span>
+        </div>
       </div>
 
       {/* 主画布 8 col + LiveFeedPanel 4 col */}
