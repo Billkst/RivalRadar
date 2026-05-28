@@ -157,6 +157,40 @@
 
 ---
 
+## Lane F frontend(post-ship review 发现 / 残留)
+
+### Writer agent 真打 LLM 改 stream_chat — "招牌时刻 typing" production 体感
+**Priority:** P1
+**详情:** 当前 `rivalradar/agents/writer.py` 用 `structured_call`(JSON-mode);chunk events 只在 demo fixture 路径走 fakeSSEPlayer 替身才有。real backend 跑时 writer 不 emit chunks → ReportSheet 走 fetchReport fallback 一次性 pop full markdown,看不到 typing 动画。Demo day 若用 real backend 演示(Clash 通畅时),"招牌时刻 #3 typing" 体感缺失。改造方案:writer 把 narrative 段(导语)切到 `llm/streaming.py:stream_chat` + emit chunk per delta(structured 部分仍走 `structured_call`)。≈ 2h 工程,demo day 后 v0.2.x patch 加。
+
+### Lane F frontend E2E test framework
+**Priority:** P1
+**详情:** 当前 `frontend/package.json` `"test": "echo \"Vitest TBD\" && exit 0"` 占位。tsc 抓不到 runtime bug(zustand selector 死循环 / fakeSSEPlayer ts 计算 / SpeechBubble fallback / etc 全 spike 才暴露)。Vitest + @testing-library/react + Playwright smoke 一套。≈ 8h bootstrap + 持续补测。demo day 后 v0.2.x 加。
+
+### useSSE.ts parseSSE 漏 `'cancelled'` event 类型
+**Priority:** P2
+**详情:** backend `sse.py` 在 CancelledError 分支 yield `{"event": "cancelled", ...}`,但 `parseSSE` 只解析 `start|node|trace|progress|chunk|error|done`,unknown 静默 drop。今天 user-initiated cancel 走 CancelButton finally 的 `cancelStoreRun()` 让 UI 立即响应,所以不阻塞。但 server-initiated cancel(future:管理员强制停 / 第二个浏览器 tab 同步)看不到。修法:加 `case 'cancelled': return { type: 'cancelled', data }` + SSEEvent variant + runStore handler。或者文档明确舍弃 server 'cancelled' event,从 sse.py 移除 yield。
+
+### dimensions enum API 边界拒非 CONTROLLED(提升优先级)
+**Priority:** P2
+**详情:** `rivalradar/api/schemas.py:27` validate 长度但不验值。frontend checkbox 限制 user 只能选 6 个 controlled value,但 `POST /run` 直接发 `{"dimensions": ["exploit"]}` 接受。defense-in-depth 改 `Literal[*CONTROLLED_DIMENSIONS]` 或 Pydantic validator。
+
+### runStore.cancelRun 不清 running nodes / handoffQueue
+**Priority:** P3
+**详情:** cancel 后 `status='cancelled'` 但 `nodes[X]='running'` + `handoffQueue` 仍非空 → VirtualOfficeView ripple ring 继续转 / handoff 还能 mount。视觉跟 "已停止" 语义矛盾。修法:`cancelRun` action 同时把 running/retrying node force 'idle' + clear handoffQueue。
+
+### ReportSheet useEffect status guard 减 404 噪音
+**Priority:** P4
+**详情:** `useEffect [runId, writerReport.length, status]` 在 real backend run idle→running 时触发一次,`fetchReport` 404(报告未生成)→ `.catch(() => {})` 静默 swallow。功能正常但每个 run 给后端日志加一条 bogus 404 + UI 一闪 "等待 writer agent 输出"。修法:`if (status !== 'done' && status !== 'degraded' && status !== 'insufficient_evidence') return` guard。
+
+### perAgentNarrative 数组无界
+**Priority:** P4
+**详情:** `runStore.perAgentNarrative[agentId]` 数组只增不删。当前每 agent ~3-20 entry,demo 规模 OK。多次 retry storm 场景下值得 `slice(-50)` 兜底(对称 typingStore 限长 pattern)。
+
+---
+
 ## Completed
 
+- post-ship review 5 fix(demo fixture ai_features → target_users · DagDrawer demo bypass · CancelButton demo early-return · StatusBadge 'cancelled' 中文 label · finalize CAS guard 防 cancel race) — **Completed:** v0.2.0.0 (2026-05-28)
+- Lane F frontend 完整交付(虚拟办公室 paradigm + Epic 0-7 + demo fixture + lighthouse 100 + codex 4 fix) — **Completed:** v0.2.0.0 (2026-05-28)
 - 项目首次 ship + Lane A→E 完整发布 — **Completed:** v0.1.0.0 (2026-05-26)
