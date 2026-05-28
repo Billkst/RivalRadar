@@ -102,6 +102,11 @@ interface RunStore {
   // node done 时入队 → VirtualOfficeView 渲染队头 → onComplete 调 dequeueHandoff。
   handoffQueue: readonly HandoffEvent[]
 
+  // v3 Epic 6.2:writer agent chunks 持久累积(供 ReportSheet 展示)。
+  // 不被 typingStore.clear(progress event 触发)影响 —— ReportSheet 永远
+  // 显示完整 writer 输出,不会因为 progress 'done' 而失去内容。
+  writerReport: string
+
   startRun: (runId: string) => void
   handleEvent: (ev: SSEEvent) => void
   dequeueHandoff: () => void
@@ -146,6 +151,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
   nodeStartTs: initialNodeTs(),
   nodeEndTs: initialNodeTs(),
   handoffQueue: [],
+  writerReport: '',
 
   startRun: (runId) =>
     set({
@@ -163,16 +169,24 @@ export const useRunStore = create<RunStore>((set, get) => ({
       nodeStartTs: initialNodeTs(),
       nodeEndTs: initialNodeTs(),
       handoffQueue: [],
+      writerReport: '',
     }),
 
   handleEvent: (ev) => {
     const state = get()
 
-    // ── chunk event(v2 新增)─────────────────────────────────────────────
+    // ── chunk event(v2 新增 + Epic 6.2 writer report 累积)───────────────
     // chunk 频率 ~30-50/s,存 events[] 会爆 array → forward typingStore 即可,
     // typingStore 内部 throttle window 50 + 16ms batch setState 防 re-render storm。
+    // Writer chunks 额外持久化累积到 writerReport(Epic 6.2 新字段)供 ReportSheet
+    // 显示。不走 typingStore 是因为 typingStore 在 progress event 时被 clear
+    // (D19 #4 fix 让 done summary 能显示),而 ReportSheet 需要完整 writer 输出
+    // 不被任何 progress event 清。
     if (ev.type === 'chunk') {
       useTypingStore.getState().appendChunk(ev.data.agent_id, ev.data.delta)
+      if (ev.data.agent_id === 'writer') {
+        set((s) => ({ writerReport: s.writerReport + ev.data.delta }))
+      }
       return
     }
 
@@ -194,6 +208,11 @@ export const useRunStore = create<RunStore>((set, get) => ({
         perAgentNarrative: initialPerAgentNarrative(),
         nodeStartTs: initialNodeTs(),
         nodeEndTs: initialNodeTs(),
+        // Epic 4.5 漏了 handoffQueue reset(start event handler 与 startRun
+        // 是两套 reset 路径,startRun 在 SSE 连前调,start event 在第一个 SSE
+        // 包到达时调 — 都该清 queue 防 stale state)。同时加 writerReport reset。
+        handoffQueue: [],
+        writerReport: '',
       })
       return
     }
@@ -375,5 +394,6 @@ export const useRunStore = create<RunStore>((set, get) => ({
       nodeStartTs: initialNodeTs(),
       nodeEndTs: initialNodeTs(),
       handoffQueue: [],
+      writerReport: '',
     }),
 }))

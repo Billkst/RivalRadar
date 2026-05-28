@@ -3,6 +3,7 @@ import { Link, Outlet, useParams } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { useThemeStore } from '@/stores/themeStore'
 import { ThemeToggle } from './ThemeToggle'
+import { AgentTeamRoster } from './office/AgentTeamRoster'
 
 /**
  * RivalRadar 三栏 analyst console 布局(DESIGN.md §Layout + spec §11.1 IA + Codex #13)
@@ -53,12 +54,18 @@ export function Layout() {
             'w-rail',
           )}
         >
-          <div className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-            竞品列表
-          </div>
-          <div className="mt-2 text-xs italic text-text-muted">
-            (Task 6 vertical slice 后填充选中 run 的竞品)
-          </div>
+          {run_id ? (
+            <AgentTeamRoster />
+          ) : (
+            <>
+              <div className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+                Agent 团队
+              </div>
+              <div className="mt-2 text-xs italic text-text-muted">
+                选一个 run 看 4 个 agent 实时协作
+              </div>
+            </>
+          )}
         </aside>
         <main className="flex-1 overflow-auto p-6">
           <Outlet />

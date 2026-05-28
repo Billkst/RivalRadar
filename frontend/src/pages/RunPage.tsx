@@ -13,6 +13,7 @@ import { ViewSwitcher, type OfficeView } from '@/components/office/ViewSwitcher'
 import { VirtualOfficeView } from '@/components/office/VirtualOfficeView'
 import { DagDetailView } from '@/components/office/DagDetailView'
 import { LiveFeedPanel } from '@/components/office/LiveFeedPanel'
+import { ReportSheet } from '@/components/office/ReportSheet'
 import {
   ComparisonMatrixRowPlaceholder,
   CompetitorOverviewPlaceholder,
@@ -170,7 +171,10 @@ export function RunPage() {
         </div>
       </div>
 
-      {/* Vertical slice 占位(Day-3+ Epic 6 实装 TeamRoster + ReportSheet) */}
+      {/* ReportSheet — Epic 6.2 底部 drawer,默认 80px collapsed,展开 60vh */}
+      <ReportSheet />
+
+      {/* Vertical slice 占位(D6 Epic 6.3 EvidenceChip 简化 + 真 vertical slice) */}
       <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
         <CompetitorOverviewPlaceholder />
         <ComparisonMatrixRowPlaceholder />
