@@ -2,9 +2,19 @@ import pytest
 from rivalradar import config
 
 
-def test_doubao_model_defaults_when_env_unset(monkeypatch):
+def test_doubao_model_raises_when_env_unset(monkeypatch):
+    """KEY 纪律延伸:DOUBAO_MODEL endpoint ID 等同敏感(字节平台固定值,
+    严禁硬编码 default)。unset 时必须立即 raise,而非静默 fallback 到任何
+    placeholder/default — 防开发者写代码假定有值导致悄无声息泄露。"""
     monkeypatch.delenv("DOUBAO_MODEL", raising=False)
-    assert config.doubao_model() == "${DOUBAO_MODEL}"
+    with pytest.raises(ValueError, match="DOUBAO_MODEL"):
+        config.doubao_model()
+
+
+def test_doubao_model_returns_env_value_when_set(monkeypatch):
+    """set 后正确返回 env 值;dummy 值不暴露真 endpoint ID(KEY 纪律 grep 安全)。"""
+    monkeypatch.setenv("DOUBAO_MODEL", "ep-test-dummy-placeholder")
+    assert config.doubao_model() == "ep-test-dummy-placeholder"
 
 
 def test_get_doubao_client_uses_base_url(monkeypatch):
