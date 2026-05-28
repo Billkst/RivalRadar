@@ -78,6 +78,26 @@ def mark_run_cancelled(conn: sqlite3.Connection, run_id: str) -> bool:
     return cursor.rowcount > 0
 
 
+def mark_run_finalized(conn: sqlite3.Connection, run_id: str, status: str) -> bool:
+    """finalize_node 用 CAS 写终态(post-ship review:对称 mark_run_failed/cancelled
+    的窄窗 race 保护)。
+
+    场景:user 点 cancel 进入 mark_run_cancelled CAS 成功(status='cancelled'),
+    但 task.cancel() 在 LangGraph 节点边界才能落地;若 cancel 恰好在 finalize 节点
+    sync 执行的 ~50ms 内到达,CancelledError 不能 preempt sync code,finalize 跑完
+    用非 CAS update_run_status('done') 把 'cancelled' 覆盖 → DB 状态损坏(user UI
+    显示已停止,GET /run 看到 done)。
+
+    用 CAS 守 expected='running' 阻止 finalize 覆盖任何已 finalize 状态。
+    """
+    cursor = conn.execute(
+        "UPDATE runs SET status=? WHERE run_id=? AND status='running'",
+        (status, run_id),
+    )
+    conn.commit()
+    return cursor.rowcount > 0
+
+
 def update_run_degraded(conn: sqlite3.Connection, run_id: str, degraded: bool) -> None:
     """持久化「蕴含降级」标志(Lane D state["degraded"] → 落 SQLite,spec §11.5 横幅依赖)。"""
     conn.execute("UPDATE runs SET degraded=? WHERE run_id=?",

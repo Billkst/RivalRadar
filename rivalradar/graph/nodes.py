@@ -11,8 +11,8 @@ from rivalradar.graph.router import extract_collect_targets
 from rivalradar.agents import qc
 from rivalradar.schema.models import CompetitorAnalysis, Evidence, QCResult
 from rivalradar.storage.repository import (
-    append_trace, insert_evidence, save_analysis, save_report,
-    update_run_degraded, update_run_status,
+    append_trace, insert_evidence, mark_run_finalized, save_analysis,
+    save_report, update_run_degraded,
 )
 
 logger = logging.getLogger(__name__)
@@ -244,7 +244,11 @@ def make_finalize_node(*, conn, max_retries):
             report = _BANNER_DEGRADED + report
             status = "degraded"
         save_report(conn, run_id, report)
-        update_run_status(conn, run_id, status)
+        # post-ship review fix:mark_run_finalized CAS 守 expected='running',
+        # 防 cancel race(cancel CAS 把 status 设 'cancelled' 后,finalize 内
+        # 50ms sync 代码 跑完用非 CAS update_run_status 覆盖)。对称 mark_run_failed
+        # /mark_run_cancelled CAS pattern。
+        mark_run_finalized(conn, run_id, status)
         # 持久化蕴含降级标志(Lane D 遗留收口,spec §11.5 前端横幅依赖)
         update_run_degraded(conn, run_id, state.get("degraded", False))
         append_trace(conn, run_id, "finalize",

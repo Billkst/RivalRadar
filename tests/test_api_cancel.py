@@ -132,3 +132,31 @@ def test_mark_run_cancelled_CAS_only_when_running(db_path):
     # 二次 cancel 已 cancelled run → False(idempotent)
     assert repo.mark_run_cancelled(c, "r_running") is False
     c.close()
+
+
+def test_mark_run_finalized_CAS_guards_cancel_race(db_path):
+    """repo.mark_run_finalized CAS:cancel-finalize race 不会覆盖 cancelled 状态。
+
+    场景(post-ship review fix):cancel POST 先 CAS 把 status 设 'cancelled',
+    紧跟着 finalize_node sync 跑完想写 'done' — 必须被 CAS 拒绝(expected='running')。
+    """
+    c = connect(db_path)
+    init_db(c)
+    repo.create_run(c, "r_running", ["Notion"], ["pricing"])
+    repo.create_run(c, "r_cancelled", ["Coda"], ["pricing"])
+
+    # 模拟 cancel 已发生:CAS 把 r_cancelled 切 cancelled
+    assert repo.mark_run_cancelled(c, "r_cancelled") is True
+
+    # 模拟 finalize 紧跟着想覆盖 'cancelled' → 'done':必须 CAS 拒绝
+    assert repo.mark_run_finalized(c, "r_cancelled", "done") is False
+    assert repo.get_run(c, "r_cancelled")["status"] == "cancelled"  # 保留 cancelled
+
+    # 正常路径:running run finalize 成功
+    assert repo.mark_run_finalized(c, "r_running", "done") is True
+    assert repo.get_run(c, "r_running")["status"] == "done"
+
+    # 已 done run 再 finalize → CAS 拒绝(idempotent)
+    assert repo.mark_run_finalized(c, "r_running", "degraded") is False
+    assert repo.get_run(c, "r_running")["status"] == "done"  # 仍 done
+    c.close()
