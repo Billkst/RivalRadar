@@ -18,7 +18,8 @@
  * (idle 不显示 narrative;loading/empty 状态由 RunPage 顶层处理 plan §3 5 UI state)。
  */
 import { motion } from 'framer-motion'
-import { useRunStore, type NodeName } from '@/stores/runStore'
+import { useRunStore, type NodeName, type NodeState } from '@/stores/runStore'
+import { useElapsed } from '@/hooks/useElapsed'
 import { OfficeBackground } from './OfficeBackground'
 import { SpeechBubble } from './SpeechBubble'
 import { HandoffAnimation } from './HandoffAnimation'
@@ -52,8 +53,126 @@ const SEAT_NUM_BY_AGENT_ID: Record<string, number> = {
   qc: 4,
 }
 
+/** 格式化 elapsed 毫秒 → "7s" / "1m20s"。亚秒不显示防视觉抖。 */
+function formatElapsed(ms: number): string {
+  const totalS = Math.floor(ms / 1000)
+  if (totalS < 60) return `${totalS}s`
+  return `${Math.floor(totalS / 60)}m${totalS % 60}s`
+}
+
+interface AgentCharacterProps {
+  /** 中文 role/name(D19 #1 refactor 后 agent.name = agent.role 同值) */
+  name: string
+  xPercent: number
+  yPercent: number
+  state: NodeState
+  seatNum: number
+  startTs: string | undefined
+  endTs: string | undefined
+}
+
+const STATE_LABEL: Record<NodeState, string> = {
+  idle: '待机',
+  running: '工作中',
+  done: '已完成',
+  failed: '失败',
+  retrying: '重试中',
+}
+
+/** AgentCharacter — 单个 agent 工位 character + state machine 视觉(P1+P2 修订)。
+ *  P1:圆从 h-12 (48px) 改 h-14 (56px) 让 3 字中文 role 名("收集员/分析员/撰稿员
+ *      /质检员")不被裁切。
+ *  P2:character 下方加 mono 字号 "已工作 Ns" (running 时 100ms tick) /
+ *      "用时 Ns" (done 时静态显示 endTs - startTs)。idle 不显示。
+ *  hook 规则:useElapsed 必须在 sub-component 顶层调用,不能在 map 循环里调,
+ *  所以从原 inline map 改 sub-component。 */
+function AgentCharacter({
+  name,
+  xPercent,
+  yPercent,
+  state,
+  seatNum,
+  startTs,
+  endTs,
+}: AgentCharacterProps) {
+  // 只 running 时 tick(其他态停 tick 避免空跑);startTs undefined 时也传 null。
+  const liveElapsedMs = useElapsed(state === 'running' && startTs ? startTs : null)
+
+  let displayElapsedMs: number | null = null
+  if (state === 'running' && startTs) {
+    displayElapsedMs = liveElapsedMs
+  } else if (state === 'done' && startTs && endTs) {
+    const startMs = new Date(startTs).getTime()
+    const endMs = new Date(endTs).getTime()
+    if (!Number.isNaN(startMs) && !Number.isNaN(endMs) && endMs >= startMs) {
+      displayElapsedMs = endMs - startMs
+    }
+  }
+
+  return (
+    <div
+      className="pointer-events-none absolute z-[1]"
+      style={{
+        left: `${xPercent}%`,
+        top: `${yPercent}%`,
+        transform: 'translate(-50%, -50%)',
+      }}
+      aria-label={`${name} · ${STATE_LABEL[state]}`}
+    >
+      {/* Running ripple ring — 1.5s loop,只 working state 渲染 */}
+      {state === 'running' && (
+        <motion.span
+          className="absolute inset-0 rounded-full"
+          style={{ background: `var(--seat-${seatNum})` }}
+          animate={{ scale: [1, 1.5, 1.9], opacity: [0.45, 0.18, 0] }}
+          transition={{ duration: 1.5, repeat: Infinity, ease: 'easeOut' }}
+          aria-hidden
+        />
+      )}
+
+      {/* Character body — h-14 w-14 (P1 fix:3 字中文不被裁) */}
+      <div
+        className="relative flex h-14 w-14 items-center justify-center rounded-full border-2 text-[11px] font-medium"
+        style={{
+          background: 'var(--surface)',
+          borderColor: `var(--seat-${seatNum})`,
+          color: `var(--seat-${seatNum})`,
+          opacity: state === 'idle' ? 0.5 : 1,
+          transition: 'opacity 200ms ease-out',
+        }}
+      >
+        {name}
+      </div>
+
+      {/* Done checkmark — 静态绿勾 */}
+      {state === 'done' && (
+        <span
+          className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full text-[12px] font-bold text-white shadow"
+          style={{ background: 'var(--success)' }}
+          aria-label="完成"
+        >
+          ✓
+        </span>
+      )}
+
+      {/* Elapsed badge (P2)— running 实时 tick / done 静态最终时长 */}
+      {displayElapsedMs !== null && (
+        <span
+          className="absolute left-1/2 -translate-x-1/2 whitespace-nowrap font-mono text-[10px] text-text-muted"
+          style={{ top: 'calc(100% + 4px)' }}
+        >
+          {state === 'done' ? '用时 ' : '已工作 '}
+          {formatElapsed(displayElapsedMs)}
+        </span>
+      )}
+    </div>
+  )
+}
+
 export function VirtualOfficeView() {
   const nodes = useRunStore((s) => s.nodes)
+  const nodeStartTs = useRunStore((s) => s.nodeStartTs)
+  const nodeEndTs = useRunStore((s) => s.nodeEndTs)
   // 选 queue head 而非整 array — head 引用稳定时不触发 re-render。
   // 空 queue → undefined,不渲染 HandoffAnimation。
   const handoffHead = useRunStore((s) => s.handoffQueue[0])
@@ -69,13 +188,8 @@ export function VirtualOfficeView() {
       {/* Background SVG 全填充 */}
       <OfficeBackground className="absolute inset-0 h-full w-full" />
 
-      {/* AgentCharacter 占位(Day-3 spike 后 mount 真 SVG sprite / Lottie)
-          现暂用 48×48 圆形带名字 + state machine 视觉:
-            idle    → opacity 0.5,无 ring,无 checkmark
-            running → opacity 1,1.5s loop ripple ring(seat color)
-            done    → opacity 1,右下 ✓ checkmark (success 色),无 ring
-            failed  → opacity 1,error 色 border + ✗(D19 后做)
-          Epic 4.7 dynamic-import Lottie 时再升级,本 commit MVP 用 div + motion. */}
+      {/* AgentCharacter × 4 — sub-component(P1 圆改 56px + P2 elapsed badge).
+          state machine 视觉 + 已工作/用时 时长见 AgentCharacter JSDoc. */}
       {AGENTS.map((agent) => {
         const coord = SEAT_MOUNT_PERCENT[agent.id]
         if (!coord) return null
@@ -83,52 +197,16 @@ export function VirtualOfficeView() {
         const state = nodes[nodeName] ?? 'idle'
         const seatNum = SEAT_NUM_BY_AGENT_ID[agent.id] ?? 1
         return (
-          <div
+          <AgentCharacter
             key={`char-${agent.id}`}
-            className="pointer-events-none absolute z-[1]"
-            style={{
-              left: `${coord.x}%`,
-              top: `${coord.y}%`,
-              transform: 'translate(-50%, -50%)',
-            }}
-            aria-label={`${agent.name} ${agent.role} · ${state}`}
-          >
-            {/* Running ripple ring — 1.5s loop,只 working state 渲染 */}
-            {state === 'running' && (
-              <motion.span
-                className="absolute inset-0 rounded-full"
-                style={{ background: `var(--seat-${seatNum})` }}
-                animate={{ scale: [1, 1.5, 1.9], opacity: [0.45, 0.18, 0] }}
-                transition={{ duration: 1.5, repeat: Infinity, ease: 'easeOut' }}
-                aria-hidden
-              />
-            )}
-
-            {/* Character body */}
-            <div
-              className="relative flex h-12 w-12 items-center justify-center rounded-full border-2 text-[11px] font-medium"
-              style={{
-                background: 'var(--surface)',
-                borderColor: `var(--seat-${seatNum})`,
-                color: `var(--seat-${seatNum})`,
-                opacity: state === 'idle' ? 0.5 : 1,
-                transition: 'opacity 200ms ease-out',
-              }}
-            >
-              {agent.name}
-            </div>
-
-            {/* Done checkmark — 静态绿勾,表示工作完成 */}
-            {state === 'done' && (
-              <span
-                className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full text-[12px] font-bold text-white shadow"
-                style={{ background: 'var(--success)' }}
-                aria-label="完成"
-              >
-                ✓
-              </span>
-            )}
-          </div>
+            name={agent.name}
+            xPercent={coord.x}
+            yPercent={coord.y}
+            state={state}
+            seatNum={seatNum}
+            startTs={nodeStartTs[nodeName]}
+            endTs={nodeEndTs[nodeName]}
+          />
         )
       })}
 
