@@ -60,8 +60,12 @@ export const useTypingStore = create<TypingStore>((set, get) => ({
     }, BATCH_MS)
   },
 
-  clear: (agent_id) =>
-    set((s) => ({ byAgent: { ...s.byAgent, [agent_id]: '' } })),
+  clear: (agent_id) => {
+    // 同时清 pending buffer —— 否则下次 16ms batch flush 把 pending chunks
+    // 加回 byAgent,clear 失效(race condition)。
+    pending[agent_id] = []
+    set((s) => ({ byAgent: { ...s.byAgent, [agent_id]: '' } }))
+  },
 
   resetAll: () => {
     for (const aid in pending) pending[aid] = []

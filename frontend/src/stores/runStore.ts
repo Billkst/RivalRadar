@@ -227,6 +227,13 @@ export const useRunStore = create<RunStore>((set, get) => ({
           nodes[nodeName] = 'running'
         }
       }
+      // D19 spike fix:清空 typing buffer 让 progress summary 显示。
+      // SpeechBubble `text = typingText || lastNarrative` typing 优先,
+      // 不清的话 chunks 累积后会永久覆盖后续 progress (特别是 done summary)。
+      // 清空策略:每个 progress event(thinking/search/drafting/validate/done)
+      // 都重置 typing,让 chunks 成为 "两个 progress event 之间的临时显示",
+      // progress summary 是 "持久 anchor"。
+      useTypingStore.getState().clear(agentId)
       set({ events, perAgentNarrative, nodeStartTs, nodes })
       return
     }
