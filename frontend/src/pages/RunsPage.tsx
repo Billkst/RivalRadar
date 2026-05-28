@@ -3,6 +3,7 @@ import { Link, useNavigate } from 'react-router-dom'
 import { Loader2, Play, Plus } from 'lucide-react'
 import { fetchRuns } from '@/lib/api'
 import { dimensionLabel } from '@/lib/dimensions'
+import { DEMO_RUN_ID } from '@/lib/demoFixture'
 import { useSSE } from '@/hooks/useSSE'
 import { CONTROLLED_DIMENSIONS, type RunSummary } from '@/types/api'
 import { Button } from '@/components/ui/button'
@@ -19,9 +20,41 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 export function RunsPage() {
   return (
     <div className="space-y-6">
+      <DemoEntry />
       <CreateRunForm />
       <RunsList />
     </div>
+  )
+}
+
+/**
+ * DemoEntry — D6 demo day bullet-proof 入口(plan v3.2 §10 Epic 7.1)。
+ *
+ * 评委 / 自己 demo 时一键进入完整 25s office UI 演示,**不依赖 backend / LLM**。
+ * RunPage 检测 isDemoRun(run_id) → 跳过 fetchRun + 跳过 SSE,直接 playFakeSSE。
+ *
+ * Clash 卡 / API 没钱 / backend down 都不影响 — 只要 vite dev server 在。
+ */
+function DemoEntry() {
+  return (
+    <Link
+      to={`/run/${DEMO_RUN_ID}`}
+      className="block rounded-lg border-2 border-accent bg-accent-soft p-4 transition-shadow hover:shadow-panel"
+    >
+      <div className="flex items-center gap-3">
+        <span className="text-2xl" aria-hidden>
+          🎬
+        </span>
+        <div className="min-w-0 flex-1">
+          <div className="text-sm font-semibold text-accent">Demo 模式 · 一键看 25s office UI 演示</div>
+          <div className="mt-0.5 text-xs text-text-muted">
+            预录 fixture 走完整 4 agent 协作 cycle:🦉 收集员 → 🦊 分析员 → 🦝 撰稿员 → 🐢 质检员。
+            零依赖,不打 backend / LLM,适合 demo 兜底。
+          </div>
+        </div>
+        <Play className="h-4 w-4 flex-shrink-0 text-accent" aria-hidden />
+      </div>
+    </Link>
   )
 }
 

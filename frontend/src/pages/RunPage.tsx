@@ -3,6 +3,7 @@ import { Link, useParams } from 'react-router-dom'
 import { ArrowLeft, Loader2 } from 'lucide-react'
 import { ApiError, fetchRun } from '@/lib/api'
 import { dimensionLabel } from '@/lib/dimensions'
+import { DEMO_RUN_DETAIL, isDemoRun } from '@/lib/demoFixture'
 import { useSSE } from '@/hooks/useSSE'
 import { useRunStore } from '@/stores/runStore'
 import type { RunDetail } from '@/types/api'
@@ -44,8 +45,13 @@ export function RunPage() {
   const [view, setView] = React.useState<OfficeView>('office')
 
   // Fetch RunSummary metadata (independent of SSE stream).
+  // Demo path(Epic 7.1):isDemoRun 直接 set fixture,不打 backend。
   React.useEffect(() => {
     if (!run_id) return
+    if (isDemoRun(run_id)) {
+      setRun(DEMO_RUN_DETAIL)
+      return
+    }
     fetchRun(run_id)
       .then(setRun)
       .catch((err) => {
@@ -54,8 +60,16 @@ export function RunPage() {
   }, [run_id])
 
   // Reattach SSE: skip if live stream already feeding this run_id.
+  // Demo path(Epic 7.1):isDemoRun 自动 playFakeSSE Real 节奏,不打 backend SSE。
+  // 这样 demo day Clash 卡 LLM / backend down 也能完整跑 25s 演示。
   React.useEffect(() => {
     if (!run_id) return
+    if (isDemoRun(run_id)) {
+      // 检查 store 是否已经 demo 跑过(防 React StrictMode double-mount 触发两次)
+      if (storeRunId === run_id) return
+      void import('@/dev/fakeSSEPlayer').then((m) => m.playFakeSSE({ speed: 1.0 }))
+      return
+    }
     const liveAlreadyHere =
       storeRunId === run_id && (storeStatus === 'running' || storeStatus === 'done')
     if (liveAlreadyHere) return
