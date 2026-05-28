@@ -106,6 +106,18 @@ export async function playFakeSSE(opts: PlayFakeSSEOptions = {}): Promise<void> 
   store.reset()
   store.startRun(events[0]?.type === 'start' ? events[0].data.run_id : 'run_fake')
 
+  // D19 spike fix:rebase event ts 到 user 本地 wall clock 起点。
+  // 根因:SAMPLE_EVENTS ts 写死为 '2026-05-28T10:00:01Z' 等历史时刻,直接 emit
+  // 给 store 会导致 useElapsed 算 Date.now() - 历史 ts:
+  //   wall clock < 历史 ts → diff 为负 → Math.max(0,negative) clamp 0 →
+  //   character 下方 "已工作 N 秒" 永远显示 "0s"。
+  // 修法:把第一个 event ts 当 baseline,replay 时所有 event ts 改成
+  // Date.now() + (eventTs - baselineTs) * speed。useElapsed 用 Date.now() 算
+  // 自然就对了。production 真打 LLM ts 本来就是 emit 时刻,不需要 rebase。
+  // 顺便 LiveFeedPanel 显示的时间戳也变 user 本地实时(更真实)。
+  const baselineTsMs = events[0]?.data.ts ? new Date(events[0].data.ts).getTime() : null
+  const wallClockStartMs = Date.now()
+
   let prevTsMs: number | null = null
   for (const ev of events) {
     const curTsMs = ev.data.ts ? new Date(ev.data.ts).getTime() : null
@@ -115,6 +127,20 @@ export async function playFakeSSE(opts: PlayFakeSSEOptions = {}): Promise<void> 
       await new Promise((r) => setTimeout(r, delay))
     }
     prevTsMs = curTsMs
-    store.handleEvent(ev)
+
+    // 改写 ts 到 wall clock,emit rebased event 给 store
+    const evToEmit =
+      baselineTsMs !== null && curTsMs !== null
+        ? ({
+            ...ev,
+            data: {
+              ...ev.data,
+              ts: new Date(
+                wallClockStartMs + (curTsMs - baselineTsMs) * speed,
+              ).toISOString(),
+            },
+          } as SSEEvent)
+        : ev
+    store.handleEvent(evToEmit)
   }
 }
