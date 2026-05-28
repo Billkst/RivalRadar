@@ -24,6 +24,16 @@ export default {
         info: 'var(--info)',
         'evidence-highlight': 'var(--evidence-highlight)',
         'source-line': 'var(--source-line)',
+        // Office tokens — utility classes like `bg-seat-1` / `text-seat-2`
+        // 同步 globals.css `:root` + `.dark` 定义,改名 / 删 token 前先 grep
+        // `frontend/src/components/office/` 调用点,避免静默断色。
+        'office-bg': 'var(--office-bg)',
+        'speech-bg': 'var(--speech-bg)',
+        'typing-cursor': 'var(--typing-cursor)',
+        'seat-1': 'var(--seat-1)',
+        'seat-2': 'var(--seat-2)',
+        'seat-3': 'var(--seat-3)',
+        'seat-4': 'var(--seat-4)',
       },
       fontFamily: {
         sans: [

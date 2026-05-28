@@ -22,12 +22,41 @@
  */
 import { create } from 'zustand'
 import { useTypingStore } from '@/stores/typingStore'
+import type { AgentId } from '@/types/agents'
 import type { QCVerdict, SSEEvent } from '@/types/api'
 
 export type NodeState = 'idle' | 'running' | 'done' | 'failed' | 'retrying'
 export type NodeName = 'collect' | 'analyze' | 'write' | 'qc'
 
 export const NODE_NAMES: readonly NodeName[] = ['collect', 'analyze', 'write', 'qc'] as const
+
+/** 文档移交事件(招牌时刻 #3)。queue 形式让 back-to-back node events 排队播放,
+ *  HandoffAnimation 处理 head,onComplete 触发 dequeue。 */
+export interface HandoffEvent {
+  /** React mount key — `${from}-${to}-${ts}`,确保新 handoff 强制重 mount */
+  id: string
+  from: AgentId
+  to: AgentId
+  ts: string
+}
+
+/** 节点链:collect → analyze → write → qc。qc 是终点不再 forward handoff。
+ *  retry_collect / retry_analyze 走反向(qc→collector / qc→analyst),目前由 DAG
+ *  tab 的招牌 #2 反向箭头承担,office 主视图只显示正向。 */
+const HANDOFF_NEXT_AGENT: Record<NodeName, AgentId | null> = {
+  collect: 'analyst',
+  analyze: 'writer',
+  write: 'qc',
+  qc: null,
+}
+
+/** NodeName 1:1 AgentId 反向映射(VirtualOfficeView 用同样的 mapping)。 */
+const NODE_TO_AGENT_ID: Record<NodeName, AgentId> = {
+  collect: 'collector',
+  analyze: 'analyst',
+  write: 'writer',
+  qc: 'qc',
+}
 
 export type RunStatus =
   | 'idle'
@@ -59,8 +88,13 @@ interface RunStore {
   nodeStartTs: Partial<Record<NodeName, string>>   // node → 第一次 progress event ts
   nodeEndTs: Partial<Record<NodeName, string>>     // node → 最后一次 node event ts
 
+  // v3 招牌时刻 #3(Epic 4.5):forward handoff queue。
+  // node done 时入队 → VirtualOfficeView 渲染队头 → onComplete 调 dequeueHandoff。
+  handoffQueue: readonly HandoffEvent[]
+
   startRun: (runId: string) => void
   handleEvent: (ev: SSEEvent) => void
+  dequeueHandoff: () => void
   reset: () => void
 }
 
@@ -101,6 +135,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
   perAgentNarrative: initialPerAgentNarrative(),
   nodeStartTs: initialNodeTs(),
   nodeEndTs: initialNodeTs(),
+  handoffQueue: [],
 
   startRun: (runId) =>
     set({
@@ -117,6 +152,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
       perAgentNarrative: initialPerAgentNarrative(),
       nodeStartTs: initialNodeTs(),
       nodeEndTs: initialNodeTs(),
+      handoffQueue: [],
     }),
 
   handleEvent: (ev) => {
@@ -257,6 +293,23 @@ export const useRunStore = create<RunStore>((set, get) => ({
     // 显示 "完成于 14:32" / DagDetailView 算节点耗时 = endTs - startTs)。
     const nodeEndTs = { ...state.nodeEndTs, [nodeName]: ev.data.ts }
 
+    // v3 招牌时刻 #3(Epic 4.5)— node 完成 → 推 handoff 给下一个 agent。retry 完成
+    // 也再次入队(qc→collect 再到 collect→analyst 是真业务流,handoff 应该重播)。
+    let handoffQueue = state.handoffQueue
+    const nextAgentId = HANDOFF_NEXT_AGENT[nodeName]
+    if (nextAgentId) {
+      const sourceAgentId = NODE_TO_AGENT_ID[nodeName]
+      handoffQueue = [
+        ...state.handoffQueue,
+        {
+          id: `${sourceAgentId}-${nextAgentId}-${ev.data.ts}`,
+          from: sourceAgentId,
+          to: nextAgentId,
+          ts: ev.data.ts,
+        },
+      ]
+    }
+
     set({
       events,
       nodes,
@@ -267,8 +320,12 @@ export const useRunStore = create<RunStore>((set, get) => ({
       evidenceCountSnapshots,
       degraded,
       nodeEndTs,
+      handoffQueue,
     })
   },
+
+  dequeueHandoff: () =>
+    set((state) => ({ handoffQueue: state.handoffQueue.slice(1) })),
 
   reset: () =>
     set({
@@ -285,5 +342,6 @@ export const useRunStore = create<RunStore>((set, get) => ({
       perAgentNarrative: initialPerAgentNarrative(),
       nodeStartTs: initialNodeTs(),
       nodeEndTs: initialNodeTs(),
+      handoffQueue: [],
     }),
 }))

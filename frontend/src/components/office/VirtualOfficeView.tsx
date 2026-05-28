@@ -20,6 +20,7 @@
 import { useRunStore, type NodeName } from '@/stores/runStore'
 import { OfficeBackground } from './OfficeBackground'
 import { SpeechBubble } from './SpeechBubble'
+import { HandoffAnimation } from './HandoffAnimation'
 import { AGENTS } from '@/lib/agentConstants'
 
 // 工位 mount 坐标(viewBox 800x600 → percent)
@@ -38,8 +39,24 @@ const AGENT_TO_NODE: Record<string, NodeName> = {
   qc: 'qc',
 }
 
+// 会议区中心(OfficeBackground 中央椭圆 cx=400 cy=300,viewBox 800×600)
+// HandoffAnimation quadratic curve 的控制点。
+const MEETING_PERCENT = { x: (400 / 800) * 100, y: (300 / 600) * 100 }
+
+// agent_id → seat color index(1:1,跟 globals.css --seat-N 同步)
+const SEAT_NUM_BY_AGENT_ID: Record<string, number> = {
+  collector: 1,
+  analyst: 2,
+  writer: 3,
+  qc: 4,
+}
+
 export function VirtualOfficeView() {
   const nodes = useRunStore((s) => s.nodes)
+  // 选 queue head 而非整 array — head 引用稳定时不触发 re-render。
+  // 空 queue → undefined,不渲染 HandoffAnimation。
+  const handoffHead = useRunStore((s) => s.handoffQueue[0])
+  const dequeueHandoff = useRunStore((s) => s.dequeueHandoff)
 
   return (
     <div
@@ -96,6 +113,19 @@ export function VirtualOfficeView() {
           />
         )
       })}
+
+      {/* HandoffAnimation — 招牌时刻 #3。key={head.id} 强制新 handoff 重 mount,
+          避免 keyframe 动画半路被 props 替换丢 onAnimationComplete。 */}
+      {handoffHead && (
+        <HandoffAnimation
+          key={handoffHead.id}
+          from={SEAT_MOUNT_PERCENT[handoffHead.from]}
+          to={SEAT_MOUNT_PERCENT[handoffHead.to]}
+          meeting={MEETING_PERCENT}
+          targetSeatNum={SEAT_NUM_BY_AGENT_ID[handoffHead.to] ?? 1}
+          onComplete={dequeueHandoff}
+        />
+      )}
     </div>
   )
 }
