@@ -17,6 +17,7 @@
  * Visibility:agent nodes[NodeName] !== 'idle' 时 SpeechBubble 才 visible
  * (idle 不显示 narrative;loading/empty 状态由 RunPage 顶层处理 plan §3 5 UI state)。
  */
+import { motion } from 'framer-motion'
 import { useRunStore, type NodeName } from '@/stores/runStore'
 import { OfficeBackground } from './OfficeBackground'
 import { SpeechBubble } from './SpeechBubble'
@@ -69,30 +70,64 @@ export function VirtualOfficeView() {
       <OfficeBackground className="absolute inset-0 h-full w-full" />
 
       {/* AgentCharacter 占位(Day-3 spike 后 mount 真 SVG sprite / Lottie)
-          现暂用一个 16x16 小圆 + agent 名,标 mount 位置 */}
+          现暂用 48×48 圆形带名字 + state machine 视觉:
+            idle    → opacity 0.5,无 ring,无 checkmark
+            running → opacity 1,1.5s loop ripple ring(seat color)
+            done    → opacity 1,右下 ✓ checkmark (success 色),无 ring
+            failed  → opacity 1,error 色 border + ✗(D19 后做)
+          Epic 4.7 dynamic-import Lottie 时再升级,本 commit MVP 用 div + motion. */}
       {AGENTS.map((agent) => {
         const coord = SEAT_MOUNT_PERCENT[agent.id]
         if (!coord) return null
         const nodeName = AGENT_TO_NODE[agent.id]
         const state = nodes[nodeName] ?? 'idle'
-        const seatNum = { collector: 1, analyst: 2, writer: 3, qc: 4 }[agent.id] ?? 1
+        const seatNum = SEAT_NUM_BY_AGENT_ID[agent.id] ?? 1
         return (
           <div
             key={`char-${agent.id}`}
-            className="pointer-events-none absolute z-[1] flex h-12 w-12 items-center justify-center rounded-full border-2 text-[11px] font-medium"
+            className="pointer-events-none absolute z-[1]"
             style={{
               left: `${coord.x}%`,
               top: `${coord.y}%`,
               transform: 'translate(-50%, -50%)',
-              background: `var(--surface)`,
-              borderColor: `var(--seat-${seatNum})`,
-              color: `var(--seat-${seatNum})`,
-              opacity: state === 'idle' ? 0.5 : 1,
-              transition: 'opacity 200ms ease-out',
             }}
             aria-label={`${agent.name} ${agent.role} · ${state}`}
           >
-            {agent.name}
+            {/* Running ripple ring — 1.5s loop,只 working state 渲染 */}
+            {state === 'running' && (
+              <motion.span
+                className="absolute inset-0 rounded-full"
+                style={{ background: `var(--seat-${seatNum})` }}
+                animate={{ scale: [1, 1.5, 1.9], opacity: [0.45, 0.18, 0] }}
+                transition={{ duration: 1.5, repeat: Infinity, ease: 'easeOut' }}
+                aria-hidden
+              />
+            )}
+
+            {/* Character body */}
+            <div
+              className="relative flex h-12 w-12 items-center justify-center rounded-full border-2 text-[11px] font-medium"
+              style={{
+                background: 'var(--surface)',
+                borderColor: `var(--seat-${seatNum})`,
+                color: `var(--seat-${seatNum})`,
+                opacity: state === 'idle' ? 0.5 : 1,
+                transition: 'opacity 200ms ease-out',
+              }}
+            >
+              {agent.name}
+            </div>
+
+            {/* Done checkmark — 静态绿勾,表示工作完成 */}
+            {state === 'done' && (
+              <span
+                className="absolute -bottom-1 -right-1 flex h-5 w-5 items-center justify-center rounded-full text-[12px] font-bold text-white shadow"
+                style={{ background: 'var(--success)' }}
+                aria-label="完成"
+              >
+                ✓
+              </span>
+            )}
           </div>
         )
       })}

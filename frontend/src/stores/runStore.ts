@@ -58,6 +58,16 @@ const NODE_TO_AGENT_ID: Record<NodeName, AgentId> = {
   qc: 'qc',
 }
 
+/** AgentId → NodeName 正向映射(progress event 用 agent_id,nodes / nodeStartTs
+ *  用 NodeName key,需要这层翻译)。和 NODE_TO_AGENT_ID 互为反向。
+ *  Record<string, NodeName | undefined> 让未知 agent_id(future scenario)安全 fallback。 */
+const AGENT_TO_NODE_INTERNAL: Record<string, NodeName | undefined> = {
+  collector: 'collect',
+  analyst: 'analyze',
+  writer: 'write',
+  qc: 'qc',
+}
+
 export type RunStatus =
   | 'idle'
   | 'running'
@@ -188,21 +198,36 @@ export const useRunStore = create<RunStore>((set, get) => ({
       return
     }
 
-    // ── progress event(v2 新增)──────────────────────────────────────────
-    // 节点内 step-level 进度("正在搜索 Notion pricing")。累积到 events[] 给
-    // ObservabilityPanel,push perAgentNarrative 给 LiveFeedPanel,第一次到达
-    // 记 nodeStartTs(agent_id 1:1 NodeName,用于 useElapsed 算"已工作 N 秒")。
+    // ── progress event(v2 新增 + D19 #3 state-machine fix)──────────────
+    // 节点内 step-level 进度("正在搜索 Notion pricing")。3 件事:
+    //   1. push perAgentNarrative 给 LiveFeedPanel / SpeechBubble
+    //   2. 第一次到达 → 记 nodeStartTs(用于 useElapsed "已工作 N 秒")
+    //   3. **触发 'running' state transition** —— D19 #3 fix:之前 nodes 只在
+    //      idle/done 两态切换跳过 'running' 中间态,导致 SpeechBubble visible
+    //      条件 `state !== 'idle'` 在 progress 时不触发,user 看到的是 "突然
+    //      冒完成总结" 而非 "开始 → 进展 → 完成"。retry_collect 把 collect
+    //      切 'retrying' 后,新 collect progress 来时同样切回 'running'。
+    //   修订:用 AGENT_TO_NODE_INTERNAL 翻译 agent_id → NodeName,nodeStartTs
+    //   也用 NodeName 做 key(之前 isKnownNode('collector')=false silent bug
+    //   让 nodeStartTs 从来没赋值过 → useElapsed 形同虚设)。
     if (ev.type === 'progress') {
       const agentId = ev.data.agent_id
       const perAgentNarrative = {
         ...state.perAgentNarrative,
         [agentId]: [...(state.perAgentNarrative[agentId] || []), ev.data.summary],
       }
+      const nodeName = AGENT_TO_NODE_INTERNAL[agentId]
       const nodeStartTs = { ...state.nodeStartTs }
-      if (isKnownNode(agentId) && nodeStartTs[agentId] === undefined) {
-        nodeStartTs[agentId] = ev.data.ts
+      const nodes = { ...state.nodes }
+      if (nodeName) {
+        if (nodeStartTs[nodeName] === undefined) {
+          nodeStartTs[nodeName] = ev.data.ts
+        }
+        if (nodes[nodeName] === 'idle' || nodes[nodeName] === 'retrying') {
+          nodes[nodeName] = 'running'
+        }
       }
-      set({ events, perAgentNarrative, nodeStartTs })
+      set({ events, perAgentNarrative, nodeStartTs, nodes })
       return
     }
 
