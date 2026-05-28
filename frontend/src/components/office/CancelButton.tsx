@@ -16,6 +16,7 @@
 import * as React from 'react'
 import { X } from 'lucide-react'
 import { cancelRun } from '@/lib/api'
+import { isDemoRun } from '@/lib/demoFixture'
 import { useSSE } from '@/hooks/useSSE'
 import { useRunStore } from '@/stores/runStore'
 
@@ -36,6 +37,15 @@ export function CancelButton({ runId }: CancelButtonProps) {
   const handleCancel = React.useCallback(() => {
     if (!canCancel) return
     setCancelling(true)
+    // Demo path(post-ship review):demo fixture 是纯前端 replay,backend 不知道
+    // 这个 run_id。早返避免 POST /cancel 404 + 跳过 sse.stop()(demo 没 SSE 连接)。
+    // 同步切 store.status='cancelled' 让 UI 立刻反馈,设 cancelled=true 进 final 态。
+    if (isDemoRun(runId)) {
+      cancelStoreRun()
+      setCancelling(false)
+      setCancelled(true)
+      return
+    }
     // F4 mitigation:立刻 stop SSE,UI 同步切 "停止中…"。Backend task.cancel()
     // 异步进行,SDK 网络层 await 中断可能滞后 1-2s 但不影响 UI。
     sse.stop()

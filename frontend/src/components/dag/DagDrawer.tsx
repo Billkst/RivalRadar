@@ -1,6 +1,7 @@
 import * as React from 'react'
 import { Loader2 } from 'lucide-react'
 import { fetchTrace } from '@/lib/api'
+import { isDemoRun } from '@/lib/demoFixture'
 import {
   Sheet,
   SheetContent,
@@ -34,6 +35,13 @@ export function DagDrawer({ runId, nodeName, open, onClose }: DagDrawerProps) {
     // eslint-disable-next-line react-hooks/set-state-in-effect
     setTraces(null)
     setError(null)
+    // Demo path(post-ship review):demo fixture 是纯前端 replay,backend 没有
+    // 这个 run_id 的 trace 数据。fetchTrace(run_demo01) 会 404 → 红字 "加载失败"。
+    // 早返直接给空数组 → "该节点暂无 trace 数据"(consistent with empty state)。
+    if (isDemoRun(runId)) {
+      setTraces([])
+      return
+    }
     fetchTrace(runId)
       .then((all) =>
         setTraces(all.filter((t) => t.node === nodeName).sort((a, b) => (a.ts < b.ts ? 1 : -1))),

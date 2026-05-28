@@ -26,7 +26,7 @@ export const DEMO_RUN_ID = 'run_demo01'
 export const DEMO_RUN_DETAIL: RunDetail = {
   run_id: DEMO_RUN_ID,
   competitors: ['Notion', 'Coda', 'Airtable'],
-  dimensions: ['pricing', 'core_workflows', 'integrations', 'ai_features'],
+  dimensions: ['pricing', 'core_workflows', 'integrations', 'target_users'],
   status: 'done',
   degraded: false,
   created_at: new Date().toISOString(),

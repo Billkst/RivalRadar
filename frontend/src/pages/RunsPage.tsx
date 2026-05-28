@@ -252,6 +252,17 @@ function RunsList() {
   )
 }
 
+// 中文 status label —— 与 office UI 元素全中文风格 一致(post-ship review fix:
+// 之前漏 'cancelled' 直接渲染英文 raw,跟旁边中文 "降级" 视觉断层)。
+const STATUS_LABEL: Record<string, string> = {
+  done: '完成',
+  running: '进行中',
+  failed: '失败',
+  cancelled: '已停止',
+  insufficient_evidence: '证据不足',
+  degraded: '降级',
+}
+
 function StatusBadge({ status, degraded }: { status: string; degraded: boolean }) {
   const tone =
     status === 'done'
@@ -260,13 +271,15 @@ function StatusBadge({ status, degraded }: { status: string; degraded: boolean }
         ? 'bg-info/15 text-info'
         : status === 'failed'
           ? 'bg-error/15 text-error'
-          : status === 'insufficient_evidence' || degraded
-            ? 'bg-warning/15 text-warning'
-            : 'bg-surface-subtle text-text-muted'
+          : status === 'cancelled'
+            ? 'bg-surface-subtle text-text-muted'
+            : status === 'insufficient_evidence' || degraded
+              ? 'bg-warning/15 text-warning'
+              : 'bg-surface-subtle text-text-muted'
   return (
     <span className={`rounded px-2 py-0.5 ${tone}`}>
-      {status}
-      {degraded && status !== 'degraded' ? ' · degraded' : ''}
+      {STATUS_LABEL[status] ?? status}
+      {degraded && status !== 'degraded' ? ' · 降级' : ''}
     </span>
   )
 }
