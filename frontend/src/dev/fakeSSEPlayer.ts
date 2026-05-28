@@ -76,28 +76,45 @@ export const SAMPLE_EVENTS: SSEEvent[] = [
 ]
 
 export interface PlayFakeSSEOptions {
-  /** ms between events;default 100ms 显感 cycle ~3s。 */
-  pacing?: number
+  /** 速度倍数 — 1.0 = 跟 SAMPLE_EVENTS ts 字段(模拟真 LLM ~25s)同步;
+   *  0.2 = 5x faster(~5s);2.0 = 2x slower(~50s,慢动作 spike)。
+   *  default 1.0 真节奏让 LiveFeedPanel timestamp 和 office UI 动作肉眼对得上,
+   *  handoff 800ms 与节点间隔 1-7s 不会被覆盖。 */
+  speed?: number
   /** 自定义 events override SAMPLE_EVENTS。 */
   events?: SSEEvent[]
 }
 
+const MIN_DELAY_MS = 50 // 防 speed=0 死循环;两个事件间至少 50ms
+
 /**
- * Replay events into runStore.handleEvent with timing pacing(F2 mitigation)。
+ * Replay events into runStore.handleEvent 按 SAMPLE_EVENTS ts 字段的相对间隔
+ * (F2 mitigation)。
  *
- * 流程:reset → 每 event handleEvent + sleep(pacing)→ 返回 done。
+ * 节奏来源:每个 event 的 data.ts 字段(SAMPLE_EVENTS 模拟真 LLM 时间线 ~25s)。
+ * 相邻 event ts 差就是真实间隔,乘 speed multiplier 得到实际 sleep。
+ *
+ * 这样 default speed=1.0 时,user 看到的 "office UI 节奏" 跟 "LiveFeedPanel
+ * 时间戳跨度" 完全一致 —— 25s 戏本就跑 25s,不会出现 "3s 跑完 25s" 的脱节感。
+ *
  * 调用方应该已经 mount RunPage 看 office UI 跟 SSE state 协同。
  */
 export async function playFakeSSE(opts: PlayFakeSSEOptions = {}): Promise<void> {
   const events = opts.events ?? SAMPLE_EVENTS
-  const pacing = opts.pacing ?? 100
+  const speed = opts.speed ?? 1.0
   const store = useRunStore.getState()
   store.reset()
   store.startRun(events[0]?.type === 'start' ? events[0].data.run_id : 'run_fake')
+
+  let prevTsMs: number | null = null
   for (const ev of events) {
-    store.handleEvent(ev)
-    if (pacing > 0) {
-      await new Promise((r) => setTimeout(r, pacing))
+    const curTsMs = ev.data.ts ? new Date(ev.data.ts).getTime() : null
+    if (prevTsMs !== null && curTsMs !== null && curTsMs > prevTsMs) {
+      const realIntervalMs = (curTsMs - prevTsMs) * speed
+      const delay = Math.max(MIN_DELAY_MS, realIntervalMs)
+      await new Promise((r) => setTimeout(r, delay))
     }
+    prevTsMs = curTsMs
+    store.handleEvent(ev)
   }
 }

@@ -123,16 +123,28 @@ export function RunPage() {
         <ViewSwitcher value={view} onChange={setView} />
         <div className="flex items-center gap-3 text-[10px] text-text-muted">
           {import.meta.env.DEV && (
-            <button
-              type="button"
-              onClick={() => {
-                void import('@/dev/fakeSSEPlayer').then((m) => m.playFakeSSE())
-              }}
-              className="rounded border border-dashed border-warning px-2 py-0.5 text-[10px] text-warning hover:bg-warning/10"
-              title="dev-only: 跑一遍内嵌 SSE fixture 看 office UI 真效果"
-            >
-              🧪 Play fake SSE
-            </button>
+            <>
+              <span className="text-[10px] text-warning">🧪 fake SSE</span>
+              {[
+                { label: 'Fast', speed: 0.2, hint: '0.2x — 5s 全程,快速看动画' },
+                { label: 'Real', speed: 1.0, hint: '1.0x — 25s 真 LLM 节奏(与时间戳同步)' },
+                { label: 'Slow', speed: 2.0, hint: '2.0x — 50s 慢动作 spike 节奏' },
+              ].map((preset) => (
+                <button
+                  key={preset.label}
+                  type="button"
+                  onClick={() => {
+                    void import('@/dev/fakeSSEPlayer').then((m) =>
+                      m.playFakeSSE({ speed: preset.speed }),
+                    )
+                  }}
+                  className="rounded border border-dashed border-warning px-2 py-0.5 text-[10px] text-warning hover:bg-warning/10"
+                  title={preset.hint}
+                >
+                  {preset.label}
+                </button>
+              ))}
+            </>
           )}
           <span>
             {view === 'office'
