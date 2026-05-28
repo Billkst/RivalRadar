@@ -25,7 +25,7 @@ export const DEMO_RUN_ID = 'run_demo01'
  *  叙事一致。created_at 用 mount 时刻,这样卡片时间戳是"今天此刻"。 */
 export const DEMO_RUN_DETAIL: RunDetail = {
   run_id: DEMO_RUN_ID,
-  competitors: ['Notion', 'Coda', 'Airtable'],
+  competitors: ['飞书', '钉钉', '企业微信'],
   dimensions: ['pricing', 'core_workflows', 'integrations', 'target_users'],
   status: 'done',
   degraded: false,

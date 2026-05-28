@@ -36,7 +36,7 @@ export const SAMPLE_EVENTS: SSEEvent[] = [
   // 5 段 chunk 模拟 LLM typing(每段几字符,backend stream_chat 产出的 delta 形态)
   { type: 'chunk', data: { agent_id: 'analyst', step: 'reasoning', delta: '正在', ts: '2026-05-28T10:00:10Z' } },
   { type: 'chunk', data: { agent_id: 'analyst', step: 'reasoning', delta: '比较 ', ts: '2026-05-28T10:00:10Z' } },
-  { type: 'chunk', data: { agent_id: 'analyst', step: 'reasoning', delta: 'Notion 和 Coda', ts: '2026-05-28T10:00:10Z' } },
+  { type: 'chunk', data: { agent_id: 'analyst', step: 'reasoning', delta: '飞书 和 钉钉', ts: '2026-05-28T10:00:10Z' } },
   { type: 'chunk', data: { agent_id: 'analyst', step: 'reasoning', delta: ' 的定价模型', ts: '2026-05-28T10:00:11Z' } },
   { type: 'chunk', data: { agent_id: 'analyst', step: 'reasoning', delta:'差异...', ts: '2026-05-28T10:00:11Z' } },
   { type: 'progress', data: { agent_id: 'analyst', step: 'done',
@@ -49,7 +49,7 @@ export const SAMPLE_EVENTS: SSEEvent[] = [
   { type: 'progress', data: { agent_id: 'writer', step: 'drafting',
       summary: '正在撰写 3 个竞品的对比报告', ts: '2026-05-28T10:00:16Z' } },
   { type: 'chunk', data: { agent_id: 'writer', step: 'drafting', delta: '## 综述', ts: '2026-05-28T10:00:17Z' } },
-  { type: 'chunk', data: { agent_id: 'writer', step: 'drafting', delta: '\nNotion 在', ts: '2026-05-28T10:00:17Z' } },
+  { type: 'chunk', data: { agent_id: 'writer', step: 'drafting', delta: '\n飞书 在', ts: '2026-05-28T10:00:17Z' } },
   { type: 'chunk', data: { agent_id: 'writer', step: 'drafting', delta: '一体化协作', ts: '2026-05-28T10:00:18Z' } },
   { type: 'chunk', data: { agent_id: 'writer', step: 'drafting', delta: '上占优', ts: '2026-05-28T10:00:18Z' } },
   { type: 'chunk', data: { agent_id: 'writer', step: 'drafting', delta: ' [1][2]', ts: '2026-05-28T10:00:18Z' } },
