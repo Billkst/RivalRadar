@@ -90,3 +90,35 @@ def test_collect_default_no_broaden():
     p = _CaptureProvider()
     _collect_for_broaden(["Notion"], ["pricing"], provider=p, languages=("en",))
     assert all("comparison" not in q for q in p.queries)
+
+
+def test_collect_graceful_skip_on_single_query_failure(caplog):
+    """单个 query 失败(provider 抛异常)→ graceful skip,继续返回成功 query 的 evidence。
+
+    踩到的真实场景:WSL2 Clash fake-ip 偶发 Tavily timeout,18 query 中 1 个抛
+    AllProvidersFailedError 把整个 pipeline crash。修法:_run_query_safe wrap
+    try/except。本测验证修后行为。
+    """
+    class _PartialFailProvider:
+        name = "partial"
+        def __init__(self):
+            self.call_count = 0
+        def search(self, query, *, max_results=5):
+            self.call_count += 1
+            # 第 2 个 query 抛(模拟 Tavily timeout)
+            if self.call_count == 2:
+                raise TimeoutError("simulated upstream timeout")
+            return [SearchResult(url=f"https://x/{query}", title=query,
+                                 content="c", raw_content="body", provider="partial")]
+
+    import logging
+    p = _PartialFailProvider()
+    with caplog.at_level(logging.WARNING):
+        evs = collect(["A"], ["pricing", "integrations", "deployment"],
+                      provider=p, languages=("en",), max_workers=2)
+
+    # 3 维度 × 1 lang = 3 query,1 个失败 → 2 个成功 → 2 条 evidence
+    assert len(evs) == 2
+    assert {e.dimension for e in evs} != {"pricing", "integrations", "deployment"}  # 缺 1 维
+    # warning 日志记录失败 query 上下文
+    assert any("query failed" in r.message for r in caplog.records)
