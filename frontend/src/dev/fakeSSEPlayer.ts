@@ -83,6 +83,13 @@ export interface PlayFakeSSEOptions {
   speed?: number
   /** 自定义 events override SAMPLE_EVENTS。 */
   events?: SSEEvent[]
+  /** Codex review P1 fix:override run_id 给 store.startRun + rebased start event。
+   *  根因:RunPage 用 isDemoRun(run_id) bypass 后调 playFakeSSE,但 fakeSSEPlayer
+   *  默认从 SAMPLE_EVENTS[0].data.run_id 取 'run_fake01',store.runId 永远 !==
+   *  'run_demo01' → RunPage liveAlreadyHere guard 失效 → 每次 store update
+   *  re-trigger 新 playFakeSSE,demo bullet-proof dead loop。Demo 路径传
+   *  { runId: DEMO_RUN_ID } 强制对齐。 */
+  runId?: string
 }
 
 const MIN_DELAY_MS = 50 // 防 speed=0 死循环;两个事件间至少 50ms
@@ -103,8 +110,12 @@ export async function playFakeSSE(opts: PlayFakeSSEOptions = {}): Promise<void> 
   const events = opts.events ?? SAMPLE_EVENTS
   const speed = opts.speed ?? 1.0
   const store = useRunStore.getState()
+  // opts.runId override 优先(demo path 传 DEMO_RUN_ID 让 RunPage guard 对齐),
+  // fallback events[0].run_id 或 'run_fake'(老调用方 / 自定义 events 路径)
+  const effectiveRunId =
+    opts.runId ?? (events[0]?.type === 'start' ? events[0].data.run_id : 'run_fake')
   store.reset()
-  store.startRun(events[0]?.type === 'start' ? events[0].data.run_id : 'run_fake')
+  store.startRun(effectiveRunId)
 
   // D19 spike fix:rebase event ts 到 user 本地 wall clock 起点。
   // 根因:SAMPLE_EVENTS ts 写死为 '2026-05-28T10:00:01Z' 等历史时刻,直接 emit
@@ -128,19 +139,23 @@ export async function playFakeSSE(opts: PlayFakeSSEOptions = {}): Promise<void> 
     }
     prevTsMs = curTsMs
 
-    // 改写 ts 到 wall clock,emit rebased event 给 store
-    const evToEmit =
-      baselineTsMs !== null && curTsMs !== null
-        ? ({
-            ...ev,
-            data: {
-              ...ev.data,
-              ts: new Date(
-                wallClockStartMs + (curTsMs - baselineTsMs) * speed,
-              ).toISOString(),
-            },
-          } as SSEEvent)
-        : ev
+    // 改写 ts 到 wall clock + 改写 start event run_id 到 effectiveRunId,
+    // emit rebased event 给 store(start event 的 run_id 也要 override 让 runStore
+    // 后续 events 用同样 id,否则 SSE 'start' handler 会把 store.runId 改回
+    // SAMPLE_EVENTS 的 run_fake01,demo guard 又失效)
+    let evToEmit: SSEEvent = ev
+    if (baselineTsMs !== null && curTsMs !== null) {
+      const newTs = new Date(
+        wallClockStartMs + (curTsMs - baselineTsMs) * speed,
+      ).toISOString()
+      evToEmit = { ...ev, data: { ...ev.data, ts: newTs } } as SSEEvent
+    }
+    if (evToEmit.type === 'start' && opts.runId) {
+      evToEmit = {
+        ...evToEmit,
+        data: { ...evToEmit.data, run_id: opts.runId },
+      } as SSEEvent
+    }
     store.handleEvent(evToEmit)
   }
 }

@@ -62,16 +62,24 @@ export function RunPage() {
   // Reattach SSE: skip if live stream already feeding this run_id.
   // Demo path(Epic 7.1):isDemoRun 自动 playFakeSSE Real 节奏,不打 backend SSE。
   // 这样 demo day Clash 卡 LLM / backend down 也能完整跑 25s 演示。
+  //
+  // Codex review P1 fixes:
+  //   - Demo path 传 runId 让 fakeSSEPlayer 把 store.runId 设成 run_id(不再
+  //     是 SAMPLE_EVENTS 的 'run_fake01'),storeRunId === run_id guard 才能命中
+  //   - liveAlreadyHere 改成 storeStatus !== 'idle'(原先只接受 running/done
+  //     遗漏 failed/insufficient_evidence/degraded/cancelled,replay 终态时
+  //     guard 失效 → 又 trigger sse.start → startRun 重置 store 'running' →
+  //     循环 hammer /stream/:id)
   React.useEffect(() => {
     if (!run_id) return
     if (isDemoRun(run_id)) {
-      // 检查 store 是否已经 demo 跑过(防 React StrictMode double-mount 触发两次)
       if (storeRunId === run_id) return
-      void import('@/dev/fakeSSEPlayer').then((m) => m.playFakeSSE({ speed: 1.0 }))
+      void import('@/dev/fakeSSEPlayer').then((m) =>
+        m.playFakeSSE({ speed: 1.0, runId: run_id }),
+      )
       return
     }
-    const liveAlreadyHere =
-      storeRunId === run_id && (storeStatus === 'running' || storeStatus === 'done')
+    const liveAlreadyHere = storeRunId === run_id && storeStatus !== 'idle'
     if (liveAlreadyHere) return
     sse.start({ mode: 'replay', runId: run_id }).catch(() => {
       // Swallow — replay failure is non-fatal; user still sees RunSummary above.

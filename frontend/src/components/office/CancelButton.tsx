@@ -25,6 +25,7 @@ interface CancelButtonProps {
 
 export function CancelButton({ runId }: CancelButtonProps) {
   const status = useRunStore((s) => s.status)
+  const cancelStoreRun = useRunStore((s) => s.cancelRun)
   const sse = useSSE()
   const [cancelling, setCancelling] = React.useState(false)
   const [cancelled, setCancelled] = React.useState(false)
@@ -44,11 +45,15 @@ export function CancelButton({ runId }: CancelButtonProps) {
         // backend log 会记录原因(SDK 提前 close / 网络抖动)。
       })
       .finally(() => {
+        // Codex review P2 fix:同步切 runStore.status='cancelled' —— sse.stop()
+        // 在 server 'cancelled' event 之前 abort,store 永远卡 'running',
+        // RunSummary status line / animations / reattach 全 stale 直到刷新。
+        cancelStoreRun()
         // 切到 "已停止" final 状态(无论 POST 成功失败)
         setCancelling(false)
         setCancelled(true)
       })
-  }, [canCancel, sse, runId])
+  }, [canCancel, sse, runId, cancelStoreRun])
 
   // D18 a11y baseline:running 中 Esc keyboard 触发 cancel。
   React.useEffect(() => {

@@ -63,11 +63,11 @@ export const fetchRuns = () => jsonFetch<RunSummary[]>('/runs')
 export const fetchRun = (runId: string) => jsonFetch<RunDetail>(`/run/${runId}`)
 export const fetchAnalysis = (runId: string) => jsonFetch<CompetitorAnalysis>(`/analysis/${runId}`)
 export const fetchEvidence = (evidenceId: string) => jsonFetch<Evidence>(`/evidence/${evidenceId}`)
+// Backend 返 {run_id, markdown},不是 text。原实现用 r.text() 拿 JSON 字符串
+// 没 caller 触发是 silent bug — codex review 第一次用 ReportSheet fetchReport
+// fallback 时暴露。修法:用 jsonFetch 解 JSON 然后 caller 取 .markdown。
 export const fetchReport = (runId: string) =>
-  fetch(`${API_BASE}/report/${runId}`).then((r) => {
-    if (!r.ok) throw new ApiError(r.status, `HTTP ${r.status}`)
-    return r.text()
-  })
+  jsonFetch<{ run_id: string; markdown: string }>(`/report/${runId}`)
 export const fetchTrace = (runId: string) => jsonFetch<TraceEntry[]>(`/trace/${runId}`)
 
 // ─── Annotations ──────────────────────────────────────────────────────────

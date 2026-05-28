@@ -16,14 +16,36 @@
  */
 import * as React from 'react'
 import { motion, AnimatePresence } from 'framer-motion'
+import { fetchReport } from '@/lib/api'
+import { isDemoRun } from '@/lib/demoFixture'
 import { useRunStore } from '@/stores/runStore'
 
 export function ReportSheet() {
   const [expanded, setExpanded] = React.useState(false)
   const writerReport = useRunStore((s) => s.writerReport)
   const status = useRunStore((s) => s.status)
+  const runId = useRunStore((s) => s.runId)
+  // Codex review P1 fix:real run / replay 的 writer node 完成时 emit
+  // progress/node summaries 不 emit chunks,writerReport 永远空 → ReportSheet
+  // 显示 "等待 writer agent 输出"。Fallback fetch /report/:id 取持久化 markdown。
+  // Demo path 不 fetch(isDemoRun + chunks accumulate 已够);writerReport 非空时
+  // 也不 fetch(production stream_chat 路径已 work)。
+  const [fetchedReport, setFetchedReport] = React.useState<string | null>(null)
+  React.useEffect(() => {
+    if (!runId || isDemoRun(runId)) return
+    if (writerReport.length > 0) return
+    if (status === 'idle') return
+    fetchReport(runId)
+      .then((data) => setFetchedReport(data.markdown))
+      .catch(() => {
+        // 404 / 网络失败静默 — 报告未生成 / backend 不可达,UI 显示等待提示
+      })
+  }, [runId, writerReport.length, status])
 
-  const hasContent = writerReport.length > 0
+  // writerReport(chunks 累积,demo/真 stream)优先;fallback fetchedReport(replay/
+  // 真 run done 后从 /report/:id 取的持久化 markdown)
+  const reportText = writerReport || fetchedReport || ''
+  const hasContent = reportText.length > 0
   const isDone = status === 'done'
 
   return (
@@ -43,7 +65,7 @@ export function ReportSheet() {
           <div className="text-sm font-semibold text-text-primary">竞品分析报告</div>
           <div className="text-xs text-text-muted">
             {hasContent
-              ? `${writerReport.length} 字 · ${isDone ? '已完成' : '撰写中…'}`
+              ? `${reportText.length} 字 · ${isDone ? '已完成' : '撰写中…'}`
               : '等待 writer agent 输出…'}
           </div>
         </div>
@@ -74,7 +96,7 @@ export function ReportSheet() {
           >
             {hasContent ? (
               <pre className="whitespace-pre-wrap break-words font-sans text-sm leading-relaxed text-text-primary">
-                {writerReport}
+                {reportText}
               </pre>
             ) : (
               <div className="text-sm italic text-text-muted">

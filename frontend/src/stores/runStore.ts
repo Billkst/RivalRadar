@@ -75,6 +75,7 @@ export type RunStatus =
   | 'failed'
   | 'insufficient_evidence'
   | 'degraded'
+  | 'cancelled'
 
 export interface EvidenceCountSnapshot {
   ts: string
@@ -110,6 +111,10 @@ interface RunStore {
   startRun: (runId: string) => void
   handleEvent: (ev: SSEEvent) => void
   dequeueHandoff: () => void
+  /** Codex review P2 修订:CancelButton finally 同步切 status。原来 sse.stop()
+   *  在 server 'cancelled' event 之前 abort 流,store status 永远卡 'running',
+   *  status line / animations / reattach 全 stale 直到刷新。 */
+  cancelRun: () => void
   reset: () => void
 }
 
@@ -377,6 +382,8 @@ export const useRunStore = create<RunStore>((set, get) => ({
 
   dequeueHandoff: () =>
     set((state) => ({ handoffQueue: state.handoffQueue.slice(1) })),
+
+  cancelRun: () => set({ status: 'cancelled' }),
 
   reset: () =>
     set({
