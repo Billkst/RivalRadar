@@ -74,7 +74,7 @@ import json
 from rivalradar.agents import qc
 from rivalradar.schema.models import (
     CONTROLLED_DIMENSIONS, CompetitorAnalysis, CompetitorProfile, PricingModel,
-    SWOT, ComparisonRow, ComparisonCell, EvidenceRef, ReportInsight,
+    SWOT, ComparisonRow, ComparisonCell, Decision, DecisionSet, EvidenceRef, ReportInsight,
 )
 from rivalradar.search.base import SearchResult
 
@@ -125,6 +125,15 @@ def stubbed_client(db_path, monkeypatch):
                                                        differentiation_thesis="d",
                                                        actionable_takeaway="a")))
     monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
+    # full-C decide 节点(Epic 2):stub 让它走"成功产出决策"路径(否则 client=str → 降级空决策),
+    # 使完整图 E2E 覆盖 decide 接进图 + 三张新表持久化(adversarial M5)。
+    monkeypatch.setattr(
+        "rivalradar.graph.nodes.generate_decisions",
+        lambda *a, **k: DecisionSet(decisions=[Decision(
+            stance="建议采用", action="评估接入", horizon="短期", risk_reversibility="可逆",
+            risk_cost="低", why="x", evidence_refs=[EvidenceRef(evidence_id="e1", quote="q")])]))
+    monkeypatch.setattr(qc, "check_decision_traceability", lambda *a, **k: [])
+    monkeypatch.setattr(qc, "check_decision_entailment", lambda *a, **k: [])
     app = create_app(db_path=db_path, doubao_client="stub-client",
                      provider=_OneShotProvider(), as_of="2026-05-26")
     return TestClient(app)
@@ -158,8 +167,8 @@ def test_post_run_streams_sse_with_start_nodes_done(stubbed_client):
     assert events[0]["event"] == "start"
     node_events = [e for e in events if e["event"] == "node"]
     nodes_hit = [json.loads(e["data"])["node"] for e in node_events]
-    for n in ("collect", "analyze", "write", "qc", "finalize"):
-        assert n in nodes_hit
+    for n in ("collect", "analyze", "write", "qc", "decide", "finalize"):
+        assert n in nodes_hit  # decide 已接进真实图(full-C / Epic 2)
     assert events[-1]["event"] == "done"
     done_data = json.loads(events[-1]["data"])
     assert done_data["run_id"].startswith("run_")
@@ -182,7 +191,23 @@ def test_post_run_persists_state_after_stream(stubbed_client, db_path):
     assert run["status"] in ("done", "insufficient_evidence", "degraded")
     assert len(repo.list_evidence(c, run_id)) > 0
     assert repo.get_report(c, run_id) is not None
+    # full-C 三张新表都经真实 graph.invoke 端到端落库(adversarial M5)
+    assert repo.get_decisions(c, run_id) is not None
+    assert repo.get_qc_result(c, run_id) is not None
+    assert repo.get_insight(c, run_id) is not None
     c.close()
+
+
+def test_get_run_exposes_decision_context(db_path, client):
+    """full-C(Epic 2):GET /run/:id 经 RunDetail expose decision_context(cockpit 回访显示处境)。"""
+    from rivalradar.storage.db import connect, init_db
+    c = connect(db_path); init_db(c)
+    repo.create_run(c, "r_ctx", ["飞书"], ["pricing"], decision_context="选型PM:评估飞书")
+    repo.update_run_status(c, "r_ctx", "done")
+    c.close()
+    r = client.get("/run/r_ctx")
+    assert r.status_code == 200
+    assert r.json()["decision_context"] == "选型PM:评估飞书"
 
 
 def test_post_run_rejects_empty_competitors(stubbed_client):

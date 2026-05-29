@@ -215,6 +215,14 @@ def test_check_decision_entailment_skips_empty_refs():
     assert client.chat.completions.calls == 0
 
 
+def test_check_decision_entailment_skips_dangling_refs():
+    """悬空引用决策归 traceability,蕴含预过滤跳过,不耗 cost guard 预算(adversarial M3)。"""
+    client = _FakeClient([])  # 悬空 → 0 调用
+    assert check_decision_entailment([_decision(refs=("ghost",))], [_ev("e1")],
+                                     client=client, model="m") == []
+    assert client.chat.completions.calls == 0
+
+
 def test_sanitize_qc_result_strips_model_text_to_canned_detail():
     """Epic 2.4 / Codex #9:/qc 公开端点 sanitize —— detail 含模型文本必须被罐装文案替换,
     保留 competitor/dimension/problem_type 供前端;原始模型片段绝不泄漏。"""
@@ -227,6 +235,27 @@ def test_sanitize_qc_result_strips_model_text_to_canned_detail():
     assert issue["competitor"] == "飞书" and issue["problem_type"] == "hallucination"
     assert "SECRET_xyz" not in issue["detail"]           # 模型文本不泄漏
     assert issue["detail"] == "证据未能支撑该结论"        # 罐装文案
+
+
+def test_sanitize_qc_result_whitelists_out_of_ontology_dimension():
+    """schema_incomplete issue 的 dimension 是 LLM 越界文本 → sanitize 替占位,
+    绝不经公开 /qc 回吐模型产出的任意维度名(adversarial M1)。"""
+    result = QCResult(verdict="retry_analyze", issues=[QCIssue(
+        competitor="*", dimension="模型乱吐的越界维度SECRET", problem_type="schema_incomplete",
+        detail="维度不在受控本体")])
+    out = sanitize_qc_result(result)
+    assert out["issues"][0]["dimension"] == "out_of_ontology"  # 越界维度替占位
+    assert "SECRET" not in out["issues"][0]["dimension"]
+
+
+def test_sanitize_qc_result_keeps_controlled_dimension():
+    """受控维度 / decision 维度原样保留(供前端定位)。"""
+    result = QCResult(verdict="retry_collect", issues=[
+        QCIssue(competitor="飞书", dimension="pricing", problem_type="low_coverage", detail="x"),
+        QCIssue(competitor="*", dimension="decision", problem_type="missing_evidence", detail="y")])
+    out = sanitize_qc_result(result)
+    assert out["issues"][0]["dimension"] == "pricing"
+    assert out["issues"][1]["dimension"] == "decision"
 
 
 def test_check_end_to_end_retry_collect_with_issues_flowing_through():

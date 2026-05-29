@@ -186,9 +186,13 @@ class Decision(BaseModel):
 
 class DecisionSet(BaseModel):
     """决策集合 —— LLM function-calling 产出的顶层对象(structured_call 需 BaseModel,
-    list[Decision] 不是 BaseModel 无法作 tool parameters)。"""
+    list[Decision] 不是 BaseModel 无法作 tool parameters)。
 
-    decisions: list[Decision] = Field(default_factory=list)
+    max_length=8:与 generate_decisions prompt「3-5 条」对齐的硬上限 —— 在 schema 源头
+    封顶决策数,防 LLM 失控吐 N 条把 decide 节点的蕴含调用预算撑爆(cost guard 第一道闸,
+    adversarial review M3)。"""
+
+    decisions: list[Decision] = Field(default_factory=list, max_length=8)
 
 
 class ReportInsight(BaseModel):

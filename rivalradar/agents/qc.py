@@ -147,15 +147,23 @@ def check_decision_entailment(
     """LLM 蕴含:被引证据是否支撑决策的 action+why;不支撑 → hallucination。
 
     COST GUARD(Codex #4):每条决策一次调用,但**封顶 max_calls 次** —— 决策通常
-    3-5 条,cap 防 LLM 失控吐 N 条触发 retry-storm 撞 90s SDK timeout;超额决策跳过
-    蕴含(机械门 check_decision_traceability 仍覆盖其溯源)。错误契约同 check_entailment:
-    structured_call 失败上抛,由 decide 节点捕获降级。"""
+    3-5 条(DecisionSet.max_length=8 源头硬封),cap 防 LLM 失控吐 N 条触发 retry-storm
+    撞 90s SDK timeout;超额 / 悬空引用决策跳过蕴含(机械门 check_decision_traceability
+    仍覆盖其溯源)。错误契约同 check_entailment:structured_call 失败上抛,由 decide 节点
+    捕获降级。
+
+    真实 SDK 请求口径(adversarial review M3):每次"调用"是一次 structured_call,其内部
+    max_retries=2(最多 3 次 SDK create);decide 节点最多重生 1 轮。故单 decide 节点最坏
+    SDK 请求 ≈ 重生 2 轮 ×(generate ×3 + entail max_calls ×3)。有界(非无限 storm),
+    每次受 90s per-call 保护;但若要进一步压总时长,调小 max_calls 或 decide 重生轮数。"""
     idx = {e.id: e for e in evidence}
     issues: list[QCIssue] = []
     calls = 0
     for d in decisions:
-        if not d.evidence_refs:
-            continue  # 空引用归 traceability
+        # 空引用 / 任一悬空引用都归 check_decision_traceability 负责 → 跳过蕴含,
+        # 不耗 cost guard 预算去验证机械门已判 ungrounded 的决策(adversarial review)。
+        if not d.evidence_refs or any(r.evidence_id not in idx for r in d.evidence_refs):
+            continue
         if calls >= max_calls:
             break  # cost guard:超额不再调 LLM
         quotes = []
@@ -189,23 +197,29 @@ def decide_verdict(issues: list[QCIssue]) -> QCVerdict:
 # ── /qc 端点 sanitize(Epic 2.4 / Codex #9)──────────────────────────────────
 # GET /qc/:run 是公开端点(与 /trace 同级)。QCIssue.detail 含 check_entailment 写入的
 # 模型文本({verdict.reason})—— 绝不能原样暴露。投影成按 problem_type 的罐装中文文案
-# (我方构造,零模型文本 / 零异常),保留 competitor/dimension/problem_type 供前端用。
+# (我方构造,零模型文本 / 零异常)。
+# dimension 也必须白名单:schema_incomplete issue 的 dimension 就是 LLM 产出的"越界
+# 维度名"(check_ontology 用 row.dimension / e.dimension 构造),本体越界时 LLM 可塞任意
+# 字符串 → 越界即替占位,守住"零模型文本"契约(adversarial review M1)。competitor 为
+# 竞品名短标签(多数来自用户请求列表),保留供前端定位,不视作模型文本泄漏向量。
 _SANITIZED_DETAIL: dict[str, str] = {
     "missing_evidence": "结论缺少证据支撑",
     "low_coverage": "维度覆盖不足",
     "hallucination": "证据未能支撑该结论",
     "schema_incomplete": "维度不在受控本体内",
 }
+_SAFE_DIMENSIONS: frozenset[str] = frozenset(CONTROLLED_DIMENSIONS) | {"decision"}
 
 
 def sanitize_qc_result(result: QCResult) -> dict:
-    """把 QCResult 投影成可公开 serve 的 sanitized 形状:detail 一律换罐装文案。"""
+    """把 QCResult 投影成可公开 serve 的 sanitized 形状:detail 换罐装文案、越界 dimension
+    替占位 'out_of_ontology'(零模型文本)。"""
     return {
         "verdict": result.verdict,
         "issues": [
             {
                 "competitor": i.competitor,
-                "dimension": i.dimension,
+                "dimension": i.dimension if i.dimension in _SAFE_DIMENSIONS else "out_of_ontology",
                 "problem_type": i.problem_type,
                 "detail": _SANITIZED_DETAIL.get(i.problem_type, "质检发现问题"),
             }

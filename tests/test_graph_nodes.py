@@ -363,18 +363,61 @@ def test_decide_node_degrades_on_generate_failure(conn):
     assert repo.get_decisions(conn, "r1").decisions == []  # 空决策也持久化(非 None)
 
 
+_DANGLING = json.dumps({"decisions": [{
+    "stance": "建议采用", "action": "x", "horizon": "短期",
+    "risk_reversibility": "可逆", "risk_cost": "低", "why": "y",
+    "evidence_refs": [{"evidence_id": "ghost", "quote": "q"}], "watch": None}]})
+
+
 def test_decide_node_regenerates_once_then_accepts_degraded(conn):
-    """ungrounded(引用悬空)→ 有界重生 1 次仍 ungrounded → 接受 + 降级;
-    调用有界(2 gen + 2 entail = 4),不 retry-storm。"""
-    dangling = json.dumps({"decisions": [{
-        "stance": "建议采用", "action": "x", "horizon": "短期",
-        "risk_reversibility": "可逆", "risk_cost": "低", "why": "y",
-        "evidence_refs": [{"evidence_id": "ghost", "quote": "q"}], "watch": None}]})
+    """ungrounded(引用悬空)→ 有界重生 1 次仍 ungrounded → 接受 + 降级 + 仍持久化决策。
+    悬空决策被蕴含预过滤跳过(归机械门),故 calls=2 gen(无蕴含),有界无 storm。"""
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
-    client = _DecClient([dangling, _SUPPORTED, dangling, _SUPPORTED])
+    client = _DecClient([_DANGLING, _DANGLING])
     node = make_decide_node(conn=conn, client=client, model="m", as_of="2026-05-26",
                             max_decision_retries=1)
     out = node({"analysis": _full_clean_analysis("g1").model_dump(),
                 "evidence": _evidence_all_dims("g1")}, _CFG)
     assert out["decision_degraded"] is True               # 重生一次仍悬空 → 降级
-    assert client.chat.completions.calls == 4             # 2 gen + 2 entail,有界无 storm
+    assert client.chat.completions.calls == 2             # 2 gen,悬空决策跳过蕴含,无 storm
+    assert repo.get_decisions(conn, "r1").decisions[0].action == "x"  # 降级仍保留生成的决策
+
+
+def test_decide_node_regenerates_once_then_recovers_clean(conn):
+    """第 1 次 ungrounded → 重生第 2 次 clean(合法引用 + 蕴含 supported)→ 成功恢复
+    decision_degraded=False。calls=3(gen1 + gen2 + entail1),恢复路径(M7)。"""
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    client = _DecClient([_DANGLING, _decision_payload("g1"), _SUPPORTED])
+    node = make_decide_node(conn=conn, client=client, model="m", as_of="2026-05-26",
+                            max_decision_retries=1)
+    out = node({"analysis": _full_clean_analysis("g1").model_dump(),
+                "evidence": _evidence_all_dims("g1")}, _CFG)
+    assert out["decision_degraded"] is False              # 重生后 clean → 恢复
+    assert client.chat.completions.calls == 3             # gen1(悬空跳蕴含)+ gen2 + entail1
+    assert repo.get_decisions(conn, "r1").decisions[0].action == "本周评估接入"
+
+
+def test_decide_node_degrades_on_entailment_failure(conn):
+    """gen 成功但 entailment 抛 → 保机械门结果 + 降级 + break(防 storm),绝不崩图(M7)。"""
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+
+    class _GenOkEntailBoom:
+        def __init__(self, gen_payload):
+            self.gen_payload = gen_payload
+            self.calls = 0
+        def create(self, **kwargs):
+            self.calls += 1
+            if self.calls == 1:  # generate_decisions
+                return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                    tool_calls=[SimpleNamespace(function=SimpleNamespace(
+                        arguments=self.gen_payload))]))], usage=SimpleNamespace(total_tokens=10))
+            raise RuntimeError("entailment boom")  # check_decision_entailment 内 SDK 抛
+
+    completions = _GenOkEntailBoom(_decision_payload("g1"))
+    client = SimpleNamespace(chat=SimpleNamespace(completions=completions))
+    node = make_decide_node(conn=conn, client=client, model="m", as_of="2026-05-26")
+    out = node({"analysis": _full_clean_analysis("g1").model_dump(),
+                "evidence": _evidence_all_dims("g1")}, _CFG)
+    assert out["decision_degraded"] is True               # 蕴含失败 → 降级
+    assert completions.calls == 2                          # gen + 1 次 entail(抛即 break,不 storm)
+    assert repo.get_decisions(conn, "r1").decisions[0].action == "本周评估接入"  # 机械门通过的决策仍落库

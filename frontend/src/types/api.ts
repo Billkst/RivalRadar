@@ -250,6 +250,8 @@ export interface NodeSummary {
   degraded?: boolean // qc
   status?: string // finalize
   decisions?: number // decide (full-C)
+  // decide 节点发出,但当前 runStore 尚未消费(Epic 3/4 cockpit DecisionBoard 接);
+  // 实时降级信号现仅经 GET /run/:id.degraded 暴露,勿当已生效 SSE 信号用。
   decision_degraded?: boolean // decide
 }
 

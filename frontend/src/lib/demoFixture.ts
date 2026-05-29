@@ -29,6 +29,7 @@ export const DEMO_RUN_DETAIL: RunDetail = {
   dimensions: ['pricing', 'core_workflows', 'integrations', 'target_users'],
   status: 'done',
   degraded: false,
+  decision_context: '选型PM:为团队评估协作办公平台选型', // full-C(Epic 2):cockpit 回访显示处境
   created_at: new Date().toISOString(),
 }
 

@@ -101,8 +101,13 @@ def test_decision_observe_requires_full_watch():
                 evidence_refs=[_dref()])
     with pytest.raises(ValidationError):
         Decision(**base)  # watch 缺失
+    # 三字段任一空都必须拒绝(锁死 metric/threshold/trigger 全必填,防 and→or 改坏)
     with pytest.raises(ValidationError):
-        Decision(**base, watch=Watch(metric="渗透率", threshold="", trigger="复评"))  # 字段空
+        Decision(**base, watch=Watch(metric="", threshold=">30%", trigger="复评"))
+    with pytest.raises(ValidationError):
+        Decision(**base, watch=Watch(metric="渗透率", threshold="", trigger="复评"))
+    with pytest.raises(ValidationError):
+        Decision(**base, watch=Watch(metric="渗透率", threshold=">30%", trigger=""))
     ok = Decision(**base, watch=Watch(metric="AI 渗透率", threshold=">30%", trigger="复评接入"))
     assert ok.watch.threshold == ">30%"
 
