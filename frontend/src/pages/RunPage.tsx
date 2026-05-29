@@ -35,6 +35,9 @@ export function RunPage() {
 
   const [run, setRun] = React.useState<RunDetail | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  // StrictMode(dev)双调 effect + playFakeSSE 异步起播的竞态守卫:同步标记"已为此
+  // run_id 起播",防双播(证据计数翻倍)。genuine 重挂载(导航离开再回)→ 新 ref → 重播。
+  const demoFiredRef = React.useRef<string | null>(null)
 
   // Fetch RunSummary metadata (independent of SSE stream).
   // Demo path(Epic 7.1):isDemoRun 直接 set fixture,不打 backend。
@@ -65,7 +68,8 @@ export function RunPage() {
   React.useEffect(() => {
     if (!run_id) return
     if (isDemoRun(run_id)) {
-      if (storeRunId === run_id) return
+      if (storeRunId === run_id || demoFiredRef.current === run_id) return
+      demoFiredRef.current = run_id // 同步标记,先于异步 import,挡 StrictMode 第二次进入
       void import('@/dev/fakeSSEPlayer').then((m) =>
         m.playFakeSSE({ speed: 1.0, runId: run_id }),
       )
