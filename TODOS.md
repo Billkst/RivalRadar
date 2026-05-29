@@ -15,10 +15,6 @@
 **Priority:** P1
 **详情:** WAL 允许并发读 + 单写,但**两个**并发写在第二个 writer 上立即 `OperationalError: database is locked`(无超时等待)。`test_concurrent_two_posts_no_busy` 在低强度通过,高强度会触发。加 `conn.execute("PRAGMA busy_timeout=5000")` 在 `connect()` 内,让短暂争用透明 block 5s 后再 fail。
 
-### SDK 调用 timeout
-**Priority:** P2
-**详情:** `TavilyProvider.search()` / `ExaProvider.search()` / `structured_call()`(OpenAI SDK)使用各 SDK 默认 timeout。一个挂死的 provider 会让 SSE 请求 + DB conn 长时间占用。加显式 `connect/read/request` 截止时间,超时统一映射成 sanitize 后的 `timeout` 错误事件(Codex Medium #5)。
-
 ### `safe_fetch` 接入采集管线 + `httpx.Client` 生命周期
 **Priority:** P2
 **详情:** `rivalradar/collect/fetch.py` 写了 `safe_fetch + RateLimiter`,但当前 pipeline 直接 `provider.search()` 不走自抓 — dead code(maintainability specialist + Codex 都揪到)。要么接入(`source_url` 抓回 raw_content fallback),要么用 module docstring 标"Day-4 待接入"。同时 `httpx.Client` 创建后没 `__exit__`,fd leak(Codex Medium #6)— 用 `with httpx.Client() as c:` 上下文管理。
@@ -26,10 +22,6 @@
 ### SSRF 私有 IP 段过滤
 **Priority:** P2
 **详情:** `safe_fetch + follow_redirects=True` 可能跟随重定向到 `169.254.169.254` 元数据服务等内网地址(security specialist Medium #2)。在 `is_self_fetch_allowed` 或 `safe_fetch` 内加私有 IP 段过滤(`127.x / 10.x / 192.168.x / 169.254.x`)。当前 demo 阶段 URL 来自 Tavily/Exa 不直接用户控制,风险低。
-
-### 多 ThreadPool 单一失败不应 abort 整轮
-**Priority:** P2
-**详情:** `collect/pipeline.py` 用 `pool.map(...)`,一个 query 失败抛异常会让整个迭代器 abort,丢掉其他已成功结果(adversarial opus + Codex Medium #4 都揪到)。改用 `pool.submit + as_completed + try/except`,记 failed query summary,继续。
 
 ### POST /annotations auth
 **Priority:** P3
@@ -191,6 +183,10 @@
 
 ## Completed
 
+- Writer v2 — `generate_insight` 3 段 schema-encoded(market_context / differentiation_thesis / actionable_takeaway)替代 v1 单段 summary;rubric v1 真打两轮 18.5/30 → 24/30 验证(距 ref-01 仅 2 分);references/ 加 4 份中文 SaaS reference baseline + Round 1/2 evidence — **Completed:** v0.3.0.0 (2026-05-28)
+- pipeline graceful skip(`_run_query_safe` try/except + 返 []+ failed_count 日志)— 单 Tavily query 60s timeout 不再 abort 整轮 — **Completed:** v0.3.0.0 (2026-05-28)
+- SDK 调用 timeout — `structured_call` Doubao SDK 90s timeout(基于 production payload 35-70s 校准 + Clash 抖动 headroom)+ `APITimeoutError/APIConnectionError/APIError` 入 retry 循环 + 封顶 `StructuredCallError` 显式抛 — **Completed:** v0.3.0.0 (2026-05-28)
+- demo fixture 切中国本土竞品(飞书/钉钉/企业微信)+ SAMPLE_EVENTS Chinese delta + RunsPage placeholder 同步 — demo 叙事与 reference baseline + 真打 evidence 同赛道 — **Completed:** v0.3.0.0 (2026-05-28)
 - post-ship review 5 fix(demo fixture ai_features → target_users · DagDrawer demo bypass · CancelButton demo early-return · StatusBadge 'cancelled' 中文 label · finalize CAS guard 防 cancel race) — **Completed:** v0.2.0.0 (2026-05-28)
 - Lane F frontend 完整交付(虚拟办公室 paradigm + Epic 0-7 + demo fixture + lighthouse 100 + codex 4 fix) — **Completed:** v0.2.0.0 (2026-05-28)
 - 项目首次 ship + Lane A→E 完整发布 — **Completed:** v0.1.0.0 (2026-05-26)

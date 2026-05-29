@@ -88,3 +88,67 @@ def test_forces_tool_choice_and_sends_no_response_format():
     assert kwargs["tools"][0]["function"]["name"] == "emit_result"
     # schema 作为工具 parameters 传入(含 EvidenceRef 字段)
     assert "evidence_id" in kwargs["tools"][0]["function"]["parameters"]["properties"]
+
+
+def test_passes_timeout_to_sdk_call():
+    """post-real-run fix:防 Doubao SDK hang(Clash fake-ip 慢路径实测 14 min)。
+
+    timeout 范围 30-180s:backend realistic call(172 evidence ~34K char input)
+    实测 35-70s,90s 是 ~1.3x headroom + Clash 抖动 cap;< 30s 必 false positive。
+    """
+    client = FakeClient([_VALID])
+    structured_call(EvidenceRef, [{"role": "user", "content": "x"}],
+                    client=client, model="m")
+    kwargs = client.chat.completions.last_kwargs
+    assert "timeout" in kwargs
+    assert 30 <= kwargs["timeout"] <= 180
+
+
+class _NetworkErrorClient:
+    """模拟 SDK 抛 APITimeoutError / APIConnectionError 等网络层异常。"""
+    def __init__(self, errors_then_responses):
+        from openai import APITimeoutError
+        self._items = list(errors_then_responses)
+        self.calls = 0
+        self.chat = SimpleNamespace(completions=self)
+
+    def create(self, **kwargs):
+        item = self._items[self.calls]
+        self.calls += 1
+        if isinstance(item, Exception):
+            raise item
+        tool_calls = [SimpleNamespace(function=SimpleNamespace(arguments=item))]
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=tool_calls))],
+            usage=SimpleNamespace(total_tokens=10),
+        )
+
+
+def test_recovers_from_transient_timeout_then_succeeds(caplog):
+    """post-real-run fix:第 1 次 APITimeoutError → 第 2 次成功返回。"""
+    from openai import APITimeoutError
+    import httpx, logging
+    err = APITimeoutError(request=httpx.Request("POST", "https://x"))
+    client = _NetworkErrorClient([err, _VALID])
+    with caplog.at_level(logging.WARNING):
+        out = structured_call(EvidenceRef, [{"role": "user", "content": "x"}],
+                              client=client, model="m", max_retries=2)
+    assert out.evidence_id == "e1"
+    assert client.chat.completions.calls == 2
+    assert any("network error" in r.message for r in caplog.records)
+
+
+def test_raises_after_all_retries_exhausted_by_network_errors():
+    """post-real-run fix:全部 retry 都 timeout → 显式 StructuredCallError 让上层降级。"""
+    from openai import APITimeoutError
+    import httpx
+    err1 = APITimeoutError(request=httpx.Request("POST", "https://x"))
+    err2 = APITimeoutError(request=httpx.Request("POST", "https://x"))
+    err3 = APITimeoutError(request=httpx.Request("POST", "https://x"))
+    client = _NetworkErrorClient([err1, err2, err3])
+    with pytest.raises(StructuredCallError) as exc_info:
+        structured_call(EvidenceRef, [{"role": "user", "content": "x"}],
+                        client=client, model="m", max_retries=2)
+    msg = str(exc_info.value).lower()
+    assert "timed out" in msg or "timeout" in msg
+    assert client.chat.completions.calls == 3

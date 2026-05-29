@@ -1,15 +1,30 @@
 from __future__ import annotations
 
 import json
+import logging
 from typing import TypeVar
 
+from openai import APIConnectionError, APIError, APITimeoutError
 from pydantic import BaseModel, ValidationError
 
 from rivalradar.schema.doubao_schema import to_doubao_schema
 
+logger = logging.getLogger(__name__)
+
 T = TypeVar("T", bound=BaseModel)
 
 _TOOL_NAME = "emit_result"
+
+# 单次 SDK 调用上限(秒)。Clash fake-ip 偶发把 Doubao 端口路由到慢路径,
+# 不设 timeout SDK default 是 600s/无限,WSL2 真打 14 min hang 实测踩过。
+#
+# 90s 选择依据(post-real-run-5 二次校准):
+# - 直接 ping max_tokens=5 → 4-5s(欺骗性快)
+# - Mock realistic call(~3K char input + 1.2K token output)→ 24-25s
+# - Backend 真实 call(172 evidence × ~200 char = ~34K char input)→ 35-70s
+# - 60s 仍卡在 backend payload 边缘,run #5 在 analyst 又触发全 retry 失败
+# - 90s = backend worst realistic 70s 的 1.3x headroom,Clash 抖动 +20s 兜底
+_DEFAULT_REQUEST_TIMEOUT = 90.0
 
 
 class StructuredCallError(RuntimeError):
@@ -56,10 +71,22 @@ def structured_call(
     convo = list(messages)
     last_err: Exception | None = None
 
-    for _ in range(max_retries + 1):
-        resp = client.chat.completions.create(
-            model=model, messages=convo, tools=tools, tool_choice=tool_choice
-        )
+    for attempt in range(max_retries + 1):
+        try:
+            resp = client.chat.completions.create(
+                model=model, messages=convo, tools=tools, tool_choice=tool_choice,
+                timeout=_DEFAULT_REQUEST_TIMEOUT,
+            )
+        except (APITimeoutError, APIConnectionError, APIError) as err:
+            # 网络层失败(timeout / connection drop / 上游 5xx)归入 retry 循环。
+            # 不带 prompt 修改 — 同一 messages 重试,假设下次网络好。Clash 抖动
+            # 时 1-2 个 retry 一般够;如果全打不通,封顶后 raise 让上层走降级。
+            last_err = err
+            logger.warning(
+                "structured_call attempt %d/%d network error: %s: %s",
+                attempt + 1, max_retries + 1, type(err).__name__, str(err)[:200],
+            )
+            continue
         raw = _extract_tool_args(resp)
         try:
             if raw is None:

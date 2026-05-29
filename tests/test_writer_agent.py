@@ -1,7 +1,7 @@
 import json
 from types import SimpleNamespace
 
-from rivalradar.agents.writer import _fmt_refs, render_competitor, render_comparison, render_sources, render_body, ReportSummary, generate_summary, write_report
+from rivalradar.agents.writer import _fmt_refs, render_competitor, render_comparison, render_sources, render_body, ReportInsight, generate_insight, write_report
 from rivalradar.schema.models import (
     CompetitorProfile, FeatureItem, PricingModel, PricingTier,
     UserPersona, SWOT, SWOTPoint, EvidenceRef,
@@ -120,14 +120,23 @@ class _FakeClient:
         self.chat = SimpleNamespace(completions=_Completions(payloads))
 
 
-def test_generate_summary_returns_text():
-    client = _FakeClient([json.dumps({"summary": "Notion 提供 freemium 定价。"})])
-    out = generate_summary("正文……", client=client, model="m")
-    assert out == "Notion 提供 freemium 定价。"
-    assert client.chat.completions.calls == 1  # 导语恰一次 LLM 调用(预算锁)
+def test_generate_insight_returns_three_fields():
+    """post-rubric-v1 重构:summary 单段 → insight 3 段(market/thesis/takeaway)。"""
+    payload = json.dumps({
+        "market_context": "中国企业级 SaaS 协同办公赛道格局。",
+        "differentiation_thesis": "飞书走互联网协作工具路径,因为 X,所以 Y。",
+        "actionable_takeaway": "短期:做 X。中期:看 Y。长期:Z 会变。",
+    })
+    client = _FakeClient([payload])
+    insight = generate_insight("正文……", client=client, model="m")
+    assert isinstance(insight, ReportInsight)
+    assert "赛道" in insight.market_context
+    assert "因为" in insight.differentiation_thesis and "所以" in insight.differentiation_thesis
+    assert "短期" in insight.actionable_takeaway
+    assert client.chat.completions.calls == 1  # 单次 LLM 调用(预算锁)
 
 
-def test_write_report_combines_summary_and_deterministic_body():
+def test_write_report_combines_insight_and_deterministic_body():
     analysis = CompetitorAnalysis(
         competitors=[CompetitorProfile(
             name="Notion",
@@ -135,10 +144,23 @@ def test_write_report_combines_summary_and_deterministic_body():
             swot=SWOT())],
         comparison=[],
     )
-    client = _FakeClient([json.dumps({"summary": "导语:Notion 走 freemium。"})])
+    payload = json.dumps({
+        "market_context": "Notion 在 productivity 类工具赛道。",
+        "differentiation_thesis": "Notion 走 all-in-one 路径,因为 schema-flex,所以个人 + 团队都可用。",
+        "actionable_takeaway": "短期:做模板。中期:看 AI 集成。长期:格局往垂直分化。",
+    })
+    client = _FakeClient([payload])
     report = write_report(analysis, [_ev("e3")], as_of="2026-05-25", client=client, model="m")
     assert report.startswith("# 竞品分析报告")
-    assert "导语:Notion 走 freemium。" in report   # LLM 摘要
-    assert "## Notion" in report                    # 确定性正文
-    assert "[e3]" in report                         # 引用在正文
+    # 3 段执行洞察都在
+    assert "## 执行洞察" in report
+    assert "### 市场格局" in report
+    assert "### 战略路径分歧" in report
+    assert "### 给企业产品团队的 takeaway" in report
+    assert "Notion 在 productivity" in report
+    assert "Notion 走 all-in-one" in report
+    assert "短期:做模板" in report
+    # 确定性正文未受影响
+    assert "## Notion" in report
+    assert "[e3]" in report
     assert "as of 2026-05-25" in report

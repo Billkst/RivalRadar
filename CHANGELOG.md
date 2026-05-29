@@ -4,6 +4,33 @@ All notable changes to RivalRadar are documented here per [Keep a Changelog](htt
 
 Versioning follows 4-digit semver `MAJOR.MINOR.PATCH.MICRO`(< 1.0 表 API 未稳定,迭代期允许 breaking changes)。
 
+## [0.3.0.0] - 2026-05-28
+
+**输出质量第一个 release — writer v2 + production hardening + rubric v1 评估框架**。本轮 RivalRadar 从"demo 跑通"推到"输出质量可量化"。基于 4 份中文 SaaS 竞品 reference baseline(飞书/钉钉/企业微信、文档协作赛道)倒推 10 条 × 0-3 分 rubric,真打两轮迭代:Round 1 写 18507 字真报告 = **18.5/30 Adequate 上端**,#1 市场锚定 / #7 战略推论 / #9 时间分层三块战略向失 7.5 分;改造 writer prompt v2 重跑 Round 2 写 15932 字 = **24/30 Good 中段,距 ref-01 (26/30) 仅 2 分**。同时修两个 production P0:Tavily 单 query timeout 不再 abort 整轮 + Doubao SDK 90s timeout 接住 25K-34K char input。Demo fixture 切到中国本土竞品(飞书 / 钉钉 / 企业微信)与 reference baseline 同赛道,demo 叙事与 evaluator 评分维度对齐。
+
+### Added
+
+- **Writer v2 — `generate_insight` 3 段执行洞察**(`rivalradar/agents/writer.py:135`)— Pydantic `ReportInsight(market_context, differentiation_thesis, actionable_takeaway)` schema-encode 3 段 strategic synthesis,取代 v1 单段 `ReportSummary` 事实概括。Prompt 显式负 example("严禁持续关注/深入研究/保持观察 套话")+ 「因为 X 所以 Y」推论链强制 + 短/中/长期 actionable 三时间桶。Body 仍 deterministic Python 模板保 100% 引用完整性,insight 显式标"AI 基于正文综合判断"评委可分辨 fact vs judgment。
+- **Rubric v1 + 4 份中文 reference baseline**(`references/`)— 10 条 × 0-3 分 = 30 满分,分 A 组(5 条结构覆盖)+ B 组(5 条质量洞察);等级阈值 Excellent(25-30) / Good(20-24) / Adequate(15-19) / Weak(10-14) / Fail(<10)。Reference:`ref-01` 人人都是产品经理(飞书+钉钉+企微,26/30) / `ref-02` 36氪(钉钉vs飞书 5 年战略,25/30) / `ref-03` 人人都是产品经理(石墨+腾讯+金山,24/30) / `ref-04` 艾瑞 2024 协同办公 38 页 PDF(28/30,厂商权威)。每份 YAML frontmatter 记 source_url / author / fetched_at / quality_score。
+- **RivalRadar 真打 evidence**(`references/rivalradar-output/`)— Round 1 `run-001-feishu-dingding/`(writer v1 baseline 18.5/30 + report.md 18507 字 + analysis.json + report-raw.json + trace.json)+ Round 2 `run-002-writer-v2/`(writer prompt v2 24/30 + report.md 15932 字 + analysis.json + report-raw.json)。配 `references/README.md` 自解释 rubric 评分 + iteration learning + 新 run 评估流程。
+- **Pipeline graceful skip**(`rivalradar/collect/pipeline.py`)— `_run_query_safe` wrap `_run_query` 加 try/except + warning 日志 + 返 [],单 query 失败(Tavily 60s timeout / provider 全挂 / 网络抖)不再 `AllProvidersFailedError` abort 整轮采集。末尾 info 日志统计 failed_count / total queries,QC 自然识别 coverage 不足触发 retry_collect 或 insufficient_evidence。
+- **`structured_call` SDK timeout=90s + 网络异常 retry**(`rivalradar/llm/structured.py`)— Doubao SDK 之前没 timeout(default 600s/无限),Clash fake-ip 偶发慢路径单 call hang 14 min(实测踩过)。`_DEFAULT_REQUEST_TIMEOUT = 90.0` calibrated:ping 4-5s(欺骗性)/ mock realistic 24s / production 25K-34K char input 35-70s / 60s 仍卡边缘 / 90s = 70s × 1.3x headroom + Clash 抖动 +20s。`APITimeoutError / APIConnectionError / APIError` 入 retry 循环,封顶后 `StructuredCallError` 让上层降级,绝不静默吞。
+- **Demo fixture 切中国本土竞品**(`frontend/src/lib/demoFixture.ts` + `frontend/src/dev/fakeSSEPlayer.ts` + `frontend/src/pages/RunsPage.tsx`)— `DEMO_RUN_DETAIL.competitors` 从 `[Notion, Coda, Airtable]` 改 `[飞书, 钉钉, 企业微信]`;SAMPLE_EVENTS analyst chunk delta `Notion 和 Coda` → `飞书 和 钉钉` + writer chunk delta `Notion 在` → `飞书 在`;RunsPage input placeholder 同步对齐。Demo 叙事与 reference + 真打 evidence 同赛道。
+- **测试覆盖**:218 pass(从 v0.2.0.0 214 +4 新)— `test_collect_graceful_skip_on_single_query_failure`(_PartialFailProvider mock + caplog 验 warning 日志)+ `test_passes_timeout_to_sdk_call`(timeout kwarg ∈ [30, 180])+ `test_recovers_from_transient_timeout_then_succeeds`(1 失败 + 1 成功)+ `test_raises_after_all_retries_exhausted_by_network_errors`(全 timeout → StructuredCallError 含 "timed out")+ `test_generate_insight_returns_three_fields`(Pydantic 3 字段 round-trip)+ `test_write_report_combines_insight_and_deterministic_body`(3 段 section + body 引用 + as_of)。
+
+### Changed
+
+- **Writer 报告结构**:`# 竞品分析报告` 顶部 `## 执行洞察(AI 基于下方正文综合)` 3 段 markdown — 市场格局 + 战略路径分歧 + 给企业产品团队的 takeaway(短/中/长期)— 替代 v1 `## 摘要(AI 生成,仅概括下方结论)`。Body 完全不动,引用完整性 100% 保留,#4 信息溯源 3/3 满分不退。
+- **`generate_summary` → `generate_insight`**(API rename,v0.2.x → v0.3.0)。旧函数完全移除,`structured_call` 调用从 `ReportSummary` 改 `ReportInsight`。
+
+### Iteration learning(本轮验证)
+
+1. **Schema-encoded prompt > 自然语言 prompt** — Pydantic 3 字段强制比 prompt 里说"请分 3 段"可靠 5×。
+2. **Negative example 比 positive 强** — "严禁持续关注/深入研究/保持观察"直接生效。
+3. **Hybrid Python+LLM 架构是产品级输出标准** — Python 模板保 100% 引用完整性,LLM 担 strategic synthesis 显式标"AI 综合判断"。
+4. **Doubao SDK timeout 必须基于 production payload 测** — ping vs mock vs production 是三个尺度,凭直觉算 5× 系数会踩。
+5. **Pipeline graceful skip 是 production 必须** — 外部 API 在 thread pool 内必须 safe-wrap,Tavily/Doubao/Exa 任一抖动都不该 abort。
+
 ## [0.2.0.0] - 2026-05-28
 
 **Lane F 前端完整交付**:虚拟办公室 paradigm 实装(35% 评分命门)。用户进 `/run/:id` 看到 4 个 agent character(收集员 🦉 / 分析员 🦊 / 撰稿员 🦝 / 质检员 🐢)在 2x2 工位实时工作,带 ripple ring(工作中)/ ✓ checkmark(完成)/ "已工作 N 秒" elapsed badge。Agent 间任务交接走中央会议区动画(招牌时刻 #3),writer chunks 实时累积到底部 ReportSheet drawer。Office 视图旁可一键切 DAG 工程视图(架构图 + ObservabilityPanel 原始 event timeline),保留工程深度展示。Demo 模式 fixture(`run_demo01`)走纯前端 replay,demo day 即使 backend / Clash / Doubao 全挂也能完整跑 25s。
