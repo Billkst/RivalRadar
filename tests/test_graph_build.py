@@ -17,8 +17,9 @@ class _NoopProvider:
         return []
 
 
-def test_build_compiles_with_five_nodes(conn):
+def test_build_compiles_with_pipeline_nodes(conn):
     graph = build_research_graph(conn=conn, client=None, model="m",
                                  provider=_NoopProvider(), as_of="2026-05-26")
     names = set(graph.get_graph().nodes)
-    assert {"collect", "analyze", "write", "qc", "finalize"} <= names
+    # full-C 后含 decide 节点(Epic 2):collect→analyze→write→qc→decide→finalize
+    assert {"collect", "analyze", "write", "qc", "decide", "finalize"} <= names

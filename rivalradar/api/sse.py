@@ -67,6 +67,12 @@ def _summarize_delta(node: str, delta: dict[str, Any]) -> dict[str, Any]:
                 "issue_types": issue_types,
                 "retry_count": delta.get("retry_count"),
                 "degraded": delta.get("degraded")}
+    if node == "decide":
+        # full-C 决策节点(Epic 2):前端 cockpit DecisionBoard 据此显示决策数 + 降级态
+        ds = delta.get("decisions", {})
+        return {"node": "decide",
+                "decisions": len(ds.get("decisions", [])),
+                "decision_degraded": delta.get("decision_degraded")}
     if node == "finalize":
         return {"node": "finalize",
                 "status": delta.get("status"),

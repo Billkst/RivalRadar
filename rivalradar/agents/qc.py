@@ -6,7 +6,8 @@ from pydantic import BaseModel
 
 from rivalradar.llm.structured import structured_call
 from rivalradar.schema.models import (
-    CONTROLLED_DIMENSIONS, CompetitorAnalysis, Evidence, EvidenceRef, QCIssue, QCResult, QCVerdict,
+    CONTROLLED_DIMENSIONS, CompetitorAnalysis, Decision, Evidence, EvidenceRef,
+    QCIssue, QCResult, QCVerdict,
 )
 
 
@@ -113,6 +114,64 @@ def check_entailment(
             issues.append(QCIssue(competitor=comp, dimension=dim,
                                   problem_type="hallucination",
                                   detail=f"证据不支撑结论({text}):{verdict.reason}"))
+    return issues
+
+
+# ── QC-on-decisions(full-C / Epic 2.3)──────────────────────────────────────
+# 决策级 QC issue 用 dimension='decision' 标记,与 analysis issue 区分:它们不进
+# analysis 的 retry_collect/retry_analyze 路由,而是由 decide 节点内部消费(有界重生)。
+def check_decision_traceability(
+    decisions: list[Decision], evidence: list[Evidence]
+) -> list[QCIssue]:
+    """机械门:每条决策必须挂非空、且 evidence_id 存在于证据集的 evidence_refs。"""
+    valid = {e.id for e in evidence}
+    issues: list[QCIssue] = []
+    for d in decisions:
+        if not d.evidence_refs:
+            issues.append(QCIssue(competitor="*", dimension="decision",
+                                  problem_type="missing_evidence",
+                                  detail=f"决策无引用:{d.action}"))
+            continue
+        for r in d.evidence_refs:
+            if r.evidence_id not in valid:
+                issues.append(QCIssue(competitor="*", dimension="decision",
+                                      problem_type="missing_evidence",
+                                      detail=f"决策引用了不存在的 evidence_id={r.evidence_id}:{d.action}"))
+    return issues
+
+
+def check_decision_entailment(
+    decisions: list[Decision], evidence: list[Evidence], *, client, model,
+    max_calls: int = 8,
+) -> list[QCIssue]:
+    """LLM 蕴含:被引证据是否支撑决策的 action+why;不支撑 → hallucination。
+
+    COST GUARD(Codex #4):每条决策一次调用,但**封顶 max_calls 次** —— 决策通常
+    3-5 条,cap 防 LLM 失控吐 N 条触发 retry-storm 撞 90s SDK timeout;超额决策跳过
+    蕴含(机械门 check_decision_traceability 仍覆盖其溯源)。错误契约同 check_entailment:
+    structured_call 失败上抛,由 decide 节点捕获降级。"""
+    idx = {e.id: e for e in evidence}
+    issues: list[QCIssue] = []
+    calls = 0
+    for d in decisions:
+        if not d.evidence_refs:
+            continue  # 空引用归 traceability
+        if calls >= max_calls:
+            break  # cost guard:超额不再调 LLM
+        quotes = []
+        for r in d.evidence_refs:
+            src = idx[r.evidence_id].content if r.evidence_id in idx else ""
+            quotes.append(f"- 引语:{r.quote}\n  证据原文:{src[:600]}")
+        msgs = [{"role": "user", "content":
+                 "判断下列证据是否支撑该决策建议。supported=true 表示证据确实支撑该建议的"
+                 "行动与理由;false 表示不支撑或无关。\n\n"
+                 f"决策(行动):{d.action}\n理由:{d.why}\n\n证据:\n" + "\n".join(quotes)}]
+        verdict = structured_call(EntailmentVerdict, msgs, client=client, model=model)
+        calls += 1
+        if not verdict.supported:
+            issues.append(QCIssue(competitor="*", dimension="decision",
+                                  problem_type="hallucination",
+                                  detail=f"证据不支撑决策({d.action}):{verdict.reason}"))
     return issues
 
 

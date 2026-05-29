@@ -3,7 +3,10 @@ import pytest
 from rivalradar.schema.models import (
     CompetitorAnalysis,
     CompetitorProfile,
+    Decision,
+    DecisionSet,
     Evidence,
+    EvidenceRef,
     PricingModel,
     SWOT,
 )
@@ -33,6 +36,22 @@ def test_evidence_roundtrip(conn):
     got = repo.get_evidence(conn, "e1")
     assert got == _evidence("e1")
     assert {e.id for e in repo.list_evidence(conn, "r1")} == {"e1", "e2"}
+
+
+def test_decisions_roundtrip(conn):
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    ds = DecisionSet(decisions=[Decision(
+        stance="建议采用", action="本周评估飞书审批", horizon="短期",
+        risk_reversibility="可逆", risk_cost="低", why="生态成熟",
+        evidence_refs=[EvidenceRef(evidence_id="e1", quote="q")])])
+    repo.save_decisions(conn, "r1", ds)
+    assert repo.get_decisions(conn, "r1") == ds
+
+
+def test_get_decisions_none_for_old_run(conn):
+    """老 run(decisions 表无行)→ get 返 None(GET /decisions 据此 404,天然 null 态)。"""
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    assert repo.get_decisions(conn, "r1") is None
 
 
 def test_insert_evidence_same_id_across_runs_no_integrity_error(conn):

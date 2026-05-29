@@ -4,7 +4,7 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-from rivalradar.schema.models import CompetitorAnalysis, Evidence
+from rivalradar.schema.models import CompetitorAnalysis, DecisionSet, Evidence
 
 
 def _now() -> str:
@@ -173,6 +173,23 @@ def save_report(conn: sqlite3.Connection, run_id: str, markdown: str) -> None:
 def get_report(conn: sqlite3.Connection, run_id: str) -> str | None:
     row = conn.execute("SELECT markdown FROM report WHERE run_id=?", (run_id,)).fetchone()
     return row["markdown"] if row else None
+
+
+# ---- decisions(full-C / Epic 2.4)----
+def save_decisions(conn: sqlite3.Connection, run_id: str,
+                   decision_set: DecisionSet) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO decisions (run_id, payload, created_at) VALUES (?, ?, ?)",
+        (run_id, decision_set.model_dump_json(), _now()),
+    )
+    conn.commit()
+
+
+def get_decisions(conn: sqlite3.Connection, run_id: str) -> DecisionSet | None:
+    row = conn.execute("SELECT payload FROM decisions WHERE run_id=?", (run_id,)).fetchone()
+    if row is None:
+        return None
+    return DecisionSet.model_validate_json(row["payload"])
 
 
 # ---- trace ----

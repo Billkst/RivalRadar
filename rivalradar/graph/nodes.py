@@ -6,13 +6,13 @@ from typing import Any, Callable
 
 from rivalradar.agents.analyst import analyze
 from rivalradar.agents.collector import collect_evidence
-from rivalradar.agents.writer import write_report
+from rivalradar.agents.writer import generate_decisions, render_body, write_report
 from rivalradar.graph.router import extract_collect_targets
 from rivalradar.agents import qc
-from rivalradar.schema.models import CompetitorAnalysis, Evidence, QCResult
+from rivalradar.schema.models import CompetitorAnalysis, DecisionSet, Evidence, QCResult
 from rivalradar.storage.repository import (
     append_trace, insert_evidence, mark_run_finalized, save_analysis,
-    save_report, update_run_degraded,
+    save_decisions, save_report, update_run_degraded,
 )
 
 logger = logging.getLogger(__name__)
@@ -214,6 +214,71 @@ def make_qc_node(*, conn, client, model):
     return qc_node
 
 
+def make_decide_node(*, conn, client, model, as_of, max_decision_retries: int = 1):
+    """决策节点(full-C / Epic 2.2-2.3):分析正文 + 用户处境 → 结构化决策建议,
+    QC 校验决策溯源 + 蕴含,ungrounded → 有界重生(最多 max_decision_retries 次),
+    仍不达标 → 接受 + decision_degraded(防 retry-storm,Codex #4)。
+
+    错误契约(对齐 qc 节点必办项①):generate / entailment 任何失败都 try/except 降级,
+    绝不崩整图。决策级 QC issue 不进 analysis retry 路由 —— 仅在本节点内部消费。
+    """
+    def decide_node(state, config):
+        run_id = config["configurable"]["thread_id"]
+        emit = _get_emit(config)
+        t0 = time.monotonic()
+        analysis = CompetitorAnalysis(**state["analysis"])
+        evidence = [Evidence(**d) for d in state["evidence"]]
+        decision_context = state.get("decision_context") or ""
+        body = render_body(analysis, evidence, as_of=as_of)  # 确定性,无 LLM
+        _emit_progress(emit, "decide", "deciding", "正在基于证据生成决策建议")
+
+        decision_set = DecisionSet(decisions=[])
+        decision_degraded = False
+        for attempt in range(max_decision_retries + 1):
+            try:
+                decision_set = generate_decisions(
+                    body, decision_context, client=client, model=model)
+            except Exception as e:  # noqa: BLE001 — 生成失败降级,绝不崩图
+                logger.exception("decide generate failed for run %s", run_id)
+                append_trace(conn, run_id, "decide",
+                             output_summary=f"generate degraded: {type(e).__name__}")
+                decision_set = DecisionSet(decisions=[])
+                decision_degraded = True
+                break
+            issues = qc.check_decision_traceability(decision_set.decisions, evidence)
+            try:
+                issues += qc.check_decision_entailment(
+                    decision_set.decisions, evidence, client=client, model=model)
+            except Exception as e:  # noqa: BLE001 — 蕴含失败:保机械门结果 + 降级,不重生(防 storm)
+                logger.exception("decide entailment failed for run %s", run_id)
+                append_trace(conn, run_id, "decide",
+                             output_summary=f"entailment degraded: {type(e).__name__}")
+                decision_degraded = True
+                break
+            if not issues:
+                break  # 决策全溯源 + 蕴含通过
+            if attempt >= max_decision_retries:
+                decision_degraded = True  # 重生预算耗尽仍 ungrounded → 接受 + 标降级
+                break
+            # else: 循环 → 重生一次(下一 attempt)
+
+        save_decisions(conn, run_id, decision_set)
+        _emit_progress(
+            emit, "decide", "done",
+            f"生成 {len(decision_set.decisions)} 条决策建议"
+            + ("(部分未达溯源标准,已标降级)" if decision_degraded else ""),
+            metric={"current": len(decision_set.decisions),
+                    "total": len(decision_set.decisions)},
+        )
+        append_trace(conn, run_id, "decide",
+                     input_summary=f"context={'set' if decision_context else 'generic'}",
+                     output_summary=f"decisions={len(decision_set.decisions)} "
+                                    f"degraded={decision_degraded}",
+                     latency_ms=int((time.monotonic() - t0) * 1000))
+        return {"decisions": decision_set.model_dump(), "decision_degraded": decision_degraded}
+    return decide_node
+
+
 _BANNER_INSUFFICIENT = (
     "> ⚠️ **数据不足**:部分维度在有界广搜后仍未找到公开数据。"
     "以下为现有证据下的结论(诚实标注优于编造)。\n\n"
@@ -249,8 +314,12 @@ def make_finalize_node(*, conn, max_retries):
         # 50ms sync 代码 跑完用非 CAS update_run_status 覆盖)。对称 mark_run_failed
         # /mark_run_cancelled CAS pattern。
         mark_run_finalized(conn, run_id, status)
-        # 持久化蕴含降级标志(Lane D 遗留收口,spec §11.5 前端横幅依赖)
-        update_run_degraded(conn, run_id, state.get("degraded", False))
+        # 持久化降级标志(Lane D 遗留收口,spec §11.5 前端横幅依赖)。Epic 2.3:决策
+        # 降级(decision_degraded)并入同一 degraded 信号 —— 用户看到的"以下结论请谨慎"
+        # 横幅同样覆盖"决策未达溯源标准"(reuse degraded-on-failure pattern)。
+        update_run_degraded(
+            conn, run_id,
+            bool(state.get("degraded", False)) or bool(state.get("decision_degraded", False)))
         append_trace(conn, run_id, "finalize",
                      output_summary=f"status={status} verdict={result['verdict']}")
         return {"report": report, "qc_result": result, "status": status}

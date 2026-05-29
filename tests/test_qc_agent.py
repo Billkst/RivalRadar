@@ -3,12 +3,12 @@ from types import SimpleNamespace
 
 from rivalradar.agents.qc import (
     check_traceability, check_ontology, check_coverage, EntailmentVerdict, check_entailment,
-    decide_verdict, check,
+    decide_verdict, check, check_decision_traceability, check_decision_entailment,
 )
 from rivalradar.schema.models import (
     CompetitorAnalysis, CompetitorProfile, FeatureItem, PricingModel,
     SWOT, SWOTPoint, ComparisonRow, ComparisonCell, EvidenceRef, Evidence,
-    QCIssue, QCResult,
+    QCIssue, QCResult, Decision,
 )
 
 
@@ -160,6 +160,58 @@ def test_check_end_to_end_clean_passes():
     result = check(analysis, [_ev("e1")], client=client, model="m")
     assert isinstance(result, QCResult)
     assert result.verdict == "pass" and result.issues == []
+
+
+# ── QC-on-decisions(Epic 2.3)───────────────────────────────────────────────
+def _decision(action="本周评估飞书审批接入", refs=("e1",)):
+    return Decision(stance="建议采用", action=action, horizon="短期",
+                    risk_reversibility="可逆", risk_cost="低", why="飞书审批生态成熟",
+                    evidence_refs=[EvidenceRef(evidence_id=r, quote="q") for r in refs])
+
+
+def test_check_decision_traceability_flags_empty_refs():
+    d = Decision(stance="建议采用", action="x", horizon="短期", risk_reversibility="可逆",
+                 risk_cost="低", why="y", evidence_refs=[])
+    issues = check_decision_traceability([d], [_ev("e1")])
+    assert any(i.problem_type == "missing_evidence" and i.dimension == "decision" for i in issues)
+
+
+def test_check_decision_traceability_flags_dangling_id():
+    issues = check_decision_traceability([_decision(refs=("ghost",))], [_ev("e1")])
+    assert any("ghost" in i.detail for i in issues)
+
+
+def test_check_decision_traceability_clean_when_valid():
+    assert check_decision_traceability([_decision(refs=("e1",))], [_ev("e1")]) == []
+
+
+def test_check_decision_entailment_flags_unsupported():
+    client = _FakeClient([json.dumps({"supported": False, "reason": "证据与该建议无关"})])
+    issues = check_decision_entailment([_decision(refs=("e1",))], [_ev("e1")], client=client, model="m")
+    assert len(issues) == 1 and issues[0].problem_type == "hallucination"
+    assert issues[0].dimension == "decision"
+
+
+def test_check_decision_entailment_clean_when_supported():
+    client = _FakeClient([json.dumps({"supported": True, "reason": ""})])
+    assert check_decision_entailment([_decision(refs=("e1",))], [_ev("e1")],
+                                     client=client, model="m") == []
+
+
+def test_check_decision_entailment_cost_guard_caps_calls():
+    """COST GUARD(Codex #4):决策数 > max_calls 时封顶,防 retry-storm 撞 90s timeout。"""
+    decisions = [_decision(action=f"动作{i}", refs=("e1",)) for i in range(10)]
+    client = _FakeClient([json.dumps({"supported": True, "reason": ""}) for _ in range(10)])
+    check_decision_entailment(decisions, [_ev("e1")], client=client, model="m", max_calls=3)
+    assert client.chat.completions.calls == 3  # 只调 3 次,其余 7 条不验证(机械门仍覆盖)
+
+
+def test_check_decision_entailment_skips_empty_refs():
+    d = Decision(stance="建议采用", action="x", horizon="短期", risk_reversibility="可逆",
+                 risk_cost="低", why="y", evidence_refs=[])
+    client = _FakeClient([])  # 不应触发任何调用
+    assert check_decision_entailment([d], [_ev("e1")], client=client, model="m") == []
+    assert client.chat.completions.calls == 0
 
 
 def test_check_end_to_end_retry_collect_with_issues_flowing_through():

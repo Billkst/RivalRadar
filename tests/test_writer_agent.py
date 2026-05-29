@@ -1,7 +1,11 @@
 import json
 from types import SimpleNamespace
 
-from rivalradar.agents.writer import _fmt_refs, render_competitor, render_comparison, render_sources, render_body, ReportInsight, generate_insight, write_report
+from rivalradar.agents.writer import (
+    _fmt_refs, render_competitor, render_comparison, render_sources, render_body,
+    ReportInsight, generate_insight, write_report, generate_decisions, PLATITUDE_TERMS,
+)
+from rivalradar.schema.models import DecisionSet
 from rivalradar.schema.models import (
     CompetitorProfile, FeatureItem, PricingModel, PricingTier,
     UserPersona, SWOT, SWOTPoint, EvidenceRef,
@@ -164,3 +168,60 @@ def test_write_report_combines_insight_and_deterministic_body():
     assert "## Notion" in report
     assert "[e3]" in report
     assert "as of 2026-05-25" in report
+
+
+# ── generate_decisions(Epic 2.2)────────────────────────────────────────────
+class _CaptureCompletions:
+    """记录最后一次 create 的 kwargs,用于断言 prompt 语气分支。"""
+    def __init__(self, payload):
+        self.payload = payload; self.calls = 0; self.last_kwargs = None
+    def create(self, **kwargs):
+        self.calls += 1; self.last_kwargs = kwargs
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=self.payload))]))],
+            usage=SimpleNamespace(total_tokens=10))
+
+
+class _CaptureClient:
+    def __init__(self, payload):
+        self.chat = SimpleNamespace(completions=_CaptureCompletions(payload))
+
+
+_DEC_PAYLOAD = json.dumps({"decisions": [{
+    "stance": "建议采用", "action": "本周评估飞书审批接入", "horizon": "短期",
+    "risk_reversibility": "可逆", "risk_cost": "低", "why": "飞书审批生态成熟",
+    "evidence_refs": [{"evidence_id": "e3", "quote": "审批模块上线"}], "watch": None,
+}]})
+
+
+def test_generate_decisions_returns_decision_set_single_call():
+    client = _CaptureClient(_DEC_PAYLOAD)
+    ds = generate_decisions("正文…[来源] [e3]", "选型PM:要不要采购飞书",
+                            client=client, model="m")
+    assert isinstance(ds, DecisionSet)
+    assert ds.decisions[0].action == "本周评估飞书审批接入"
+    assert client.chat.completions.calls == 1  # 单次 LLM 调用(成本锁)
+
+
+def test_generate_decisions_specific_context_uses_imperative_framing():
+    client = _CaptureClient(_DEC_PAYLOAD)
+    generate_decisions("正文", "选型PM:要不要采购飞书", client=client, model="m")
+    prompt = client.chat.completions.last_kwargs["messages"][0]["content"]
+    assert "选型PM:要不要采购飞书" in prompt
+    assert "命令式" in prompt
+
+
+def test_generate_decisions_generic_context_converges_to_market_observation():
+    """D8:无处境(通用浏览)→ prompt 收敛为「市场观察」语气 + 标通用判断。"""
+    client = _CaptureClient(_DEC_PAYLOAD)
+    generate_decisions("正文", "", client=client, model="m")
+    prompt = client.chat.completions.last_kwargs["messages"][0]["content"]
+    assert "市场观察" in prompt and "通用判断" in prompt
+
+
+def test_generate_decisions_prompt_bans_platitudes():
+    client = _CaptureClient(_DEC_PAYLOAD)
+    generate_decisions("正文", None, client=client, model="m")
+    prompt = client.chat.completions.last_kwargs["messages"][0]["content"]
+    assert "持续关注" in prompt  # 黑名单词出现在「严禁」约束里
+    assert all(term in PLATITUDE_TERMS for term in ("持续关注", "深入研究"))

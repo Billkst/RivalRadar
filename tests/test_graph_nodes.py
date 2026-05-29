@@ -1,7 +1,11 @@
 import hashlib
+import json
+from types import SimpleNamespace
 
 from rivalradar.agents import qc
-from rivalradar.graph.nodes import make_collect_node, make_analyze_node, make_write_node, make_qc_node
+from rivalradar.graph.nodes import (
+    make_collect_node, make_analyze_node, make_write_node, make_qc_node, make_decide_node,
+)
 from rivalradar.llm.structured import StructuredCallError
 from rivalradar.schema.models import (
     CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
@@ -276,3 +280,74 @@ def test_finalize_persists_state_degraded_with_pass_verdict(conn):
     assert out["status"] == "done"  # verdict=pass → status=done
     run = repo.get_run(conn, "r1")
     assert run["degraded"] is True  # 关键:state.degraded → db.degraded 持久化
+
+
+# ── decide 节点(full-C / Epic 2.2-2.3)──────────────────────────────────────
+class _DecCompletions:
+    def __init__(self, payloads):
+        self.payloads = list(payloads); self.calls = 0
+    def create(self, **kwargs):
+        p = self.payloads[self.calls]; self.calls += 1
+        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+            tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=p))]))],
+            usage=SimpleNamespace(total_tokens=10))
+
+
+class _DecClient:
+    def __init__(self, payloads):
+        self.chat = SimpleNamespace(completions=_DecCompletions(payloads))
+
+
+def _decision_payload(eid="g1"):
+    return json.dumps({"decisions": [{
+        "stance": "建议采用", "action": "本周评估接入", "horizon": "短期",
+        "risk_reversibility": "可逆", "risk_cost": "低", "why": "生态成熟",
+        "evidence_refs": [{"evidence_id": eid, "quote": "q"}], "watch": None}]})
+
+
+_SUPPORTED = json.dumps({"supported": True, "reason": ""})
+
+
+def test_decide_node_generates_qcs_and_persists(conn):
+    """happy:gen 出 1 条挂合法引用的决策 + 蕴含 supported → 无 issue,持久化,不降级。"""
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    client = _DecClient([_decision_payload("g1"), _SUPPORTED])
+    node = make_decide_node(conn=conn, client=client, model="m", as_of="2026-05-26")
+    state = {"analysis": _full_clean_analysis("g1").model_dump(),
+             "evidence": _evidence_all_dims("g1")}
+    out = node(state, _CFG)
+    assert out["decision_degraded"] is False
+    assert len(out["decisions"]["decisions"]) == 1
+    assert repo.get_decisions(conn, "r1").decisions[0].action == "本周评估接入"
+
+
+def test_decide_node_degrades_on_generate_failure(conn):
+    """生成失败(LLM 抛)→ 优雅降级:空决策 + decision_degraded,绝不崩图。"""
+    class _Boom:
+        def create(self, **k):
+            raise RuntimeError("llm down")
+    client = SimpleNamespace(chat=SimpleNamespace(completions=_Boom()))
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    node = make_decide_node(conn=conn, client=client, model="m", as_of="2026-05-26")
+    out = node({"analysis": _full_clean_analysis().model_dump(),
+                "evidence": _evidence_all_dims()}, _CFG)
+    assert out["decision_degraded"] is True
+    assert out["decisions"]["decisions"] == []
+    assert repo.get_decisions(conn, "r1").decisions == []  # 空决策也持久化(非 None)
+
+
+def test_decide_node_regenerates_once_then_accepts_degraded(conn):
+    """ungrounded(引用悬空)→ 有界重生 1 次仍 ungrounded → 接受 + 降级;
+    调用有界(2 gen + 2 entail = 4),不 retry-storm。"""
+    dangling = json.dumps({"decisions": [{
+        "stance": "建议采用", "action": "x", "horizon": "短期",
+        "risk_reversibility": "可逆", "risk_cost": "低", "why": "y",
+        "evidence_refs": [{"evidence_id": "ghost", "quote": "q"}], "watch": None}]})
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    client = _DecClient([dangling, _SUPPORTED, dangling, _SUPPORTED])
+    node = make_decide_node(conn=conn, client=client, model="m", as_of="2026-05-26",
+                            max_decision_retries=1)
+    out = node({"analysis": _full_clean_analysis("g1").model_dump(),
+                "evidence": _evidence_all_dims("g1")}, _CFG)
+    assert out["decision_degraded"] is True               # 重生一次仍悬空 → 降级
+    assert client.chat.completions.calls == 4             # 2 gen + 2 entail,有界无 storm
