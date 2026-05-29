@@ -25,6 +25,17 @@
   --evidence-highlight: #fff1a8;
   --source-line: #c7a400;
 
+  /* support_verdict tokens (DESIGN.md §support_verdict — v4) — 唯一信任信号.
+     证据对结论的支持度三色,语义解耦于状态色(success/warning/error 是操作状态,
+     verdict 是证据支持度),用 alias 复用色相 + 自动跟随 dark(var() 在 .dark 下
+     重新解析 --success/--warning/--error)。三处复用:对比矩阵单元格 / 决策依据行 /
+     证据原文卡。色盲双编码(实心/半填/空心)在组件层,token 只管色值。
+     NO numeric confidence, NO provider — 二者初稿虚构已删。 */
+  --verdict-supported: var(--success); /* 佐证充分 — 绿 */
+  --verdict-partial: var(--warning); /* 部分佐证 — 琥珀 */
+  --verdict-unsupported: var(--error); /* 佐证不足 — 红 */
+  --evidence-stale: #9aa39d; /* 证据过期 (fetched_at > 90 天默认阈值) — 灰,中性不报警 */
+
   /* Office tokens (DESIGN.md §Office tokens — v3 paradigm).
      Seat 颜色 1:1 映射到 agent 身份,改色前先同步 OfficeBackground / LiveFeedPanel
      / VirtualOfficeView 的 seat→agent_id 映射,否则 chip / mount 区会错位。 */
@@ -33,7 +44,7 @@
   --typing-cursor: #0f6b5f;
   --seat-1: #0f6b5f; /* collector 收集员 (accent 青绿) */
   --seat-2: #a96f00; /* analyst   分析员 (warning 琥珀) */
-  --seat-3: #2f6f9f; /* writer    撰稿员 (info 墨蓝)   */
+  --seat-3: #2f6f9f; /* writer    撰写员 (info 墨蓝)   */
   --seat-4: #237a4b; /* qc        质检员 (success 松绿) */
 
   /* Layout */
@@ -67,6 +78,10 @@
   --info: #78aeda;
   --evidence-highlight: #5a4b10;
   --source-line: #d4b83f;
+
+  /* support_verdict — verdict-* alias 自动跟随上面重定义的 --success/warning/error;
+     仅 --evidence-stale 是字面 hex,需 dark 显式覆盖 */
+  --evidence-stale: #6b746f;
 
   /* Office tokens — dark variant */
   --office-bg: #1a201e;
