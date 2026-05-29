@@ -1,12 +1,10 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
-
 from rivalradar.llm.structured import structured_call
 from rivalradar.schema.feature_tree import assemble_tree
 from rivalradar.schema.models import (
     CompetitorAnalysis, CompetitorProfile, ComparisonRow, DecisionSet,
-    EvidenceRef, Evidence, FeatureItem,
+    EvidenceRef, Evidence, FeatureItem, ReportInsight,
 )
 
 # 套话黑名单(反"持续关注/深入研究"型空话)— writer v2 negative-example 纪律的
@@ -142,17 +140,6 @@ def render_body(analysis: CompetitorAnalysis, evidence: list[Evidence], *, as_of
     return "\n\n".join(parts)
 
 
-class ReportInsight(BaseModel):
-    """3 段执行洞察(rubric v1 #1/#7/#9 补强 — 市场锚定 + 战略推论 + 时间分层 actionable)。
-
-    body 仍 deterministic + 引用完整,insight 是 LLM 综合 strategic synthesis
-    显式标"AI 基于正文综合",评委可清楚分辨"哪些是 fact extract 哪些是判断"。
-    """
-    market_context: str        # 1-2 句赛道格局 + 玩家定位(rubric #1 市场锚定)
-    differentiation_thesis: str  # 2-3 句战略路径分歧 reasoning chain(rubric #7 战略推论)
-    actionable_takeaway: str    # 3 句 短/中/长期 PT actionable(rubric #9 时间分层)
-
-
 def generate_insight(body: str, *, client, model) -> ReportInsight:
     """LLM 综合 3 段执行洞察(替代旧 generate_summary 单段事实概括)。
 
@@ -249,23 +236,25 @@ def generate_decisions(
     return structured_call(DecisionSet, msgs, client=client, model=model)
 
 
-def write_report(analysis: CompetitorAnalysis, evidence: list[Evidence], *,
-                 as_of: str, client, model) -> str:
-    """撰写 Agent 入口(混合):LLM 3 段执行洞察 + 确定性正文(所有引用在正文)。
+def write_report_with_insight(
+    analysis: CompetitorAnalysis, evidence: list[Evidence], *,
+    as_of: str, client, model,
+) -> tuple[str, ReportInsight]:
+    """撰写 Agent 入口(混合):LLM 3 段执行洞察 + 确定性正文 → (markdown, ReportInsight)。
+
+    Epic 2.4:同时返回结构化 insight 供持久化(GET /insight/:run → cockpit 顶部语境),
+    避免 insight 拍平进 markdown 后丢弃(旧 write_report 的行为)。
 
     报告结构(post-rubric-v1 重构):
       # 竞品分析报告
-      ## 执行洞察(AI 基于下方正文综合)     ← NEW:3 段战略综合
-        ### 市场格局
-        ### 战略路径分歧
-        ### 给企业产品团队的 takeaway(短/中/长期)
+      ## 执行洞察(AI 基于下方正文综合)     ← 3 段战略综合
+        ### 市场格局 / ### 战略路径分歧 / ### 给企业产品团队的 takeaway
       ## 飞书 / 钉钉 / ... (deterministic body)  ← 完整引用挂段内
-      ## 跨竞品对比 (deterministic table)
-      ## 来源 (61+ URLs with as_of)
+      ## 跨竞品对比 (deterministic table) / ## 来源 (URLs with as_of)
     """
     body = render_body(analysis, evidence, as_of=as_of)
     insight = generate_insight(body, client=client, model=model)
-    return (
+    markdown = (
         "# 竞品分析报告\n\n"
         "## 执行洞察(AI 基于下方正文综合)\n\n"
         "### 市场格局\n\n"
@@ -276,3 +265,11 @@ def write_report(analysis: CompetitorAnalysis, evidence: list[Evidence], *,
         f"{insight.actionable_takeaway}\n\n"
         f"{body}"
     )
+    return markdown, insight
+
+
+def write_report(analysis: CompetitorAnalysis, evidence: list[Evidence], *,
+                 as_of: str, client, model) -> str:
+    """向后兼容 str wrapper(只要 markdown 的调用方 / 现有测试)。"""
+    return write_report_with_insight(
+        analysis, evidence, as_of=as_of, client=client, model=model)[0]

@@ -6,7 +6,7 @@ from rivalradar.agents import qc
 from rivalradar.graph.build import run_research
 from rivalradar.schema.models import (
     CONTROLLED_DIMENSIONS, CompetitorAnalysis, CompetitorProfile, PricingModel,
-    SWOT, ComparisonRow, ComparisonCell, EvidenceRef,
+    SWOT, ComparisonRow, ComparisonCell, EvidenceRef, ReportInsight,
 )
 from rivalradar.search.base import SearchResult
 from rivalradar.storage import repository as repo
@@ -71,9 +71,14 @@ def _fake_analyze(evidence, competitors, *, client, model):
 
 @pytest.fixture(autouse=True)
 def _stub_agents(monkeypatch):
-    # 假 analyze / 假 write(报告内容与闭环断言无关)/ 假蕴含(返回无问题)
+    # 假 analyze / 假 write(报告内容与闭环断言无关,返 (md, insight))/ 假蕴含(返回无问题)。
+    # decide 节点用真 generate_decisions:client=None → 优雅降级(空决策),不影响闭环断言。
     monkeypatch.setattr("rivalradar.graph.nodes.analyze", _fake_analyze)
-    monkeypatch.setattr("rivalradar.graph.nodes.write_report", lambda *a, **k: "# 竞品分析报告\n正文")
+    monkeypatch.setattr(
+        "rivalradar.graph.nodes.write_report_with_insight",
+        lambda *a, **k: ("# 竞品分析报告\n正文",
+                         ReportInsight(market_context="m", differentiation_thesis="d",
+                                       actionable_takeaway="a")))
     monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
 
 

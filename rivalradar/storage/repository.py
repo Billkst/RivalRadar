@@ -4,7 +4,9 @@ import json
 import sqlite3
 from datetime import datetime, timezone
 
-from rivalradar.schema.models import CompetitorAnalysis, DecisionSet, Evidence
+from rivalradar.schema.models import (
+    CompetitorAnalysis, DecisionSet, Evidence, QCResult, ReportInsight,
+)
 
 
 def _now() -> str:
@@ -13,11 +15,13 @@ def _now() -> str:
 
 # ---- runs ----
 def create_run(conn: sqlite3.Connection, run_id: str,
-               competitors: list[str], dimensions: list[str]) -> None:
+               competitors: list[str], dimensions: list[str],
+               *, decision_context: str = "") -> None:
     conn.execute(
-        "INSERT INTO runs (run_id, competitors, dimensions, status, created_at) "
-        "VALUES (?, ?, ?, ?, ?)",
-        (run_id, json.dumps(competitors), json.dumps(dimensions), "running", _now()),
+        "INSERT INTO runs (run_id, competitors, dimensions, status, decision_context, created_at) "
+        "VALUES (?, ?, ?, ?, ?, ?)",
+        (run_id, json.dumps(competitors), json.dumps(dimensions), "running",
+         decision_context, _now()),
     )
     conn.commit()
 
@@ -32,6 +36,7 @@ def get_run(conn: sqlite3.Connection, run_id: str) -> dict | None:
         "dimensions": json.loads(row["dimensions"]),
         "status": row["status"],
         "degraded": bool(row["degraded"]),
+        "decision_context": row["decision_context"],
         "created_at": row["created_at"],
     }
 
@@ -190,6 +195,40 @@ def get_decisions(conn: sqlite3.Connection, run_id: str) -> DecisionSet | None:
     if row is None:
         return None
     return DecisionSet.model_validate_json(row["payload"])
+
+
+# ---- qc_result(full-C / Epic 2.4)----
+def save_qc_result(conn: sqlite3.Connection, run_id: str, result: QCResult) -> None:
+    """持久化终态 QCResult(finalize 节点调用)。存全量(含 detail);/qc 端点 serve 时
+    sanitize(qc.sanitize_qc_result),绝不把 detail 原文/模型文本暴露给公开端点。"""
+    conn.execute(
+        "INSERT OR REPLACE INTO qc_result (run_id, payload, created_at) VALUES (?, ?, ?)",
+        (run_id, result.model_dump_json(), _now()),
+    )
+    conn.commit()
+
+
+def get_qc_result(conn: sqlite3.Connection, run_id: str) -> QCResult | None:
+    row = conn.execute("SELECT payload FROM qc_result WHERE run_id=?", (run_id,)).fetchone()
+    if row is None:
+        return None
+    return QCResult.model_validate_json(row["payload"])
+
+
+# ---- insight(full-C / Epic 2.4)----
+def save_insight(conn: sqlite3.Connection, run_id: str, insight: ReportInsight) -> None:
+    conn.execute(
+        "INSERT OR REPLACE INTO insight (run_id, payload, created_at) VALUES (?, ?, ?)",
+        (run_id, insight.model_dump_json(), _now()),
+    )
+    conn.commit()
+
+
+def get_insight(conn: sqlite3.Connection, run_id: str) -> ReportInsight | None:
+    row = conn.execute("SELECT payload FROM insight WHERE run_id=?", (run_id,)).fetchone()
+    if row is None:
+        return None
+    return ReportInsight.model_validate_json(row["payload"])
 
 
 # ---- trace ----

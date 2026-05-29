@@ -8,6 +8,9 @@ from rivalradar.schema.models import (
     Evidence,
     EvidenceRef,
     PricingModel,
+    QCIssue,
+    QCResult,
+    ReportInsight,
     SWOT,
 )
 from rivalradar.storage import repository as repo
@@ -52,6 +55,34 @@ def test_get_decisions_none_for_old_run(conn):
     """老 run(decisions 表无行)→ get 返 None(GET /decisions 据此 404,天然 null 态)。"""
     repo.create_run(conn, "r1", ["Notion"], ["pricing"])
     assert repo.get_decisions(conn, "r1") is None
+
+
+def test_qc_result_roundtrip(conn):
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    result = QCResult(verdict="retry_analyze", issues=[QCIssue(
+        competitor="*", dimension="decision", problem_type="hallucination", detail="模型文本")])
+    repo.save_qc_result(conn, "r1", result)
+    assert repo.get_qc_result(conn, "r1") == result
+    assert repo.get_qc_result(conn, "no_run") is None
+
+
+def test_insight_roundtrip(conn):
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    ins = ReportInsight(market_context="赛道", differentiation_thesis="因为X所以Y",
+                        actionable_takeaway="短/中/长")
+    repo.save_insight(conn, "r1", ins)
+    assert repo.get_insight(conn, "r1") == ins
+    assert repo.get_insight(conn, "no_run") is None
+
+
+def test_create_run_persists_decision_context(conn):
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"], decision_context="选型PM:要不要采购飞书")
+    assert repo.get_run(conn, "r1")["decision_context"] == "选型PM:要不要采购飞书"
+
+
+def test_create_run_defaults_empty_decision_context(conn):
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    assert repo.get_run(conn, "r1")["decision_context"] == ""
 
 
 def test_insert_evidence_same_id_across_runs_no_integrity_error(conn):

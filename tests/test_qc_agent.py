@@ -4,6 +4,7 @@ from types import SimpleNamespace
 from rivalradar.agents.qc import (
     check_traceability, check_ontology, check_coverage, EntailmentVerdict, check_entailment,
     decide_verdict, check, check_decision_traceability, check_decision_entailment,
+    sanitize_qc_result,
 )
 from rivalradar.schema.models import (
     CompetitorAnalysis, CompetitorProfile, FeatureItem, PricingModel,
@@ -212,6 +213,20 @@ def test_check_decision_entailment_skips_empty_refs():
     client = _FakeClient([])  # 不应触发任何调用
     assert check_decision_entailment([d], [_ev("e1")], client=client, model="m") == []
     assert client.chat.completions.calls == 0
+
+
+def test_sanitize_qc_result_strips_model_text_to_canned_detail():
+    """Epic 2.4 / Codex #9:/qc 公开端点 sanitize —— detail 含模型文本必须被罐装文案替换,
+    保留 competitor/dimension/problem_type 供前端;原始模型片段绝不泄漏。"""
+    result = QCResult(verdict="retry_analyze", issues=[QCIssue(
+        competitor="飞书", dimension="decision", problem_type="hallucination",
+        detail="证据不支撑决策(采购飞书):模型原话含敏感片段 SECRET_xyz")])
+    out = sanitize_qc_result(result)
+    assert out["verdict"] == "retry_analyze"
+    issue = out["issues"][0]
+    assert issue["competitor"] == "飞书" and issue["problem_type"] == "hallucination"
+    assert "SECRET_xyz" not in issue["detail"]           # 模型文本不泄漏
+    assert issue["detail"] == "证据未能支撑该结论"        # 罐装文案
 
 
 def test_check_end_to_end_retry_collect_with_issues_flowing_through():

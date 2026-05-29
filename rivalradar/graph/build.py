@@ -48,15 +48,17 @@ def build_research_graph(*, conn, client, model, provider, as_of,
 
 def run_research(competitors, dimensions, *, conn, client, model, provider, as_of,
                  official_domains=None, max_retries: int = 2,
-                 checkpointer=None, run_id=None):
-    """一次完整调研:建 run → 编译图 → invoke。返回 (run_id, 终态 state dict)。"""
+                 checkpointer=None, run_id=None, decision_context: str = ""):
+    """一次完整调研:建 run → 编译图 → invoke。返回 (run_id, 终态 state dict)。
+    decision_context 持久化到 runs + 注入初始 state,decide 节点据此 grounding(Epic 2)。"""
     run_id = run_id or "run_" + uuid.uuid4().hex[:12]
-    create_run(conn, run_id, competitors, dimensions)
+    create_run(conn, run_id, competitors, dimensions, decision_context=decision_context)
     graph = build_research_graph(
         conn=conn, client=client, model=model, provider=provider, as_of=as_of,
         official_domains=official_domains, max_retries=max_retries, checkpointer=checkpointer)
     final = graph.invoke(
-        {"competitors": competitors, "dimensions": dimensions, "evidence": [], "retry_count": 0},
+        {"competitors": competitors, "dimensions": dimensions, "evidence": [],
+         "retry_count": 0, "decision_context": decision_context},
         config={"configurable": {"thread_id": run_id}},
     )
     return run_id, final

@@ -9,7 +9,7 @@ from rivalradar.graph.nodes import (
 from rivalradar.llm.structured import StructuredCallError
 from rivalradar.schema.models import (
     CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
-    ComparisonRow, ComparisonCell, EvidenceRef,
+    ComparisonRow, ComparisonCell, EvidenceRef, ReportInsight,
 )
 from rivalradar.search.base import SearchResult
 from rivalradar.storage import repository as repo
@@ -117,13 +117,18 @@ def test_analyze_node_converts_evidence_and_persists(conn, monkeypatch):
 
 def test_write_node_renders_and_persists(conn, monkeypatch):
     import rivalradar.graph.nodes as nodes_mod
-    monkeypatch.setattr(nodes_mod, "write_report",
-                        lambda analysis, evidence, *, as_of, client, model: "# 竞品分析报告\nX")
+    monkeypatch.setattr(
+        nodes_mod, "write_report_with_insight",
+        lambda analysis, evidence, *, as_of, client, model: (
+            "# 竞品分析报告\nX",
+            ReportInsight(market_context="m", differentiation_thesis="d",
+                          actionable_takeaway="a")))
     repo.create_run(conn, "r1", ["Notion"], ["pricing"])
     node = make_write_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     out = node({"analysis": {"competitors": [], "comparison": []}, "evidence": []}, _CFG)
     assert out["report"].startswith("# 竞品分析报告")              # 渲染产出
     assert repo.get_report(conn, "r1") == out["report"]           # 落库
+    assert repo.get_insight(conn, "r1").market_context == "m"     # Epic 2.4:insight 持久化
 
 
 _CONTROLLED = ("pricing", "deployment", "integrations", "target_users",
@@ -218,6 +223,28 @@ def test_finalize_pass_marks_done(conn):
     assert out["status"] == "done"
     assert out["report"] == "# 竞品分析报告\n正文"          # pass 不加 banner
     assert repo.get_run(conn, "r1")["status"] == "done"
+
+
+def test_finalize_persists_qc_result(conn):
+    """Epic 2.4:finalize 持久化终态 QCResult(/qc 端点 serve)。"""
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    node = make_finalize_node(conn=conn, max_retries=2)
+    state = {"analysis": _full_clean_analysis().model_dump(), "report": "# 报告",
+             "qc_result": {"verdict": "pass", "issues": []}, "retry_count": 0}
+    node(state, _CFG)
+    saved = repo.get_qc_result(conn, "r1")
+    assert saved is not None and saved.verdict == "pass"
+
+
+def test_finalize_persists_terminal_verdict_in_qc_result(conn):
+    """retry_collect 耗尽 → finalize 改写 verdict=insufficient_evidence,持久化的 qc_result
+    必须反映终态 verdict(不是中途的 retry_collect)。"""
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    node = make_finalize_node(conn=conn, max_retries=2)
+    state = {"analysis": _full_clean_analysis().model_dump(), "report": "# 报告",
+             "qc_result": {"verdict": "retry_collect", "issues": []}, "retry_count": 2}
+    node(state, _CFG)
+    assert repo.get_qc_result(conn, "r1").verdict == "insufficient_evidence"
 
 
 def test_finalize_exhausted_collect_becomes_insufficient(conn):

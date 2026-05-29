@@ -189,3 +189,16 @@ class DecisionSet(BaseModel):
     list[Decision] 不是 BaseModel 无法作 tool parameters)。"""
 
     decisions: list[Decision] = Field(default_factory=list)
+
+
+class ReportInsight(BaseModel):
+    """3 段执行洞察(rubric v1 #1/#7/#9 补强 — 市场锚定 + 战略推论 + 时间分层 actionable)。
+
+    body 仍 deterministic + 引用完整,insight 是 LLM 综合 strategic synthesis,显式标
+    "AI 基于正文综合",评委可清楚分辨 fact extract vs 判断。结构化形态持久化(Epic 2.4
+    GET /insight/:run)供 cockpit 顶部一句话语境用(market_context/differentiation_thesis)。
+    """
+
+    market_context: str        # 1-2 句赛道格局 + 玩家定位(rubric #1 市场锚定)
+    differentiation_thesis: str  # 2-3 句战略路径分歧 reasoning chain(rubric #7 战略推论)
+    actionable_takeaway: str    # 3 句 短/中/长期 PT actionable(rubric #9 时间分层)

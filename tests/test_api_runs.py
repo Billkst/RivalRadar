@@ -74,7 +74,7 @@ import json
 from rivalradar.agents import qc
 from rivalradar.schema.models import (
     CONTROLLED_DIMENSIONS, CompetitorAnalysis, CompetitorProfile, PricingModel,
-    SWOT, ComparisonRow, ComparisonCell, EvidenceRef,
+    SWOT, ComparisonRow, ComparisonCell, EvidenceRef, ReportInsight,
 )
 from rivalradar.search.base import SearchResult
 
@@ -119,8 +119,11 @@ def _fake_analyze(evidence, competitors, *, client, model):
 def stubbed_client(db_path, monkeypatch):
     # 用与 test_graph_loop.py 同款 stub:跳过真实 LLM,但跑完整图
     monkeypatch.setattr("rivalradar.graph.nodes.analyze", _fake_analyze)
-    monkeypatch.setattr("rivalradar.graph.nodes.write_report",
-                        lambda *a, **k: "# 竞品分析报告\n正文")
+    monkeypatch.setattr("rivalradar.graph.nodes.write_report_with_insight",
+                        lambda *a, **k: ("# 竞品分析报告\n正文",
+                                         ReportInsight(market_context="m",
+                                                       differentiation_thesis="d",
+                                                       actionable_takeaway="a")))
     monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
     app = create_app(db_path=db_path, doubao_client="stub-client",
                      provider=_OneShotProvider(), as_of="2026-05-26")

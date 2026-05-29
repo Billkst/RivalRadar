@@ -16,7 +16,7 @@ from rivalradar.agents import qc
 from rivalradar.api.app import create_app
 from rivalradar.schema.models import (
     CONTROLLED_DIMENSIONS, CompetitorAnalysis, CompetitorProfile,
-    PricingModel, SWOT, EvidenceRef,
+    PricingModel, SWOT, EvidenceRef, ReportInsight,
 )
 from rivalradar.search.base import SearchResult
 from rivalradar.storage import repository as repo
@@ -62,8 +62,10 @@ def _parse_sse(raw_bytes: bytes) -> list[dict]:
 
 def _stub_graph_agents(monkeypatch):
     monkeypatch.setattr("rivalradar.graph.nodes.analyze", _fake_analyze)
-    monkeypatch.setattr("rivalradar.graph.nodes.write_report",
-                        lambda *a, **k: "# 报告")
+    monkeypatch.setattr("rivalradar.graph.nodes.write_report_with_insight",
+                        lambda *a, **k: ("# 报告", ReportInsight(
+                            market_context="m", differentiation_thesis="d",
+                            actionable_takeaway="a")))
     monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
 
 

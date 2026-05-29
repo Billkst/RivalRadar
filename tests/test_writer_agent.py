@@ -3,7 +3,8 @@ from types import SimpleNamespace
 
 from rivalradar.agents.writer import (
     _fmt_refs, render_competitor, render_comparison, render_sources, render_body,
-    ReportInsight, generate_insight, write_report, generate_decisions, PLATITUDE_TERMS,
+    ReportInsight, generate_insight, write_report, write_report_with_insight,
+    generate_decisions, PLATITUDE_TERMS,
 )
 from rivalradar.schema.models import DecisionSet
 from rivalradar.schema.models import (
@@ -168,6 +169,25 @@ def test_write_report_combines_insight_and_deterministic_body():
     assert "## Notion" in report
     assert "[e3]" in report
     assert "as of 2026-05-25" in report
+
+
+def test_write_report_with_insight_returns_markdown_and_structured_insight():
+    """Epic 2.4:同时返回 (markdown, ReportInsight) 供持久化;markdown 内容与旧一致。"""
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(
+            name="Notion",
+            pricing=PricingModel(model_type="freemium", evidence_refs=[_ref("e3")]),
+            swot=SWOT())],
+        comparison=[])
+    payload = json.dumps({
+        "market_context": "协同办公赛道",
+        "differentiation_thesis": "Notion 走 all-in-one,因为 schema-flex,所以个人+团队可用。",
+        "actionable_takeaway": "短期:做模板。中期:看 AI。长期:垂直分化。"})
+    md, insight = write_report_with_insight(analysis, [_ev("e3")], as_of="2026-05-25",
+                                            client=_FakeClient([payload]), model="m")
+    assert isinstance(insight, ReportInsight)
+    assert insight.market_context == "协同办公赛道"
+    assert md.startswith("# 竞品分析报告") and "协同办公赛道" in md and "[e3]" in md
 
 
 # ── generate_decisions(Epic 2.2)────────────────────────────────────────────

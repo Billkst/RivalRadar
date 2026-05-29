@@ -6,13 +6,13 @@ from typing import Any, Callable
 
 from rivalradar.agents.analyst import analyze
 from rivalradar.agents.collector import collect_evidence
-from rivalradar.agents.writer import generate_decisions, render_body, write_report
+from rivalradar.agents.writer import generate_decisions, render_body, write_report_with_insight
 from rivalradar.graph.router import extract_collect_targets
 from rivalradar.agents import qc
 from rivalradar.schema.models import CompetitorAnalysis, DecisionSet, Evidence, QCResult
 from rivalradar.storage.repository import (
     append_trace, insert_evidence, mark_run_finalized, save_analysis,
-    save_decisions, save_report, update_run_degraded,
+    save_decisions, save_insight, save_qc_result, save_report, update_run_degraded,
 )
 
 logger = logging.getLogger(__name__)
@@ -137,8 +137,10 @@ def make_write_node(*, conn, client, model, as_of):
             emit, "writer", "drafting",
             f"正在撰写 {len(analysis.competitors)} 个竞品的对比报告",
         )
-        report = write_report(analysis, evidence, as_of=as_of, client=client, model=model)
+        report, insight = write_report_with_insight(
+            analysis, evidence, as_of=as_of, client=client, model=model)
         save_report(conn, run_id, report)
+        save_insight(conn, run_id, insight)  # Epic 2.4:结构化洞察持久化(/insight 端点)
         _emit_progress(
             emit, "writer", "done",
             f"完成报告 {len(report)} 字",
@@ -309,6 +311,9 @@ def make_finalize_node(*, conn, max_retries):
             report = _BANNER_DEGRADED + report
             status = "degraded"
         save_report(conn, run_id, report)
+        # Epic 2.4:持久化终态 QCResult(/qc 端点 sanitized serve)。result 已含本轮
+        # 终态 verdict(可能被上面改写成 insufficient_evidence)。
+        save_qc_result(conn, run_id, QCResult.model_validate(result))
         # post-ship review fix:mark_run_finalized CAS 守 expected='running',
         # 防 cancel race(cancel CAS 把 status 设 'cancelled' 后,finalize 内
         # 50ms sync 代码 跑完用非 CAS update_run_status 覆盖)。对称 mark_run_failed

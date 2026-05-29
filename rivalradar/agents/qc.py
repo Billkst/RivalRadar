@@ -186,6 +186,34 @@ def decide_verdict(issues: list[QCIssue]) -> QCVerdict:
     return "retry_analyze"        # hallucination / schema_incomplete → 重新分析现有证据
 
 
+# ── /qc 端点 sanitize(Epic 2.4 / Codex #9)──────────────────────────────────
+# GET /qc/:run 是公开端点(与 /trace 同级)。QCIssue.detail 含 check_entailment 写入的
+# 模型文本({verdict.reason})—— 绝不能原样暴露。投影成按 problem_type 的罐装中文文案
+# (我方构造,零模型文本 / 零异常),保留 competitor/dimension/problem_type 供前端用。
+_SANITIZED_DETAIL: dict[str, str] = {
+    "missing_evidence": "结论缺少证据支撑",
+    "low_coverage": "维度覆盖不足",
+    "hallucination": "证据未能支撑该结论",
+    "schema_incomplete": "维度不在受控本体内",
+}
+
+
+def sanitize_qc_result(result: QCResult) -> dict:
+    """把 QCResult 投影成可公开 serve 的 sanitized 形状:detail 一律换罐装文案。"""
+    return {
+        "verdict": result.verdict,
+        "issues": [
+            {
+                "competitor": i.competitor,
+                "dimension": i.dimension,
+                "problem_type": i.problem_type,
+                "detail": _SANITIZED_DETAIL.get(i.problem_type, "质检发现问题"),
+            }
+            for i in result.issues
+        ],
+    }
+
+
 def check(analysis: CompetitorAnalysis, evidence: list[Evidence], *, client, model) -> QCResult:
     """质检入口:确定性硬闸(溯源+本体+覆盖,始终运行)+ LLM 蕴含(可能上抛)→ QCResult。
     Lane D 编排层应捕获蕴含异常,降级为仅确定性闸的 verdict 并记 trace(spec §5/§8)。"""

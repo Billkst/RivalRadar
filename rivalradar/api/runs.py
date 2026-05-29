@@ -32,7 +32,8 @@ def post_run(
 ) -> EventSourceResponse:
     """触发一次完整调研,SSE 流式回推每节点进度,直到 done/error。"""
     run_id = "run_" + uuid.uuid4().hex[:12]
-    create_run(conn, run_id, req.competitors, req.dimensions)
+    create_run(conn, run_id, req.competitors, req.dimensions,
+               decision_context=req.decision_context)
     graph = build_research_graph(
         conn=conn, client=client, model=doubao_model(), provider=provider,
         as_of=as_of, max_retries=max_retries,
@@ -42,6 +43,7 @@ def post_run(
         "dimensions": req.dimensions,
         "evidence": [],
         "retry_count": 0,
+        "decision_context": req.decision_context,  # full-C:decide 节点 grounding(Epic 2)
     }
     config = {"configurable": {"thread_id": run_id}}
     return EventSourceResponse(

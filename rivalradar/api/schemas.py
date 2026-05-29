@@ -25,6 +25,9 @@ class RunRequest(BaseModel):
     """
     competitors: list[_BoundedStr] = Field(min_length=1, max_length=5)
     dimensions: list[_BoundedStr] = Field(min_length=1, max_length=len(_CONTROLLED))
+    # full-C 用户决策处境(Epic 2.4 backend 接口;Epic 1.2/1.3 前端引导流填充)。
+    # optional 默认 ""(老 client / 通用浏览),decide 节点据空/非空切语气(D8)。
+    decision_context: str = Field(default="", max_length=500)
 
 
 class RunSummary(BaseModel):
@@ -41,8 +44,22 @@ class RunSummary(BaseModel):
 
 
 class RunDetail(RunSummary):
-    """GET /run/:id 详情(degraded 已在 RunSummary,本类暂无额外字段)。"""
-    pass
+    """GET /run/:id 详情。decision_context:cockpit 回访时显示用户当初的决策处境。"""
+    decision_context: str = ""
+
+
+class SanitizedQCIssue(BaseModel):
+    """GET /qc/:run 的单条问题(sanitized:detail 是罐装文案,无模型文本/异常)。"""
+    competitor: str
+    dimension: str
+    problem_type: str
+    detail: str
+
+
+class SanitizedQCResult(BaseModel):
+    """GET /qc/:run 响应(Epic 2.4 / Codex #9 公开端点 sanitized)。"""
+    verdict: str
+    issues: list[SanitizedQCIssue] = Field(default_factory=list)
 
 
 class AnnotationCreate(BaseModel):
