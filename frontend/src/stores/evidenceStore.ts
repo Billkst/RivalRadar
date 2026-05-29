@@ -19,6 +19,9 @@ interface EvidenceStore {
   cache: Map<string, Evidence>
   inflight: Map<string, Promise<Evidence>>
   getEvidence: (id: string) => Promise<Evidence>
+  /** 批量 seed(Epic 5.2:从 GET /runs/:id/evidence 一次性灌满,EvidencePill
+   *  hover/click 走 cache hit,不再 per-pill cold fetch → 消 N+1)。 */
+  seed: (list: Evidence[]) => void
   clear: () => void
 }
 
@@ -83,5 +86,26 @@ export const useEvidenceStore = create<EvidenceStore>((set, get) => ({
     return promise
   },
 
+  seed: (list) =>
+    set((state) => {
+      const cache = new Map(state.cache)
+      // 后 seed 的移到末尾(LRU 新),evict 保留最近 seed 的 MAX_ENTRIES 条。
+      for (const ev of list) {
+        cache.delete(ev.id)
+        cache.set(ev.id, ev)
+      }
+      return { cache: evict(cache) }
+    }),
+
   clear: () => set({ cache: new Map(), inflight: new Map() }),
 }))
+
+/**
+ * useEvidence — 从已 seed 的 cache 同步读单条证据(依据行 / pill popover / slide-over)。
+ *
+ * selector 返 cache.get(id)(Evidence 对象引用稳定:seed/LRU 复用同一对象)或稳定的
+ * null —— 引用稳定不触发 useSyncExternalStore 重渲染循环(memory: zustand selector
+ * 内任何新引用都会爆 Maximum update depth)。miss 时不冷取,调用方按 null 兜底。
+ */
+export const useEvidence = (id: string | null | undefined): Evidence | null =>
+  useEvidenceStore((s) => (id ? s.cache.get(id) ?? null : null))

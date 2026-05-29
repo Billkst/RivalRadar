@@ -6,12 +6,14 @@ import { dimensionLabel } from '@/lib/dimensions'
 import { DEMO_RUN_DETAIL, isDemoRun } from '@/lib/demoFixture'
 import { useSSE } from '@/hooks/useSSE'
 import { useRunStore } from '@/stores/runStore'
-import type { RunDetail } from '@/types/api'
+import { useCockpitStore } from '@/stores/cockpitStore'
+import { aggregateVerdicts } from '@/lib/verdict'
+import type { EvidenceRef, RunDetail } from '@/types/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { CancelButton } from '@/components/office/CancelButton'
 import { CockpitLayout } from '@/components/cockpit/CockpitLayout'
-import { DecisionSurfacePlaceholder } from '@/components/cockpit/DecisionSurfacePlaceholder'
+import { DecisionSurface } from '@/components/cockpit/DecisionSurface'
 
 /**
  * /run/:run_id — 单 run 详情页(v0.4 证据驾驶舱,Epic 3)。
@@ -77,10 +79,34 @@ export function RunPage() {
     }
     const liveAlreadyHere = storeRunId === run_id && storeStatus !== 'idle'
     if (liveAlreadyHere) return
-    sse.start({ mode: 'replay', runId: run_id }).catch(() => {
-      // Swallow — replay failure is non-fatal; user still sees RunSummary above.
+    sse.start({ mode: 'replay', runId: run_id }).catch((err) => {
+      // replay 不通(run 过期/event log 被裁剪/backend 重启/Clash)—— 非致命但**不静默吞**:
+      // 左决策面已由 DecisionSurface 走 RunDetail.status 回退从 REST 取齐(Codex C-3),
+      // 这里记录便于排查;右执行流无 live 数据时显"正在连接分析流…"。
+      console.warn('SSE replay failed for', run_id, err)
     })
   }, [run_id, storeRunId, storeStatus, sse])
+
+  // StatusBar 决策派生指标(Epic 5):从 cockpitStore 读,防串 run(runId 不匹配显 "—")。
+  const cockpitRunId = useCockpitStore((s) => s.runId)
+  const decisions = useCockpitStore((s) => s.decisions)
+  const analysis = useCockpitStore((s) => s.analysis)
+  const cockpitLive = !!run_id && cockpitRunId === run_id
+  const decisionCount = cockpitLive && decisions ? decisions.decisions.length : undefined
+  const riskCount =
+    cockpitLive && decisions
+      ? decisions.decisions.filter(
+          (d) => d.stance === '需要警惕' || d.risk_reversibility === '不可逆',
+        ).length
+      : undefined
+  const verdictSummary = React.useMemo(() => {
+    if (!cockpitLive) return undefined
+    const refs: EvidenceRef[] = []
+    if (analysis) for (const row of analysis.comparison) for (const cell of row.cells) refs.push(...cell.evidence_refs)
+    if (decisions) for (const d of decisions.decisions) refs.push(...d.evidence_refs)
+    if (refs.length === 0) return undefined
+    return aggregateVerdicts(refs)
+  }, [cockpitLive, analysis, decisions])
 
   return (
     <div className="space-y-4">
@@ -163,10 +189,21 @@ export function RunPage() {
         </div>
       )}
 
-      {/* 证据驾驶舱:StatusBar + 左决策面(Epic 3 骨架)/ 右实时分析流程(重试环) */}
-      <CockpitLayout>
-        <DecisionSurfacePlaceholder />
-      </CockpitLayout>
+      {/* 证据驾驶舱:StatusBar + 左决策面(Epic 4 实装)/ 右实时分析流程(重试环) */}
+      {run_id && (
+        <CockpitLayout
+          decisionCount={decisionCount}
+          riskCount={riskCount}
+          verdictSummary={verdictSummary}
+        >
+          <DecisionSurface
+            runId={run_id}
+            decisionContext={run?.decision_context}
+            runStatus={run?.status}
+            runDegraded={run?.degraded}
+          />
+        </CockpitLayout>
+      )}
     </div>
   )
 }
