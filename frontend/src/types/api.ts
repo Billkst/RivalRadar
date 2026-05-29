@@ -181,6 +181,19 @@ export interface SanitizedQCResult {
   issues: SanitizedQCIssue[]
 }
 
+// ── 竞品自动发现(Epic 1.1 — agents/discover.py + schemas.py)──────────────
+export interface DiscoveredCompetitor {
+  name: string
+  rationale: string
+}
+export interface DiscoverySet {
+  competitors: DiscoveredCompetitor[]
+}
+export interface DiscoverRequest {
+  seed: string
+  industry_hint?: string | null
+}
+
 // ─── HTTP boundary models (schemas.py) ─────────────────────────────────────
 export interface RunRequest {
   competitors: string[] // 1-5

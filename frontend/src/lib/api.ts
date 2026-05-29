@@ -10,6 +10,7 @@ import type {
   AnnotationOut,
   CompetitorAnalysis,
   DecisionSet,
+  DiscoverySet,
   Evidence,
   ReportInsight,
   RunDetail,
@@ -81,6 +82,14 @@ export const fetchInsight = (runId: string) => jsonFetch<ReportInsight>(`/insigh
 export const fetchQc = (runId: string) => jsonFetch<SanitizedQCResult>(`/qc/${runId}`)
 // 批量证据(GET /runs/:id/evidence)— evidenceStore 一次性 seed 防 per-pill N+1。
 export const fetchRunEvidence = (runId: string) => jsonFetch<Evidence[]>(`/runs/${runId}/evidence`)
+
+// ─── Discover competitors (Epic 1.1 引导式 setup)──────────────────────────
+// LLM 不通 → 后端 503;调用方 catch 提示手动输入(非静默)。
+export const discoverCompetitors = (seed: string, industryHint?: string) =>
+  jsonFetch<DiscoverySet>('/discover-competitors', {
+    method: 'POST',
+    body: JSON.stringify({ seed, industry_hint: industryHint || null }),
+  })
 
 // ─── Annotations ──────────────────────────────────────────────────────────
 export const createAnnotation = (payload: AnnotationCreate) =>

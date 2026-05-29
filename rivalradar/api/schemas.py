@@ -30,6 +30,15 @@ class RunRequest(BaseModel):
     decision_context: str = Field(default="", max_length=500)
 
 
+class DiscoverRequest(BaseModel):
+    """POST /discover-competitors 请求体(Epic 1.1 引导式 setup 输入侧)。
+
+    seed:种子产品名;industry_hint:可选的行业/场景提示,帮 LLM 缩范围。
+    """
+    seed: _BoundedStr
+    industry_hint: Optional[str] = Field(default=None, max_length=200)
+
+
 class RunSummary(BaseModel):
     """GET /runs 列表项(简版,不含详情)。
 
