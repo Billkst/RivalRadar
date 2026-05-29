@@ -9,7 +9,9 @@ from rivalradar.agents.collector import collect_evidence
 from rivalradar.agents.writer import generate_decisions, render_body, write_report_with_insight
 from rivalradar.graph.router import extract_collect_targets
 from rivalradar.agents import qc
-from rivalradar.schema.models import CompetitorAnalysis, DecisionSet, Evidence, QCResult
+from rivalradar.schema.models import (
+    CONTROLLED_DIMENSIONS, CompetitorAnalysis, DecisionSet, Evidence, QCResult,
+)
 from rivalradar.storage.repository import (
     append_trace, insert_evidence, mark_run_finalized, save_analysis,
     save_decisions, save_insight, save_qc_result, save_report, update_run_degraded,
@@ -109,7 +111,9 @@ def make_analyze_node(*, conn, client, model):
             emit, "analyst", "thinking",
             f"正在分析 {len(evidence)} 条证据,提取 {len(state['competitors'])} 个竞品的特征",
         )
-        analysis = analyze(evidence, state["competitors"], client=client, model=model)
+        analysis = analyze(evidence, state["competitors"],
+                           dimensions=tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS),
+                           client=client, model=model)
         save_analysis(conn, run_id, analysis)
         _emit_progress(
             emit, "analyst", "done",
@@ -174,7 +178,10 @@ def make_qc_node(*, conn, client, model):
         )
         issues = qc.check_traceability(analysis, evidence)
         issues += qc.check_ontology(analysis, evidence)
-        issues += qc.check_coverage(analysis)
+        # 只对**本次请求的维度**查覆盖(原先默认全 6 受控本体 → 未请求维度如
+        # review_sentiment 永远 low_coverage → retry_collect 死循环 → insufficient,真 run 暴露)。
+        issues += qc.check_coverage(
+            analysis, required=tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS))
         local_degraded = False
         try:
             # TODO(Lane E/Day-4): 多竞品时 check_entailment 调用数=结论数,可并行/抽样降本(spec §13 ⑤)

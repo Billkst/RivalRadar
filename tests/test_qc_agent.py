@@ -73,6 +73,21 @@ def test_check_coverage_flags_missing_dimension():
     assert "deployment" in missing_dims and "pricing" not in missing_dims
 
 
+def test_check_coverage_only_checks_requested_dimensions():
+    """真 run 暴露的 bug 回归:只查请求的维度,不要求未请求的维度(如 review_sentiment)。
+
+    原先 qc_node 用默认 required=全 6 受控本体 → 用户只请求 pricing 时,review_sentiment
+    永远 low_coverage → retry_collect 死循环 → insufficient_evidence(再多采集也补不上)。
+    """
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[ComparisonRow(dimension="pricing", cells=[
+            ComparisonCell(competitor="Notion", value_type="enum", value="freemium")])])
+    # 只请求 pricing(已覆盖)→ 0 low_coverage;绝不因 review_sentiment 等未请求维度报缺。
+    issues = check_coverage(analysis, required=("pricing",))
+    assert issues == []
+
+
 class _Completions:
     def __init__(self, payloads):
         self.payloads = list(payloads); self.calls = 0

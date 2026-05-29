@@ -141,21 +141,29 @@ export function DecisionSurface({
         </div>
       ) : null}
 
-      {/* 决策流(首屏) */}
+      {/* 决策流(首屏)。insufficient + 有决策:不藏(StatusBar 计数一致),改置信度横幅 +
+          每条强制 caveat;insufficient + 0 决策:处境卡片(真没结论)。 */}
       {interrupted && s(decisionsState) !== 'loaded' ? (
         <EmptyNote>运行已中断,未生成决策建议(下方为已得到的中间结果)。</EmptyNote>
-      ) : insufficient ? (
+      ) : insufficient && decisionList.length === 0 ? (
         <SituationCard evidenceCount={evidenceCount} />
       ) : (
-        <DecisionBoard
-          decisions={decisionList}
-          state={s(decisionsState)}
-          degraded={degraded}
-          genericContext={genericContext}
-          evidenceCount={evidenceCount}
-          selectedIdx={selectedIdx}
-          onSelect={setSelectedIdx}
-        />
+        <>
+          {insufficient ? (
+            <div className="rounded-lg border border-warning/50 bg-warning/10 px-4 py-2 text-[13px] text-warning">
+              ⚠ 本轮证据未达质检标准,以下建议置信度低,请谨慎参考(详见下方质检面板)。
+            </div>
+          ) : null}
+          <DecisionBoard
+            decisions={decisionList}
+            state={s(decisionsState)}
+            degraded={degraded || insufficient}
+            genericContext={genericContext}
+            evidenceCount={evidenceCount}
+            selectedIdx={selectedIdx}
+            onSelect={setSelectedIdx}
+          />
+        </>
       )}
 
       {/* 对比矩阵(analysis 在 done/中断都取 → 正常渲染,各态自处理) */}

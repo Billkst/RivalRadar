@@ -113,6 +113,23 @@ def test_analyze_end_to_end_with_fake_client():
     assert client.chat.completions.calls == 5
 
 
+def test_analyze_threads_requested_dimensions_into_comparison(monkeypatch):
+    """真 run 回归:analyze 把请求的 dimensions 穿进 build_comparison(约束对比范围),
+    不再硬编码全 6 受控本体(否则分析员超范围产出 → 越界 hallucination + 质检覆盖死循环)。"""
+    captured = {}
+
+    def spy(profiles, evidence, *, dimensions, client, model):
+        captured["dims"] = dimensions
+        return []
+
+    import rivalradar.agents.analyst as analyst_mod
+    monkeypatch.setattr(analyst_mod, "build_comparison", spy)
+    payloads = _profile_payloads()
+    analyze([_ev("e1", "Notion", "pricing")], ["Notion"],
+            dimensions=("pricing", "core_workflows"), client=_FakeClient(payloads), model="m")
+    assert captured["dims"] == ("pricing", "core_workflows")
+
+
 def test_analyze_two_competitors_aggregates_and_compares():
     # 2 竞品:每个 4 次抽取 + 1 次对比 = 9 次调用;对比 rows 真流入结果
     comparison = json.dumps({"rows": [{"dimension": "pricing", "cells": [

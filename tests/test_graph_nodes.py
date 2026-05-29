@@ -101,7 +101,7 @@ def test_analyze_node_converts_evidence_and_persists(conn, monkeypatch):
         name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
     seen = {}
 
-    def _fake_analyze(evidence, competitors, *, client, model):
+    def _fake_analyze(evidence, competitors, *, dimensions=None, client, model):
         seen["n"] = len(evidence)                  # 验证 dict→Evidence 转换后传入
         return fake
     monkeypatch.setattr(nodes_mod, "analyze", _fake_analyze)

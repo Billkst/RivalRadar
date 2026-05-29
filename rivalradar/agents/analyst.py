@@ -96,20 +96,37 @@ def analyze_competitor(evidence: list[Evidence], competitor: str, *, client, mod
     )
 
 
-def build_comparison(profiles: list[CompetitorProfile], evidence: list[Evidence], *, client, model) -> list[ComparisonRow]:
-    """收尾产出跨竞品对比(受控本体 + 类型化值 + evidence_refs,spec D5 / §6)。"""
+def build_comparison(
+    profiles: list[CompetitorProfile], evidence: list[Evidence],
+    *, dimensions: tuple[str, ...] = CONTROLLED_DIMENSIONS, client, model,
+) -> list[ComparisonRow]:
+    """收尾产出跨竞品对比(受控本体 + 类型化值 + evidence_refs,spec D5 / §6)。
+
+    **只在用户请求的 `dimensions` 上对比**(默认全受控本体,兼容直接调用)。原先硬编码
+    CONTROLLED_DIMENSIONS 让分析员对全 6 维 + 自创维度产出 → 越界 hallucination + 触发
+    质检覆盖未请求维度 → retry_collect 死循环 → insufficient_evidence(真 run 暴露)。
+    """
     names = ", ".join(p.name for p in profiles)
-    dims = ", ".join(CONTROLLED_DIMENSIONS)
+    dims = ", ".join(dimensions)
     block = build_evidence_block(evidence)
     msgs = [{"role": "user", "content":
-             f"{_REFS_RULE}\n\n对竞品 [{names}] 在这些维度做横向对比:{dims}。"
+             f"{_REFS_RULE}\n\n对竞品 [{names}] **只在这些维度**做横向对比:{dims}。"
+             f"**不要新增其它维度**(超出上述维度的对比一律不要输出)。"
              f"每个 cell 标 value_type(bool/enum/number/quote_text)与 value,并挂 evidence_refs。"
              f"\n\n证据:\n{block}"}]
     return structured_call(ComparisonExtraction, msgs, client=client, model=model).rows
 
 
-def analyze(evidence: list[Evidence], competitors: list[str], *, client, model) -> CompetitorAnalysis:
-    """分析 Agent 入口:证据 → 结构化分析(逐竞品 profile + 跨竞品对比)。"""
+def analyze(
+    evidence: list[Evidence], competitors: list[str],
+    *, dimensions: tuple[str, ...] = CONTROLLED_DIMENSIONS, client, model,
+) -> CompetitorAnalysis:
+    """分析 Agent 入口:证据 → 结构化分析(逐竞品 profile + 跨竞品对比)。
+
+    `dimensions`:本次请求的维度,穿到 build_comparison 约束对比范围(默认全受控本体,
+    兼容老调用/单测)。节点传 state["dimensions"];否则对比会超范围触发质检覆盖死循环。
+    """
     profiles = [analyze_competitor(evidence, c, client=client, model=model) for c in competitors]
-    comparison = build_comparison(profiles, evidence, client=client, model=model)
+    comparison = build_comparison(
+        profiles, evidence, dimensions=dimensions, client=client, model=model)
     return CompetitorAnalysis(competitors=profiles, comparison=comparison)
