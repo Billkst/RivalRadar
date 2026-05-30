@@ -169,11 +169,10 @@ def make_write_node(*, conn, client, model, as_of):
 
 
 def make_qc_node(*, conn, client, model):
-    """质检节点:确定性三闸(始终跑)+ LLM 蕴含(失败则降级,必办项①)。
-
-    不调 qc.check(它会上抛),而是在本层组合子函数:traceability/ontology/coverage
-    决定 verdict 主体;check_entailment 包在 try/except StructuredCallError,失败则
-    degraded=True、记 trace,verdict 仅由确定性闸决定。
+    """质检节点(策展人模型):curate_analysis 丢弃站不住的对比 cell(机械悬空 + LLM 蕴含
+    不支撑),持久化策展后的分析;再跑确定性门(traceability comparison_only + ontology +
+    coverage 请求维度)定 verdict。策展丢空维度 → low_coverage → retry_collect 补搜环。
+    curate 的 LLM 蕴含失败 → degraded + 机械门 fallback(必办项①),绝不崩整图。
     retry_count 仅在「带着上一轮 qc_result 进来」时 +1(每轮唯一计数点,避免双重计数)。
     """
     def qc_node(state, config):
@@ -186,34 +185,36 @@ def make_qc_node(*, conn, client, model):
             emit, "qc", "validate",
             f"开始质检 {len(analysis.competitors)} 个竞品 profile",
         )
-        issues = qc.check_traceability(analysis, evidence)
-        issues += qc.check_ontology(analysis, evidence)
-        # 只对**本次请求的维度**查覆盖(原先默认全 6 受控本体 → 未请求维度如
-        # review_sentiment 永远 low_coverage → retry_collect 死循环 → insufficient,真 run 暴露)。
-        issues += qc.check_coverage(
-            analysis, required=tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS))
+        requested_dims = tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS)
+        # 策展(信任模型「否决闸」→「策展人」):站不住的对比 cell(机械悬空 + LLM 蕴含
+        # 不支撑)被丢弃,而非把整个 run 打回 retry_analyze → 耗尽 degraded。人类分析师不
+        # 因某格证据薄就给整份报告盖降级章,而是只展示站得住的。LLM 蕴含失败(网络/限流)→
+        # 降级 + 机械门 fallback(只丢悬空,免 LLM)。
         local_degraded = False
         try:
-            # TODO(Lane E/Day-4): 多竞品时 check_entailment 调用数=结论数,可并行/抽样降本(spec §13 ⑤)
-            # 阻断性蕴含判定只严判 showcase 呈现的对比矩阵 cell(comparison_only)+ 请求维度:
-            # profile 的描述性 features/pricing/personas/SWOT 不进 LLM 闸(它们喂 v0.4 退役报告、
-            # 不进驾驶舱;真 run 钓出分析员对细粒度功能过度拆解的越界,不该否决整个 run)。
-            # 矩阵 cell 与决策(check_decision_entailment)仍被严判,越界照样 degraded(诚实)。
-            issues += qc.check_entailment(
-                analysis, evidence,
-                dimensions=tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS),
-                comparison_only=True, client=client, model=model)
-        except Exception as e:  # noqa: BLE001 — 蕴含是尽力而为辅助闸,任何失败(解析/网络/限流)都降级,绝不崩整图(必办项①/spec §5)
+            curated, dropped = qc.curate_analysis(
+                analysis, evidence, dimensions=requested_dims, client=client, model=model)
+        except Exception as e:  # noqa: BLE001 — 蕴含是尽力而为辅助闸,任何失败都降级,绝不崩整图(必办项①/spec §5)
             local_degraded = True
-            # 只记 type(e).__name__,**绝不**写 str(e) 入 trace(GET /trace/:run 公开
-            # 暴露,Codex Critical #1:OpenAI APIStatusError str() 可能含 Authorization
-            # header → 泄 ARK_API_KEY。server log 已记完整 traceback 给运维)
-            logger.exception("qc entailment failed for run %s", run_id)
+            # 只记 type(e).__name__,**绝不**写 str(e) 入 trace(GET /trace/:run 公开暴露,
+            # Codex Critical #1:OpenAI APIStatusError str() 可能含 Authorization → 泄 KEY)
+            logger.exception("qc curate failed for run %s", run_id)
             append_trace(conn, run_id, "qc",
-                         output_summary=f"entailment degraded: {type(e).__name__}")
-        # degraded sticky OR 累积:一旦任何一轮发生蕴含降级,持续标记到 finalize
-        # (而非每轮覆盖)— 防止 round 1 降级 / round 2 成功 → 终态 degraded=False
-        # 让前端 §11.5 警示横幅消失、对用户隐瞒"曾发生过降级"的事实
+                         output_summary=f"curate degraded: {type(e).__name__}")
+            curated, dropped = qc._curate_mechanical(analysis, evidence, requested_dims)
+        # 持久化策展后的分析(showcase 只显示活下来的 cell),并经 state 传给 decide 节点
+        # (decide 用 curated body 生成决策,不会基于已丢弃的 cell)。
+        save_analysis(conn, run_id, curated)
+
+        # 确定性门跑在**策展后**的分析上:traceability(comparison_only,策展后应已干净)+
+        # ontology + coverage(只查请求维度)。策展丢空某维度 → low_coverage → retry_collect →
+        # broaden 补搜环(诚实自纠 money-shot);broaden 补到有据证据后重分析再策展,收敛成
+        # pass 或诚实 insufficient,绝不再因 hallucination 盖 degraded 章。
+        issues = qc.check_traceability(curated, evidence, comparison_only=True)
+        issues += qc.check_ontology(curated, evidence)
+        issues += qc.check_coverage(curated, required=requested_dims)
+        # degraded sticky OR 累积:一旦任何一轮发生蕴含降级,持续标记到 finalize(而非每轮
+        # 覆盖)— 防 round 1 降级 / round 2 成功 → 终态 degraded=False 隐瞒"曾降级"。
         degraded = bool(state.get("degraded", False)) or local_degraded
         verdict = qc.decide_verdict(issues)
         result = QCResult(verdict=verdict, issues=issues)
@@ -228,71 +229,67 @@ def make_qc_node(*, conn, client, model):
         }.get(verdict, verdict)
         _emit_progress(
             emit, "qc", "done",
-            f"裁决:{verdict_zh}(发现 {len(issues)} 项问题,第 {new_rc + 1} 轮)",
+            f"裁决:{verdict_zh}(策展 {len(dropped)} 项 / 发现 {len(issues)} 项问题,第 {new_rc + 1} 轮)",
             metric={"current": len(issues), "total": len(issues)},
         )
         append_trace(conn, run_id, "qc",
                      input_summary=f"{len(evidence)} evidence",
-                     output_summary=f"verdict={verdict} issues={len(issues)} "
+                     output_summary=f"verdict={verdict} curated={len(dropped)} issues={len(issues)} "
                                     f"degraded={degraded} retry={new_rc}",
                      latency_ms=int((time.monotonic() - t0) * 1000))
-        return {"qc_result": result.model_dump(), "retry_count": new_rc, "degraded": degraded}
+        return {"analysis": curated.model_dump(), "qc_result": result.model_dump(),
+                "retry_count": new_rc, "degraded": degraded}
     return qc_node
 
 
-def make_decide_node(*, conn, client, model, as_of, max_decision_retries: int = 1):
-    """决策节点(full-C / Epic 2.2-2.3):分析正文 + 用户处境 → 结构化决策建议,
-    QC 校验决策溯源 + 蕴含,ungrounded → 有界重生(最多 max_decision_retries 次),
-    仍不达标 → 接受 + decision_degraded(防 retry-storm,Codex #4)。
+def make_decide_node(*, conn, client, model, as_of):
+    """决策节点(full-C / Epic 2.2-2.3,策展人模型):分析正文(已被 qc 策展)+ 用户处境 →
+    结构化决策建议,curate_decisions 丢弃 ungrounded 决策(机械悬空 + LLM 蕴含不支撑),
+    只留站得住的。ungrounded 决策被丢弃而非标 decision_degraded —— 与 qc_node 策展对称。
 
-    错误契约(对齐 qc 节点必办项①):generate / entailment 任何失败都 try/except 降级,
-    绝不崩整图。决策级 QC issue 不进 analysis retry 路由 —— 仅在本节点内部消费。
+    错误契约(对齐 qc 节点必办项①):generate 失败 → 空决策 + degraded;curate 蕴含失败 →
+    机械门 fallback(只丢悬空)+ degraded。绝不崩整图。decision_degraded 只为真·LLM 失败保留。
     """
     def decide_node(state, config):
         run_id = config["configurable"]["thread_id"]
         emit = _get_emit(config)
         t0 = time.monotonic()
-        analysis = CompetitorAnalysis(**state["analysis"])
+        analysis = CompetitorAnalysis(**state["analysis"])  # 已被 qc_node 策展
         evidence = [Evidence(**d) for d in state["evidence"]]
         decision_context = state.get("decision_context") or ""
         body = render_body(analysis, evidence, as_of=as_of)  # 确定性,无 LLM
         _emit_progress(emit, "decide", "deciding", "正在基于证据生成决策建议")
 
-        decision_set = DecisionSet(decisions=[])
         decision_degraded = False
-        for attempt in range(max_decision_retries + 1):
+        try:
+            decision_set = generate_decisions(body, decision_context, client=client, model=model)
+        except Exception as e:  # noqa: BLE001 — 生成失败降级,绝不崩图
+            logger.exception("decide generate failed for run %s", run_id)
+            append_trace(conn, run_id, "decide",
+                         output_summary=f"generate degraded: {type(e).__name__}")
+            decision_set = DecisionSet(decisions=[])
+            decision_degraded = True
+        else:
+            # 策展:丢弃 ungrounded 决策(机械悬空免 LLM + 蕴含不支撑),只留站得住的。
             try:
-                decision_set = generate_decisions(
-                    body, decision_context, client=client, model=model)
-            except Exception as e:  # noqa: BLE001 — 生成失败降级,绝不崩图
-                logger.exception("decide generate failed for run %s", run_id)
-                append_trace(conn, run_id, "decide",
-                             output_summary=f"generate degraded: {type(e).__name__}")
-                decision_set = DecisionSet(decisions=[])
-                decision_degraded = True
-                break
-            issues = qc.check_decision_traceability(decision_set.decisions, evidence)
-            try:
-                issues += qc.check_decision_entailment(
+                kept, _dropped = qc.curate_decisions(
                     decision_set.decisions, evidence, client=client, model=model)
-            except Exception as e:  # noqa: BLE001 — 蕴含失败:保机械门结果 + 降级,不重生(防 storm)
-                logger.exception("decide entailment failed for run %s", run_id)
+                decision_set = DecisionSet(decisions=kept)
+            except Exception as e:  # noqa: BLE001 — 蕴含失败:机械门 fallback(只丢悬空)+ 降级,绝不崩图
+                logger.exception("decide curate failed for run %s", run_id)
                 append_trace(conn, run_id, "decide",
                              output_summary=f"entailment degraded: {type(e).__name__}")
+                valid = {ev.id for ev in evidence}
+                kept = [d for d in decision_set.decisions
+                        if d.evidence_refs and all(r.evidence_id in valid for r in d.evidence_refs)]
+                decision_set = DecisionSet(decisions=kept)
                 decision_degraded = True
-                break
-            if not issues:
-                break  # 决策全溯源 + 蕴含通过
-            if attempt >= max_decision_retries:
-                decision_degraded = True  # 重生预算耗尽仍 ungrounded → 接受 + 标降级
-                break
-            # else: 循环 → 重生一次(下一 attempt)
 
         save_decisions(conn, run_id, decision_set)
         _emit_progress(
             emit, "decide", "done",
             f"生成 {len(decision_set.decisions)} 条决策建议"
-            + ("(部分未达溯源标准,已标降级)" if decision_degraded else ""),
+            + ("(蕴含降级,机械门兜底)" if decision_degraded else ""),
             metric={"current": len(decision_set.decisions),
                     "total": len(decision_set.decisions)},
         )

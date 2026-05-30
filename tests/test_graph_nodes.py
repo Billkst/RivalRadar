@@ -395,32 +395,35 @@ _DANGLING = json.dumps({"decisions": [{
     "evidence_refs": [{"evidence_id": "ghost", "quote": "q"}], "watch": None}]})
 
 
-def test_decide_node_regenerates_once_then_accepts_degraded(conn):
-    """ungrounded(引用悬空)→ 有界重生 1 次仍 ungrounded → 接受 + 降级 + 仍持久化决策。
-    悬空决策被蕴含预过滤跳过(归机械门),故 calls=2 gen(无蕴含),有界无 storm。"""
+def test_decide_node_curates_out_dangling(conn):
+    """策展人模型:ungrounded(引用悬空)决策被丢弃(机械门,免 LLM),不重生、不降级。
+    丢弃≠降级——decision_degraded 只为真·LLM 失败保留。calls=1(只 generate)。"""
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
-    client = _DecClient([_DANGLING, _DANGLING])
-    node = make_decide_node(conn=conn, client=client, model="m", as_of="2026-05-26",
-                            max_decision_retries=1)
+    client = _DecClient([_DANGLING])
+    node = make_decide_node(conn=conn, client=client, model="m", as_of="2026-05-26")
     out = node({"analysis": _full_clean_analysis("g1").model_dump(),
                 "evidence": _evidence_all_dims("g1")}, _CFG)
-    assert out["decision_degraded"] is True               # 重生一次仍悬空 → 降级
-    assert client.chat.completions.calls == 2             # 2 gen,悬空决策跳过蕴含,无 storm
-    assert repo.get_decisions(conn, "r1").decisions[0].action == "x"  # 降级仍保留生成的决策
+    assert out["decision_degraded"] is False              # 策展丢弃不是降级
+    assert out["decisions"]["decisions"] == []            # 悬空决策被丢
+    assert client.chat.completions.calls == 1             # 只 generate,悬空免 LLM
+    assert repo.get_decisions(conn, "r1").decisions == []  # 空决策也持久化
 
 
-def test_decide_node_regenerates_once_then_recovers_clean(conn):
-    """第 1 次 ungrounded → 重生第 2 次 clean(合法引用 + 蕴含 supported)→ 成功恢复
-    decision_degraded=False。calls=3(gen1 + gen2 + entail1),恢复路径(M7)。"""
+def test_decide_node_drops_unsupported_keeps_grounded(conn):
+    """两条 grounded 决策,蕴含判一条支撑一条不支撑 → 只留支撑的(策展人筛而非否决整批)。"""
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
-    client = _DecClient([_DANGLING, _decision_payload("g1"), _SUPPORTED])
-    node = make_decide_node(conn=conn, client=client, model="m", as_of="2026-05-26",
-                            max_decision_retries=1)
+    two = json.dumps({"decisions": [
+        {"stance": "建议采用", "action": "留我", "horizon": "短期", "risk_reversibility": "可逆",
+         "risk_cost": "低", "why": "y", "evidence_refs": [{"evidence_id": "g1", "quote": "q"}], "watch": None},
+        {"stance": "建议采用", "action": "丢我", "horizon": "短期", "risk_reversibility": "可逆",
+         "risk_cost": "低", "why": "y", "evidence_refs": [{"evidence_id": "g1", "quote": "q"}], "watch": None}]})
+    unsupported = json.dumps({"supported": False, "reason": "证据与建议无关"})
+    client = _DecClient([two, _SUPPORTED, unsupported])  # gen + 蕴含×2(留我 supported / 丢我 not)
+    node = make_decide_node(conn=conn, client=client, model="m", as_of="2026-05-26")
     out = node({"analysis": _full_clean_analysis("g1").model_dump(),
                 "evidence": _evidence_all_dims("g1")}, _CFG)
-    assert out["decision_degraded"] is False              # 重生后 clean → 恢复
-    assert client.chat.completions.calls == 3             # gen1(悬空跳蕴含)+ gen2 + entail1
-    assert repo.get_decisions(conn, "r1").decisions[0].action == "本周评估接入"
+    assert [d["action"] for d in out["decisions"]["decisions"]] == ["留我"]
+    assert out["decision_degraded"] is False
 
 
 def test_decide_node_degrades_on_entailment_failure(conn):

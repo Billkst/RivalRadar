@@ -1,4 +1,5 @@
 import json
+import threading
 from types import SimpleNamespace
 
 from rivalradar.agents.analyst import (
@@ -103,11 +104,34 @@ def test_wrapper_models_hold_lists():
 
 
 class _Completions:
+    """支持两种喂法:
+    - list:按调用顺序取(单次调用的小测试,顺序无关)。
+    - dict {schema_title: payload | [payloads]}:按请求的 schema title 派发,与
+      调用顺序解耦。analyze 并行化后抽取顺序不确定,顺序索引会拿错 payload,
+      故多调用的 analyze 测试用 dict 模式。计数加锁,使并发下 calls 断言稳定。
+    """
     def __init__(self, payloads):
-        self.payloads = list(payloads); self.calls = 0; self.last_kwargs = None
+        self._dict_mode = isinstance(payloads, dict)
+        if self._dict_mode:
+            self._map = {k: (list(v) if isinstance(v, list) else [v])
+                         for k, v in payloads.items()}
+        else:
+            self.payloads = list(payloads)
+        self.calls = 0
+        self.last_kwargs = None
+        self._lock = threading.Lock()
+
     def create(self, **kwargs):
-        self.last_kwargs = kwargs
-        p = self.payloads[self.calls]; self.calls += 1
+        with self._lock:
+            self.last_kwargs = kwargs
+            idx = self.calls
+            self.calls += 1
+            if self._dict_mode:
+                title = kwargs["tools"][0]["function"]["parameters"].get("title")
+                queue = self._map[title]
+                p = queue.pop(0) if len(queue) > 1 else queue[0]
+            else:
+                p = self.payloads[idx]
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(
                 tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=p))]))],
@@ -144,18 +168,19 @@ def test_extract_pricing_returns_pricing_model():
     assert isinstance(pricing, PricingModel) and pricing.model_type == "freemium"
 
 
-def _profile_payloads():
-    # 顺序:features, pricing, personas, swot
-    return [
-        json.dumps({"items": [{"id": "f1", "name": "db", "description": "", "category": "core_workflows", "evidence_refs": []}]}),
-        json.dumps({"model_type": "freemium", "tiers": [], "evidence_refs": []}),
-        json.dumps({"personas": []}),
-        json.dumps({"strengths": [], "weaknesses": [], "opportunities": [], "threats": []}),
-    ]
+def _profile_payload_map():
+    # 按 schema title 派发(与调用顺序解耦):features/pricing/personas/swot 各一份。
+    # analyze 并行化后抽取顺序不确定,顺序索引会错位,故用 title→payload 映射。
+    return {
+        "FeatureExtraction": json.dumps({"items": [{"id": "f1", "name": "db", "description": "", "category": "core_workflows", "evidence_refs": []}]}),
+        "PricingModel": json.dumps({"model_type": "freemium", "tiers": [], "evidence_refs": []}),
+        "PersonaExtraction": json.dumps({"personas": []}),
+        "SWOT": json.dumps({"strengths": [], "weaknesses": [], "opportunities": [], "threats": []}),
+    }
 
 
 def test_analyze_competitor_assembles_profile():
-    client = _FakeClient(_profile_payloads())
+    client = _FakeClient(_profile_payload_map())
     prof = analyze_competitor([_ev("e1", "Notion", "core_workflows")], "Notion", client=client, model="m")
     assert isinstance(prof, CompetitorProfile)
     assert prof.name == "Notion" and prof.features[0].name == "db"
@@ -174,8 +199,7 @@ def test_build_comparison_returns_rows():
 
 def test_analyze_end_to_end_with_fake_client():
     # 1 竞品:4 次抽取 + 1 次对比 = 5 次调用
-    payloads = _profile_payloads() + [json.dumps({"rows": []})]
-    client = _FakeClient(payloads)
+    client = _FakeClient({**_profile_payload_map(), "ComparisonExtraction": json.dumps({"rows": []})})
     out = analyze([_ev("e1", "Notion", "core_workflows")], ["Notion"], client=client, model="m")
     assert isinstance(out, CompetitorAnalysis)
     assert out.competitors[0].name == "Notion"
@@ -193,9 +217,8 @@ def test_analyze_threads_requested_dimensions_into_comparison(monkeypatch):
 
     import rivalradar.agents.analyst as analyst_mod
     monkeypatch.setattr(analyst_mod, "build_comparison", spy)
-    payloads = _profile_payloads()
     analyze([_ev("e1", "Notion", "pricing")], ["Notion"],
-            dimensions=("pricing", "core_workflows"), client=_FakeClient(payloads), model="m")
+            dimensions=("pricing", "core_workflows"), client=_FakeClient(_profile_payload_map()), model="m")
     assert captured["dims"] == ("pricing", "core_workflows")
 
 
@@ -203,7 +226,8 @@ def test_analyze_two_competitors_aggregates_and_compares():
     # 2 竞品:每个 4 次抽取 + 1 次对比 = 9 次调用;对比 rows 真流入结果
     comparison = json.dumps({"rows": [{"dimension": "pricing", "cells": [
         {"competitor": "Notion", "value_type": "enum", "value": "freemium", "evidence_refs": []}]}]})
-    client = _FakeClient(_profile_payloads() + _profile_payloads() + [comparison])
+    # 2 竞品复用同一份 profile payload map(queue 长度 1 → 每次返回同份);对比一份。
+    client = _FakeClient({**_profile_payload_map(), "ComparisonExtraction": comparison})
     out = analyze([_ev("e1", "Notion", "core_workflows"), _ev("e2", "飞书", "pricing")],
                   ["Notion", "飞书"], client=client, model="m")
     assert [c.name for c in out.competitors] == ["Notion", "飞书"]

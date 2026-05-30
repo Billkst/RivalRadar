@@ -56,11 +56,19 @@ def _iter_conclusions(
                 yield cell.competitor, row.dimension, f"对比:{cell.value}", cell.evidence_refs
 
 
-def check_traceability(analysis: CompetitorAnalysis, evidence: list[Evidence]) -> list[QCIssue]:
-    """硬闸:每条结论必须挂非空、且 evidence_id 存在于证据集的 evidence_refs。"""
+def check_traceability(
+    analysis: CompetitorAnalysis, evidence: list[Evidence],
+    *, comparison_only: bool = False,
+) -> list[QCIssue]:
+    """硬闸:每条结论必须挂非空、且 evidence_id 存在于证据集的 evidence_refs。
+
+    comparison_only:只机械校验对比矩阵 cell(cockpit showcase 面),跳过 profile 的
+    描述性结论(features/pricing/personas/SWOT,喂 v0.4 退役报告、不进驾驶舱)。Part B
+    策展化:qc_node 用它把阻断性溯源闸 scope 到展示内容,profile 描述性结论的小瑕疵不
+    再触发 retry_collect 死循环/insufficient(与 check_entailment 的 comparison_only 对称)。"""
     valid = {e.id for e in evidence}
     issues: list[QCIssue] = []
-    for comp, dim, text, refs in _iter_conclusions(analysis):
+    for comp, dim, text, refs in _iter_conclusions(analysis, comparison_only=comparison_only):
         if not refs:
             issues.append(QCIssue(competitor=comp, dimension=dim,
                                   problem_type="missing_evidence", detail=f"无引用:{text}"))
@@ -150,6 +158,75 @@ def check_entailment(
     return issues
 
 
+# ── Part B:QC 策展化(信任模型「否决闸」→「策展人」)─────────────────────────
+# v0.4 真 run 钓出:entailment 把过度拆解的越界 cell 判 hallucination → retry_analyze
+# 耗尽 → 整个 run degraded + 丑横幅。但人类分析师不这么干:站不住的结论直接不写,只
+# 展示站得住的。curate_analysis 把这个理念落地——丢弃站不住的对比 cell,而非否决整 run。
+# 防虚构契约因此更强(主动删而非仅标记),且降级横幅只留给真·覆盖耗尽(诚实 insufficient)。
+def curate_analysis(
+    analysis: CompetitorAnalysis, evidence: list[Evidence],
+    *, dimensions: tuple[str, ...] | None = None, client, model,
+) -> tuple[CompetitorAnalysis, list[str]]:
+    """策展对比矩阵:丢弃无引用/悬空引用(机械)+ 蕴含不支撑(LLM)的 cell,返回
+    (curated_analysis, dropped_labels)。只动 showcase 的对比矩阵(请求维度内);profile
+    描述性结论不在此(喂退役报告、不进驾驶舱)。错误契约同 check_entailment:structured_call
+    失败上抛,由 qc_node 捕获降级。"""
+    # Phase 1 机械门(免费、确定):丢弃无引用/悬空引用的 in-scope cell,空 row 消失。
+    # 先于 LLM 跑,保证悬空引用 cell 绝不进 check_entailment(不耗 LLM 预算)。
+    mech_analysis, dropped = _curate_mechanical(analysis, evidence, dimensions)
+
+    # Phase 2 LLM 门(贵):只对机械门幸存的 cell 判蕴含(已 scope comparison_only + 请求维度)。
+    unsupported = {
+        (i.competitor, i.dimension)
+        for i in check_entailment(mech_analysis, evidence, dimensions=dimensions,
+                                  comparison_only=True, client=client, model=model)
+    }
+
+    # Phase 3 组装:丢弃蕴含不支撑的 cell;空 row 直接消失(coverage 发现缺口 → broaden 补搜环)。
+    final_rows: list[ComparisonRow] = []
+    for row in mech_analysis.comparison:
+        in_scope = dimensions is None or row.dimension in dimensions
+        if not in_scope:
+            final_rows.append(row)
+            continue
+        kept = []
+        for cell in row.cells:
+            if (cell.competitor, row.dimension) in unsupported:
+                dropped.append(f"{cell.competitor}/{row.dimension}")  # 蕴含:不支撑
+                continue
+            kept.append(cell)
+        if kept:
+            final_rows.append(row.model_copy(update={"cells": kept}))
+    curated = analysis.model_copy(update={"comparison": final_rows})
+    return curated, dropped
+
+
+def _curate_mechanical(
+    analysis: CompetitorAnalysis, evidence: list[Evidence],
+    dimensions: tuple[str, ...] | None,
+) -> tuple[CompetitorAnalysis, list[str]]:
+    """机械门策展(免 LLM):丢弃 in-scope 且无引用/悬空引用的对比 cell,空 row 消失,
+    out-of-scope row 原样保留。返回 (curated_analysis, dropped)。curate_analysis 的 Phase 1,
+    也是 qc_node 在 LLM 蕴含失败降级时的 fallback(不调 LLM 仍能给干净 showcase)。"""
+    valid = {e.id for e in evidence}
+    dropped: list[str] = []
+    rows: list[ComparisonRow] = []
+    for row in analysis.comparison:
+        in_scope = dimensions is None or row.dimension in dimensions
+        if not in_scope:
+            rows.append(row)
+            continue
+        kept = []
+        for cell in row.cells:
+            if not cell.evidence_refs or any(r.evidence_id not in valid for r in cell.evidence_refs):
+                dropped.append(f"{cell.competitor}/{row.dimension}")
+                continue
+            kept.append(cell)
+        if kept:
+            rows.append(row.model_copy(update={"cells": kept}))
+    return analysis.model_copy(update={"comparison": rows}), dropped
+
+
 # ── QC-on-decisions(full-C / Epic 2.3)──────────────────────────────────────
 # 决策级 QC issue 用 dimension='decision' 标记,与 analysis issue 区分:它们不进
 # analysis 的 retry_collect/retry_analyze 路由,而是由 decide 节点内部消费(有界重生)。
@@ -214,6 +291,43 @@ def check_decision_entailment(
                                   problem_type="hallucination",
                                   detail=f"证据不支撑决策({d.action}):{verdict.reason}"))
     return issues
+
+
+def curate_decisions(
+    decisions: list[Decision], evidence: list[Evidence], *, client, model,
+    max_calls: int = 8,
+) -> tuple[list[Decision], list[str]]:
+    """策展决策:丢弃无引用/悬空引用(机械)+ 蕴含不支撑(LLM)的决策,返回
+    (kept, dropped_actions)。与 curate_analysis 对称——ungrounded 决策静默丢弃,而非
+    decision_degraded 标降级整批。cost guard 同 check_decision_entailment(封顶 max_calls,
+    超额不再调 LLM、视为保留)。错误契约:structured_call 失败上抛,由 decide 节点捕获。"""
+    idx = {e.id: e for e in evidence}
+    kept: list[Decision] = []
+    dropped: list[str] = []
+    calls = 0
+    for d in decisions:
+        # 机械门:无引用 / 任一悬空引用 → 丢弃(不耗 LLM 预算)
+        if not d.evidence_refs or any(r.evidence_id not in idx for r in d.evidence_refs):
+            dropped.append(d.action)
+            continue
+        if calls >= max_calls:
+            kept.append(d)  # cost guard:超额不再判,保留(机械门已过)
+            continue
+        quotes = []
+        for r in d.evidence_refs:
+            src = idx[r.evidence_id].content if r.evidence_id in idx else ""
+            quotes.append(f"- 引语:{r.quote}\n  证据原文:{src[:600]}")
+        msgs = [{"role": "user", "content":
+                 "判断下列证据是否支撑该决策建议。supported=true 表示证据确实支撑该建议的"
+                 "行动与理由;false 表示不支撑或无关。\n\n"
+                 f"决策(行动):{d.action}\n理由:{d.why}\n\n证据:\n" + "\n".join(quotes)}]
+        verdict = structured_call(EntailmentVerdict, msgs, client=client, model=model)
+        calls += 1
+        if verdict.supported:
+            kept.append(d)
+        else:
+            dropped.append(d.action)
+    return kept, dropped
 
 
 def decide_verdict(issues: list[QCIssue]) -> QCVerdict:

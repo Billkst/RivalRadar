@@ -4,7 +4,7 @@ from types import SimpleNamespace
 from rivalradar.agents.qc import (
     check_traceability, check_ontology, check_coverage, EntailmentVerdict, check_entailment,
     decide_verdict, check, check_decision_traceability, check_decision_entailment,
-    sanitize_qc_result,
+    sanitize_qc_result, curate_analysis, curate_decisions,
 )
 from rivalradar.schema.models import (
     CompetitorAnalysis, CompetitorProfile, FeatureItem, PricingModel,
@@ -17,10 +17,20 @@ def _ref(eid):
     return EvidenceRef(evidence_id=eid, quote="q")
 
 
-def _ev(eid, dimension="pricing"):
+def _ev(eid="e1", dimension="pricing"):
     return Evidence(id=eid, competitor="Notion", dimension=dimension, content="c",
                     source_url="u", source_title="t", language="en",
                     fetched_at="2026-05-25T00:00:00Z")
+
+
+def _analysis_with_cell(dim="pricing", refs=None):
+    """构造一份只含单个对比 cell(默认 Notion/pricing 挂有效引用 e1)的分析,供 Part B
+    策展测试复用。带一个空 profile(Notion)以便 traceability comparison_only 测试加 feature。"""
+    refs = [_ref("e1")] if refs is None else refs
+    return CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[ComparisonRow(dimension=dim, cells=[
+            ComparisonCell(competitor="Notion", value_type="enum", value="v", evidence_refs=refs)])])
 
 
 def test_check_traceability_flags_empty_refs():
@@ -358,3 +368,87 @@ def test_check_end_to_end_retry_collect_with_issues_flowing_through():
     assert result.verdict == "retry_collect"
     assert any(i.problem_type == "missing_evidence" for i in result.issues)
     assert client.chat.completions.calls == 0  # 空引用结论不调 LLM
+
+
+# ── Part B:QC 策展化(信任模型「否决闸」→「策展人」)──────────────────────
+def test_curate_drops_unsupported_cell(monkeypatch):
+    """蕴含判不支撑的对比 cell 被静默丢弃(不再产 hallucination 否决整 run)。"""
+    import rivalradar.agents.qc as qc_mod
+    monkeypatch.setattr(qc_mod, "structured_call",
+                        lambda *a, **k: EntailmentVerdict(supported=False, reason="x"))
+    a = _analysis_with_cell(dim="pricing")
+    curated, dropped = curate_analysis(a, [_ev()], dimensions=("pricing",),
+                                       client=object(), model="m")
+    assert dropped  # 记录了丢弃
+    assert curated.comparison == []  # 唯一 cell 站不住 → row 清空
+
+
+def test_curate_keeps_supported_cell(monkeypatch):
+    """蕴含支撑的 cell 原样保留,dropped 为空。"""
+    import rivalradar.agents.qc as qc_mod
+    monkeypatch.setattr(qc_mod, "structured_call",
+                        lambda *a, **k: EntailmentVerdict(supported=True))
+    a = _analysis_with_cell(dim="pricing")
+    curated, dropped = curate_analysis(a, [_ev()], dimensions=("pricing",),
+                                       client=object(), model="m")
+    assert dropped == []
+    assert len(curated.comparison) == 1
+    assert curated.comparison[0].cells[0].competitor == "Notion"
+
+
+def test_curate_drops_dangling_ref_cell_without_llm(monkeypatch):
+    """无引用/悬空引用的 cell 由机械 traceability 丢弃,且不耗 LLM 调用。"""
+    import rivalradar.agents.qc as qc_mod
+    calls = {"n": 0}
+    def _fake(*a, **k):
+        calls["n"] += 1
+        return EntailmentVerdict(supported=True)
+    monkeypatch.setattr(qc_mod, "structured_call", _fake)
+    a = _analysis_with_cell(refs=[EvidenceRef(evidence_id="ZZZ", quote="x",
+                                              support_verdict="supported")])
+    curated, dropped = curate_analysis(a, [_ev()], dimensions=("pricing",),
+                                       client=object(), model="m")
+    assert dropped
+    assert curated.comparison == []
+    assert calls["n"] == 0  # 悬空引用直接机械丢弃,不送 LLM
+
+
+def test_curate_leaves_out_of_scope_dim_untouched(monkeypatch):
+    """非请求维度的 row 不策展(build_comparison 已 scoped,这里只防御)。"""
+    import rivalradar.agents.qc as qc_mod
+    monkeypatch.setattr(qc_mod, "structured_call",
+                        lambda *a, **k: EntailmentVerdict(supported=False))
+    a = _analysis_with_cell(dim="pricing")
+    curated, dropped = curate_analysis(a, [_ev()], dimensions=("core_workflows",),
+                                       client=object(), model="m")
+    assert dropped == []
+    assert len(curated.comparison) == 1  # pricing 不在请求维度 → 不动
+
+
+def test_check_traceability_comparison_only_skips_profiles():
+    """comparison_only=True:只机械校验对比矩阵 cell,不校验 profile 描述性结论。"""
+    a = _analysis_with_cell()
+    # profile 加一个无引用 feature(全量 traceability 会抓,comparison_only 应跳过)
+    from rivalradar.schema.models import FeatureItem
+    a.competitors[0].features = [FeatureItem(id="f1", name="db", description="",
+                                             category="core_workflows", evidence_refs=[])]
+    full = check_traceability(a, [_ev()])
+    scoped = check_traceability(a, [_ev()], comparison_only=True)
+    assert any(i.problem_type == "missing_evidence" for i in full)  # 全量抓到无引用 feature
+    assert scoped == []  # comparison_only 只看 cell(grounded)→ 干净
+
+
+def test_curate_decisions_drops_ungrounded(monkeypatch):
+    """ungrounded 决策被丢弃(不再 decision_degraded 标降级),grounded 保留。"""
+    import rivalradar.agents.qc as qc_mod
+    monkeypatch.setattr(qc_mod, "structured_call",
+                        lambda *a, **k: EntailmentVerdict(supported=True))
+    good = Decision(stance="建议采用", action="上", why="y", horizon="短期",
+                    risk_reversibility="可逆", risk_cost="低",
+                    evidence_refs=[EvidenceRef(evidence_id="e1", quote="x", support_verdict="supported")])
+    bad = Decision(stance="建议采用", action="瞎搞", why="y", horizon="短期",
+                   risk_reversibility="可逆", risk_cost="低",
+                   evidence_refs=[EvidenceRef(evidence_id="ZZZ", quote="x", support_verdict="supported")])
+    kept, dropped = curate_decisions([good, bad], [_ev()], client=object(), model="m")
+    assert [d.action for d in kept] == ["上"]  # 悬空引用决策被丢
+    assert dropped

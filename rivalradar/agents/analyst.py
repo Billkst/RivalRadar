@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import concurrent.futures as cf
 import logging
 from typing import Callable, TypeVar
 
@@ -14,6 +15,16 @@ from rivalradar.schema.models import (
 logger = logging.getLogger(__name__)
 
 _X = TypeVar("_X")
+
+# 分析层并发上限。真 run 钓出:analyze 全串行(3 竞品 × 4 抽取 + 1 对比 = 13 次
+# 顺序 LLM 调用)单轮 ~460s,3 轮重试 ~22min,真 run 无法 live demo。抽取是
+# IO-bound(等 Doubao HTTP),线程池足够;client(OpenAI SDK)线程安全。
+# 双层独立线程池(竞品间 + 单竞品 4 抽取)。峰值线程 = 外层竞品并发 × 内层抽取并发
+# = 4 × 4 = 16 的天然上界:即使竞品很多,外层也只 4 并发,内层最多 4×4=16,
+# 自动防把上游限流。两层必须是独立池——共享一个 executor 嵌套 submit-and-wait
+# 会经典死锁(外层 worker 占槽等内层任务,内层抢不到槽)。
+_MAX_COMPETITOR_WORKERS = 4   # 竞品间并行度
+_MAX_EXTRACT_WORKERS = 4      # 单竞品 4 抽取并行度(features/pricing/personas/swot)
 
 
 def _safe_extract(
@@ -131,20 +142,33 @@ def analyze_competitor(
     feat_ev = evidence_for(ev, competitor, dimension="core_workflows") or ev
     price_ev = evidence_for(ev, competitor, dimension="pricing") or ev
     pers_ev = evidence_for(ev, competitor, dimension="review_sentiment") or ev
+    # 4 项抽取并行(各自 _safe_extract 内已优雅降级 + sink.append CPython 原子)。
+    # 串行时 4 次顺序等 HTTP;并行后墙钟 ≈ 最慢一项。client 线程安全。
+    thunks = {
+        "features": lambda: _safe_extract(
+            "features", competitor,
+            lambda: extract_features(feat_ev, competitor, client=client, model=model),
+            [], sink=degraded_sink),
+        "pricing": lambda: _safe_extract(
+            "pricing", competitor,
+            lambda: extract_pricing(price_ev, competitor, client=client, model=model),
+            PricingModel(model_type="未知"), sink=degraded_sink),
+        "personas": lambda: _safe_extract(
+            "personas", competitor,
+            lambda: extract_personas(pers_ev, competitor, client=client, model=model),
+            [], sink=degraded_sink),
+        "swot": lambda: _safe_extract(
+            "swot", competitor,
+            lambda: extract_swot(ev, competitor, client=client, model=model),
+            SWOT(), sink=degraded_sink),
+    }
+    with cf.ThreadPoolExecutor(max_workers=_MAX_EXTRACT_WORKERS) as ex:
+        futures = {k: ex.submit(fn) for k, fn in thunks.items()}
+        out = {k: f.result() for k, f in futures.items()}
     return CompetitorProfile(
         name=competitor,
-        features=_safe_extract("features", competitor,
-                               lambda: extract_features(feat_ev, competitor, client=client, model=model), [],
-                               sink=degraded_sink),
-        pricing=_safe_extract("pricing", competitor,
-                              lambda: extract_pricing(price_ev, competitor, client=client, model=model),
-                              PricingModel(model_type="未知"), sink=degraded_sink),
-        personas=_safe_extract("personas", competitor,
-                               lambda: extract_personas(pers_ev, competitor, client=client, model=model), [],
-                               sink=degraded_sink),
-        swot=_safe_extract("swot", competitor,
-                           lambda: extract_swot(ev, competitor, client=client, model=model), SWOT(),
-                           sink=degraded_sink),
+        features=out["features"], pricing=out["pricing"],
+        personas=out["personas"], swot=out["swot"],
     )
 
 
@@ -181,10 +205,17 @@ def analyze(
     `degraded_sink`:任一竞品任一项抽取降级时 label 汇聚于此(透传给 analyze_competitor)。
     None = 不汇聚(向后兼容)。analyze_node 据此置 run 级 degraded,保证「降级必可见」。
     """
-    profiles = [
-        analyze_competitor(evidence, c, degraded_sink=degraded_sink, client=client, model=model)
-        for c in competitors
-    ]
+    # 竞品间并行(外层池);每个竞品内部再并行 4 抽取(内层池)。f.result() 按
+    # 提交顺序回收 → profiles 保持 competitors 顺序(单测/对比稳定)。
+    with cf.ThreadPoolExecutor(
+        max_workers=min(_MAX_COMPETITOR_WORKERS, len(competitors) or 1)
+    ) as ex:
+        futures = [
+            ex.submit(analyze_competitor, evidence, c,
+                      degraded_sink=degraded_sink, client=client, model=model)
+            for c in competitors
+        ]
+        profiles = [f.result() for f in futures]
     comparison = build_comparison(
         profiles, evidence, dimensions=dimensions, client=client, model=model)
     return CompetitorAnalysis(competitors=profiles, comparison=comparison)
