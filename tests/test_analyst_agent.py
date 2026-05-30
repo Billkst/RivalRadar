@@ -51,32 +51,61 @@ def test_analyze_threads_degraded_sink_on_extraction_failure(monkeypatch):
     assert "Notion.features" in sink
 
 
-def test_safe_extract_records_degrade_into_sink():
-    # silent-failure 修复:降级必可见 —— label 记入 sink 供 analyze_node 置 run 级 degraded
-    def boom():
-        raise StructuredCallError("truncated")
+def test_safe_extract_degrades_on_any_exception_not_just_structured(monkeypatch):
+    # ship outside-voice C2:_safe_extract 兜**任何**异常(不只 StructuredCallError),
+    # 单项抽取任何失败都降级该项,绝不让一个竞品一项抽取拖垮整轮(并行后还丢兄弟结果)。
+    def boom_value():
+        raise ValueError("pydantic 构造炸了")  # 非 StructuredCallError
     sink: list[str] = []
-    _safe_extract("features", "钉钉", boom, [], sink=sink)
-    assert sink == ["钉钉.features"]
-    # 成功路径不污染 sink
-    _safe_extract("pricing", "钉钉", lambda: PricingModel(model_type="x"), None, sink=sink)
-    assert sink == ["钉钉.features"]
+    out = _safe_extract("pricing", "钉钉", boom_value, PricingModel(model_type="未知"), sink=sink)
+    assert out.model_type == "未知"          # 降级返默认,不上抛
+    assert sink == ["钉钉.pricing"]           # 仍记入 sink(可见)
 
 
-def test_analyze_threads_degraded_sink_on_extraction_failure(monkeypatch):
-    # analyze() 把单竞品抽取降级汇聚进 degraded_sink(端到端:analyze_node 据此置 degraded)
+def test_analyze_real_nested_pools_run_concurrently():
+    # M1:真跑嵌套线程池拓扑(不 monkeypatch extract_*),用记录线程 id 的 fake client 证明
+    # 抽取确实并发(>1 线程)、且 client 被多线程并发命中。锁住"client 线程安全 + 双层池"契约,
+    # 防未来换非线程安全 client 或退化成串行时静默回归。
+    import threading
     import rivalradar.agents.analyst as an
-    monkeypatch.setattr(an, "extract_features",
-                        lambda *a, **k: (_ for _ in ()).throw(StructuredCallError("boom")))
-    monkeypatch.setattr(an, "extract_pricing", lambda *a, **k: PricingModel(model_type="x"))
-    monkeypatch.setattr(an, "extract_personas", lambda *a, **k: [])
-    monkeypatch.setattr(an, "extract_swot", lambda *a, **k: SWOT())
-    monkeypatch.setattr(an, "build_comparison", lambda *a, **k: [])
-    sink: list[str] = []
-    ev = [Evidence(id="e1", competitor="Notion", dimension="core_workflows", content="c",
-                   source_url="u", source_title="t", language="en", fetched_at="t0")]
-    an.analyze(ev, ["Notion"], degraded_sink=sink, client=None, model="m")
-    assert "Notion.features" in sink
+
+    class _ThreadRecordingClient:
+        def __init__(self):
+            self.thread_ids: set[int] = set()
+            self._lock = threading.Lock()
+            self._barrier = threading.Barrier(2, timeout=5)  # 要求至少 2 抽取真并发
+        def _emit(self, title):
+            with self._lock:
+                self.thread_ids.add(threading.get_ident())
+            payloads = _profile_payload_map()
+            payloads["ComparisonExtraction"] = json.dumps({"rows": []})
+            return payloads[title]
+        @property
+        def chat(self):
+            outer = self
+            class _C:
+                class completions:
+                    @staticmethod
+                    def create(**kwargs):
+                        title = kwargs["tools"][0]["function"]["parameters"].get("title")
+                        # 4 项 profile 抽取里,先到的两个在 barrier 上汇合 → 证明真并发
+                        if title in ("FeatureExtraction", "PricingModel"):
+                            try:
+                                outer._barrier.wait()
+                            except threading.BrokenBarrierError:
+                                pass
+                        p = outer._emit(title)
+                        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                            tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=p))]))],
+                            usage=SimpleNamespace(total_tokens=10))
+            return _C()
+
+    client = _ThreadRecordingClient()
+    out = analyze([_ev("e1", "Notion", "core_workflows")], ["Notion"], client=client, model="m")
+    assert isinstance(out, CompetitorAnalysis)
+    # barrier(2) 能通过即证明 features/pricing 两项抽取真并发(否则串行会 timeout BrokenBarrier);
+    # 至少 2 个不同线程命中 client。
+    assert len(client.thread_ids) >= 2, f"抽取未并发,thread_ids={client.thread_ids}"
 
 
 def _ev(eid, competitor, dimension):

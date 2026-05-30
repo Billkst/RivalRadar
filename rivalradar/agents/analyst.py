@@ -40,12 +40,18 @@ def _safe_extract(
     sink:降级事件汇聚处(`{competitor}.{label}`)。None = 不汇聚(向后兼容直接调用/单测)。
     注意:被降级的 profile 项(features/personas/swot/pricing)**不进 check_entailment**(qc_node
     用 comparison_only=True 只严判对比矩阵 cell);它们仍受 check_traceability 全量机械门约束
-    (空引用/悬空 id 仍被抓)。所以降级项的可见性靠 sink→degraded 横幅,而非 entailment。"""
+    (空引用/悬空 id 仍被抓)。所以降级项的可见性靠 sink→degraded 横幅,而非 entailment。
+
+    捕获范围(ship outside-voice C2):catch **任何** 异常,不只 StructuredCallError——本函数
+    存在的唯一理由就是"单项抽取失败不杀整 run",只兜截断这一种太窄:pydantic 构造异常 /
+    未被 structured_call 包裹的 openai 异常类 / 大响应 MemoryError 等都该降级该项而非让一个
+    竞品的一项抽取拖垮整轮(并行后还会丢弃已完成的兄弟抽取结果)。logger 只 type(e).__name__
+    (不 exc_info 全 traceback 给 server log;sink 只记 label,绝不把模型/异常文本带出)。"""
     try:
         return fn()
-    except StructuredCallError:
-        logger.warning("analyze_competitor[%s] %s 抽取降级(返空默认)", competitor, label,
-                       exc_info=True)
+    except Exception as e:  # noqa: BLE001 — 单项抽取任何失败都降级该项,绝不杀整 run(本函数唯一职责)
+        logger.warning("analyze_competitor[%s] %s 抽取降级(%s,返空默认)",
+                       competitor, label, type(e).__name__, exc_info=True)
         if sink is not None:
             sink.append(f"{competitor}.{label}")
         return default

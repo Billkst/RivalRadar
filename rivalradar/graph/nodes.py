@@ -261,6 +261,7 @@ def make_decide_node(*, conn, client, model, as_of):
         _emit_progress(emit, "decide", "deciding", "正在基于证据生成决策建议")
 
         decision_degraded = False
+        dropped: list[str] = []  # 被策展掉的 ungrounded 决策 action(可见性,非降级)
         try:
             decision_set = generate_decisions(body, decision_context, client=client, model=model)
         except Exception as e:  # noqa: BLE001 — 生成失败降级,绝不崩图
@@ -272,7 +273,7 @@ def make_decide_node(*, conn, client, model, as_of):
         else:
             # 策展:丢弃 ungrounded 决策(机械悬空免 LLM + 蕴含不支撑),只留站得住的。
             try:
-                kept, _dropped = qc.curate_decisions(
+                kept, dropped = qc.curate_decisions(
                     decision_set.decisions, evidence, client=client, model=model)
                 decision_set = DecisionSet(decisions=kept)
             except Exception as e:  # noqa: BLE001 — 蕴含失败:机械门 fallback(只丢悬空)+ 降级,绝不崩图
@@ -282,13 +283,18 @@ def make_decide_node(*, conn, client, model, as_of):
                 valid = {ev.id for ev in evidence}
                 kept = [d for d in decision_set.decisions
                         if d.evidence_refs and all(r.evidence_id in valid for r in d.evidence_refs)]
+                dropped = [d.action for d in decision_set.decisions if d not in kept]
                 decision_set = DecisionSet(decisions=kept)
                 decision_degraded = True
 
         save_decisions(conn, run_id, decision_set)
+        # 策展丢弃 ungrounded 决策是**健康的策展路径,不是降级**(丢≠degrade,与 qc_node 同模型),
+        # 但仍须**可见**(ship outside-voice C1:_dropped 静默吞掉违反「降级必可见」精神)——
+        # 故把丢弃数记入 trace + emit,但**不**置 decision_degraded(那会回退到一票否决的病)。
         _emit_progress(
             emit, "decide", "done",
             f"生成 {len(decision_set.decisions)} 条决策建议"
+            + (f"(策展剔除 {len(dropped)} 条无据)" if dropped else "")
             + ("(蕴含降级,机械门兜底)" if decision_degraded else ""),
             metric={"current": len(decision_set.decisions),
                     "total": len(decision_set.decisions)},
@@ -296,7 +302,7 @@ def make_decide_node(*, conn, client, model, as_of):
         append_trace(conn, run_id, "decide",
                      input_summary=f"context={'set' if decision_context else 'generic'}",
                      output_summary=f"decisions={len(decision_set.decisions)} "
-                                    f"degraded={decision_degraded}",
+                                    f"dropped={len(dropped)} degraded={decision_degraded}",
                      latency_ms=int((time.monotonic() - t0) * 1000))
         return {"decisions": decision_set.model_dump(), "decision_degraded": decision_degraded}
     return decide_node
