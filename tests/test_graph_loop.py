@@ -64,7 +64,7 @@ class _CoversAllProvider:
         return [SearchResult(url=url, title="t", content="s", raw_content="body for " + query)]
 
 
-def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, client, model):
+def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
     """按证据已覆盖的维度产出分析:覆盖 dims_present 的对比行,引用真实证据 id。
     pricing profile 挂合法引用 → 确定性 traceability 过;无 features/personas/swot(空,不被遍历)。"""
     dims_present = {e.dimension for e in evidence}

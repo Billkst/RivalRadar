@@ -1,7 +1,7 @@
 from __future__ import annotations
 
 import concurrent.futures as cf
-from collections.abc import Iterator
+from collections.abc import Callable, Iterator
 
 from pydantic import BaseModel
 
@@ -153,7 +153,7 @@ class EntailmentVerdict(BaseModel):
 def check_entailment(
     analysis: CompetitorAnalysis, evidence: list[Evidence],
     *, dimensions: tuple[str, ...] | None = None, comparison_only: bool = False,
-    client, model,
+    on_progress: Callable[[str], None] | None = None, client, model,
 ) -> list[QCIssue]:
     """LLM 蕴含判定:被引证据是否真支撑结论;不支撑 → hallucination。每条结论一次调用。
 
@@ -185,6 +185,8 @@ def check_entailment(
                  "false 表示不支撑或无关。\n\n"
                  f"结论:{text}\n\n证据:\n" + "\n".join(quotes)}]
         verdict = structured_call(EntailmentVerdict, msgs, client=client, model=model)
+        if on_progress is not None:
+            on_progress(f"质检校验 {comp}·{dim}")  # 每格判完报一次(94s 静默段 → 逐格亮起)
         if not verdict.supported:
             return QCIssue(competitor=comp, dimension=dim,
                            problem_type="hallucination",
@@ -205,7 +207,8 @@ def check_entailment(
 # 防虚构契约因此更强(主动删而非仅标记),且降级横幅只留给真·覆盖耗尽(诚实 insufficient)。
 def curate_analysis(
     analysis: CompetitorAnalysis, evidence: list[Evidence],
-    *, dimensions: tuple[str, ...] | None = None, client, model,
+    *, dimensions: tuple[str, ...] | None = None,
+    on_progress: Callable[[str], None] | None = None, client, model,
 ) -> tuple[CompetitorAnalysis, list[str]]:
     """策展对比矩阵:丢弃无引用/悬空引用(机械)+ 蕴含不支撑(LLM)的 cell,返回
     (curated_analysis, dropped_labels)。只动 showcase 的对比矩阵(请求维度内);profile
@@ -219,7 +222,8 @@ def curate_analysis(
     unsupported = {
         (i.competitor, i.dimension)
         for i in check_entailment(mech_analysis, evidence, dimensions=dimensions,
-                                  comparison_only=True, client=client, model=model)
+                                  comparison_only=True, on_progress=on_progress,
+                                  client=client, model=model)
     }
 
     # Phase 3 组装:丢弃蕴含不支撑的 cell;空 row 直接消失(coverage 发现缺口 → broaden 补搜环)。

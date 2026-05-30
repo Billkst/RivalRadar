@@ -33,7 +33,7 @@ class _SlowProvider:
                              raw_content="body for " + query)]
 
 
-def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, client, model):
+def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
     profiles = []
     for c in competitors:
         ev = next((e for e in evidence if e.competitor == c

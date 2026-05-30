@@ -6,6 +6,7 @@ from types import SimpleNamespace
 from rivalradar.agents import qc
 from rivalradar.graph.nodes import (
     make_collect_node, make_analyze_node, make_write_node, make_qc_node, make_decide_node,
+    _make_ticker,
 )
 from rivalradar.llm.structured import StructuredCallError
 from rivalradar.schema.models import (
@@ -102,7 +103,7 @@ def test_analyze_node_converts_evidence_and_persists(conn, monkeypatch):
         name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
     seen = {}
 
-    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, client, model):
+    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
         seen["n"] = len(evidence)                  # 验证 dict→Evidence 转换后传入
         return fake
     monkeypatch.setattr(nodes_mod, "analyze", _fake_analyze)
@@ -126,7 +127,7 @@ def test_analyze_node_sets_degraded_when_extraction_degrades(conn, monkeypatch):
     fake = CompetitorAnalysis(competitors=[CompetitorProfile(
         name="Notion", pricing=PricingModel(model_type="未知"), swot=SWOT())], comparison=[])
 
-    def _degrading_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, client, model):
+    def _degrading_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
         if degraded_sink is not None:
             degraded_sink.append("Notion.features")  # 模拟单项抽取降级
         return fake
@@ -494,6 +495,28 @@ def test_decide_node_drops_unsupported_keeps_grounded(conn):
                 "evidence": _evidence_all_dims("g1")}, _CFG)
     assert [d["action"] for d in out["decisions"]["decisions"]] == ["留我"]
     assert out["decision_degraded"] is False
+
+
+def test_make_ticker_emits_incrementing_progress_threadsafe():
+    """增量进度 ticker:并发 worker 调 tick(detail)→ 锁内自增 + emit progress(current/total),
+    并发也不丢不重(锁串行化 put_nowait,从 worker 线程安全 emit 的关键)。emit None → None。"""
+    events = []
+
+    def emit(ev_type, data):
+        events.append((ev_type, data))
+
+    tick = _make_ticker(emit, "analyst", "thinking", total=3)
+    threads = [threading.Thread(target=tick, args=(f"d{i}",)) for i in range(3)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join()
+    assert len(events) == 3
+    assert all(ev == "progress" for ev, _ in events)
+    assert all(d["agent_id"] == "analyst" and d["step"] == "thinking" for _, d in events)
+    assert sorted(d["metric"]["current"] for _, d in events) == [1, 2, 3]  # 无丢失/无重复
+    assert all(d["metric"]["total"] == 3 for _, d in events)
+    assert _make_ticker(None, "x", "y", 1) is None  # emit 缺省(单测/CLI)→ no-op
 
 
 def test_decide_node_degrades_on_entailment_failure(conn):

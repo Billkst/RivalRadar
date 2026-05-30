@@ -108,6 +108,39 @@ def test_analyze_real_nested_pools_run_concurrently():
     assert len(client.thread_ids) >= 2, f"抽取未并发,thread_ids={client.thread_ids}"
 
 
+def test_analyze_emits_per_extraction_and_comparison():
+    """增量进度:每竞品 4 抽取 + 1 对比 = 5 次 on_progress(analyze ~174s 最长静默段 →
+    竞品·维度逐项亮起)。on_progress 在 worker 线程并发调,用锁汇聚不丢。"""
+    class _PayloadClient:
+        @property
+        def chat(self):
+            class _C:
+                class completions:
+                    @staticmethod
+                    def create(**kwargs):
+                        title = kwargs["tools"][0]["function"]["parameters"].get("title")
+                        payloads = _profile_payload_map()
+                        payloads["ComparisonExtraction"] = json.dumps({"rows": []})
+                        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                            tool_calls=[SimpleNamespace(function=SimpleNamespace(
+                                arguments=payloads[title]))]))],
+                            usage=SimpleNamespace(total_tokens=10))
+            return _C()
+
+    calls = []
+    lock = threading.Lock()
+
+    def rec(detail):
+        with lock:
+            calls.append(detail)
+
+    analyze([_ev("e1", "Notion", "core_workflows")], ["Notion"],
+            on_progress=rec, client=_PayloadClient(), model="m")
+    assert len(calls) == 5  # 1 竞品 × 4 抽取 + 1 对比
+    assert any("对比" in c for c in calls)            # 对比那次报了
+    assert sum("Notion" in c for c in calls) == 4     # 4 项抽取都带竞品名
+
+
 def _ev(eid, competitor, dimension):
     return Evidence(id=eid, competitor=competitor, dimension=dimension, content="c",
                     source_url="u", source_title="t", language="en", fetched_at="2026-05-25T00:00:00Z")
@@ -240,7 +273,7 @@ def test_analyze_threads_requested_dimensions_into_comparison(monkeypatch):
     不再硬编码全 6 受控本体(否则分析员超范围产出 → 越界 hallucination + 质检覆盖死循环)。"""
     captured = {}
 
-    def spy(profiles, evidence, *, dimensions, client, model):
+    def spy(profiles, evidence, *, dimensions, on_progress=None, client, model):
         captured["dims"] = dimensions
         return []
 

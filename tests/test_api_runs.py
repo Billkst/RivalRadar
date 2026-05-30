@@ -88,7 +88,7 @@ class _OneShotProvider:
                              raw_content="body for " + query)]
 
 
-def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, client, model):
+def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
     """覆盖已有维度的对比,引用真实 id;无 features/personas/swot。"""
     dims_present = {e.dimension for e in evidence}
     profiles = []

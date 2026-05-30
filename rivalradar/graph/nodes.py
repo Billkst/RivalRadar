@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any, Callable
 
@@ -53,6 +54,30 @@ def _emit_progress(
     emit("progress", payload)
 
 
+def _make_ticker(
+    emit: Callable[[str, dict[str, Any]], None] | None,
+    agent_id: str, step: str, total: int,
+) -> Callable[[str], None] | None:
+    """线程安全增量进度回调:长节点(analyze ~174s / qc ~94s / collect)内并行 worker 各自
+    完成一个工作单元时调 tick(detail),锁内自增计数 + emit progress(current/total)。锁
+    **串行化并发 put_nowait**(emit 桥跨 worker 线程→事件循环边界,见 sse.py)——这是从 worker
+    线程安全 emit 的关键。emit is None(单测/CLI)→ 返 None,调用方据此跳过(零开销、向后兼容)。
+    total 低估时 max(total,n) 兜底,进度条永不显示 >100%。"""
+    if emit is None:
+        return None
+    lock = threading.Lock()
+    counter = {"n": 0}
+
+    def tick(detail: str) -> None:
+        with lock:
+            counter["n"] += 1
+            n = counter["n"]
+            _emit_progress(emit, agent_id, step, detail,
+                           metric={"current": min(n, total), "total": max(total, n)})
+
+    return tick
+
+
 def make_collect_node(*, conn, provider, official_domains, max_results: int = 5):
     """采集节点:首遍全量采;retry 时按 qc issues 只补缺口 + broaden 广搜。
     只 insert 真新增(对 state 已有 id 去重),证据 dict 由 reducer 累加去重。"""
@@ -67,9 +92,12 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
                 emit, "collector", "search",
                 f"开始搜索 {len(state['competitors'])} 个竞品 × {len(state['dimensions'])} 个维度",
             )
+            # 增量进度:每 query 完成报一次(竞品×维度×2 语 = 总 query 数,采集段不再静默)。
+            tick = _make_ticker(emit, "collector", "search",
+                                len(state["competitors"]) * len(state["dimensions"]) * 2)
             evs = collect_evidence(state["competitors"], state["dimensions"],
                                    provider=provider, official_domains=official_domains,
-                                   max_results=max_results)
+                                   max_results=max_results, on_progress=tick)
             tgt_desc = "all"
         else:
             targets = extract_collect_targets(
@@ -80,11 +108,12 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
                 f"按质检反馈广搜 {len(targets)} 个证据缺口",
                 metric={"current": 0, "total": len(targets)},
             )
+            tick = _make_ticker(emit, "collector", "broaden", max(len(targets), 1) * 2)
             evs = []
             for comp, dim in targets:
                 evs += collect_evidence([comp], [dim], provider=provider,
                                         official_domains=official_domains,
-                                        max_results=max_results, broaden=True)
+                                        max_results=max_results, broaden=True, on_progress=tick)
             tgt_desc = f"{len(targets)} gaps"
         fresh = [e for e in evs if e.id not in existing]
         for e in fresh:
@@ -116,9 +145,11 @@ def make_analyze_node(*, conn, client, model):
         # 收集本轮 profile 抽取降级(单项 LLM 截断/失败优雅降级,见 analyst._safe_extract)。
         # 非空 → 置 run 级 degraded,保证「降级必可见」(否则整竞品 profile 半瘫却 done)。
         degraded_sink: list[str] = []
+        # 增量进度:每竞品 4 抽取 + 1 对比 = 总单元数,逐项 emit(~174s 最长静默段 → 竞品·维度逐项亮起)。
+        tick = _make_ticker(emit, "analyst", "thinking", len(state["competitors"]) * 4 + 1)
         analysis = analyze(evidence, state["competitors"],
                            dimensions=tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS),
-                           degraded_sink=degraded_sink, client=client, model=model)
+                           degraded_sink=degraded_sink, on_progress=tick, client=client, model=model)
         save_analysis(conn, run_id, analysis)
         _emit_progress(
             emit, "analyst", "done",
@@ -186,6 +217,10 @@ def make_qc_node(*, conn, client, model):
             f"开始质检 {len(analysis.competitors)} 个竞品 profile",
         )
         requested_dims = tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS)
+        # 增量进度:每个对比 cell 蕴含判完报一次(~94s 静默段 → 逐格亮起)。
+        tick = _make_ticker(emit, "qc", "validate",
+                            sum(len(r.cells) for r in analysis.comparison
+                                if r.dimension in requested_dims))
         # 策展(信任模型「否决闸」→「策展人」):站不住的对比 cell(机械悬空 + LLM 蕴含
         # 不支撑)被丢弃,而非把整个 run 打回 retry_analyze → 耗尽 degraded。人类分析师不
         # 因某格证据薄就给整份报告盖降级章,而是只展示站得住的。LLM 蕴含失败(网络/限流)→
@@ -193,7 +228,8 @@ def make_qc_node(*, conn, client, model):
         local_degraded = False
         try:
             curated, dropped = qc.curate_analysis(
-                analysis, evidence, dimensions=requested_dims, client=client, model=model)
+                analysis, evidence, dimensions=requested_dims, on_progress=tick,
+                client=client, model=model)
         except Exception as e:  # noqa: BLE001 — 蕴含是尽力而为辅助闸,任何失败都降级,绝不崩整图(必办项①/spec §5)
             local_degraded = True
             # 只记 type(e).__name__,**绝不**写 str(e) 入 trace(GET /trace/:run 公开暴露,

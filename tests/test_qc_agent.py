@@ -280,6 +280,28 @@ def test_check_entailment_runs_concurrently():
     assert issues == []  # 全 supported → 无 issue;能返回即证明 n 个线程都越过了 barrier
 
 
+def test_check_entailment_emits_per_cell_progress():
+    """增量进度:每个对比 cell 蕴含判完报一次(质检 ~94s 静默段 → 逐格亮起)。"""
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name=f"C{i}", pricing=PricingModel(model_type="x"), swot=SWOT())
+                     for i in range(2)],
+        comparison=[ComparisonRow(dimension="pricing", cells=[
+            ComparisonCell(competitor=f"C{i}", value_type="enum", value="v", evidence_refs=[_ref("e1")])
+            for i in range(2)])])
+    client = _FakeClient([json.dumps({"supported": True, "reason": ""}) for _ in range(2)])
+    calls = []
+    lock = threading.Lock()
+
+    def rec(detail):
+        with lock:
+            calls.append(detail)
+
+    check_entailment(analysis, [_ev("e1")], comparison_only=True, on_progress=rec,
+                     client=client, model="m")
+    assert len(calls) == 2  # 2 cell → 2 次进度
+    assert all("质检校验" in c for c in calls)
+
+
 def test_decide_verdict_pass_when_no_issues():
     assert decide_verdict([]) == "pass"
 

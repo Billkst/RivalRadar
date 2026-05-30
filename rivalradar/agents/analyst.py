@@ -26,6 +26,10 @@ _X = TypeVar("_X")
 _MAX_COMPETITOR_WORKERS = 4   # 竞品间并行度
 _MAX_EXTRACT_WORKERS = 4      # 单竞品 4 抽取并行度(features/pricing/personas/swot)
 
+# 抽取项中文名(增量进度文案用):真跑 analyze ~174s 是最长静默段,每项抽取完成 emit
+# 一次 → 前端执行流"竞品·维度"逐项亮起,等待过程看得到中间步骤(不再 174s 干挂)。
+_EXTRACT_ZH = {"features": "功能", "pricing": "定价", "personas": "用户画像", "swot": "SWOT"}
+
 
 def _safe_extract(
     label: str, competitor: str, fn: Callable[[], _X], default: _X,
@@ -137,7 +141,7 @@ def extract_swot(evidence: list[Evidence], competitor: str, *, client, model) ->
 
 def analyze_competitor(
     evidence: list[Evidence], competitor: str, *, degraded_sink: list[str] | None = None,
-    client, model,
+    on_progress: Callable[[str], None] | None = None, client, model,
 ) -> CompetitorProfile:
     """对单个竞品做四项抽取并拼成 CompetitorProfile。
 
@@ -169,8 +173,15 @@ def analyze_competitor(
             SWOT(), sink=degraded_sink),
     }
     with cf.ThreadPoolExecutor(max_workers=_MAX_EXTRACT_WORKERS) as ex:
-        futures = {k: ex.submit(fn) for k, fn in thunks.items()}
-        out = {k: f.result() for k, f in futures.items()}
+        fut_to_key = {ex.submit(fn): k for k, fn in thunks.items()}
+        out: dict[str, object] = {}
+        # as_completed:每项抽取一完成就回收 + emit 增量进度(on_progress 在 worker 线程调,
+        # 由调用方传入的 ticker 锁内串行化 put_nowait,线程安全)。on_progress=None → 不报(单测)。
+        for fut in cf.as_completed(fut_to_key):
+            k = fut_to_key[fut]
+            out[k] = fut.result()
+            if on_progress is not None:
+                on_progress(f"分析 {competitor}·{_EXTRACT_ZH.get(k, k)}")
     return CompetitorProfile(
         name=competitor,
         features=out["features"], pricing=out["pricing"],
@@ -180,7 +191,8 @@ def analyze_competitor(
 
 def build_comparison(
     profiles: list[CompetitorProfile], evidence: list[Evidence],
-    *, dimensions: tuple[str, ...] = CONTROLLED_DIMENSIONS, client, model,
+    *, dimensions: tuple[str, ...] = CONTROLLED_DIMENSIONS,
+    on_progress: Callable[[str], None] | None = None, client, model,
 ) -> list[ComparisonRow]:
     """收尾产出跨竞品对比(受控本体 + 类型化值 + evidence_refs,spec D5 / §6)。
 
@@ -196,13 +208,18 @@ def build_comparison(
              f"**不要新增其它维度**(超出上述维度的对比一律不要输出)。"
              f"每个 cell 标 value_type(bool/enum/number/quote_text)与 value,并挂 evidence_refs。"
              f"\n\n证据:\n{block}"}]
+    # 对比是 analyze 最后一步、单次大调用(~35-70s)。**调用前** emit 一次进度,让执行流在这段
+    # 显"正在生成对比矩阵"(否则前 N 项抽取报完后这段又静默几十秒)。
+    if on_progress is not None:
+        on_progress("生成跨竞品对比矩阵")
     return structured_call(ComparisonExtraction, msgs, client=client, model=model).rows
 
 
 def analyze(
     evidence: list[Evidence], competitors: list[str],
     *, dimensions: tuple[str, ...] = CONTROLLED_DIMENSIONS,
-    degraded_sink: list[str] | None = None, client, model,
+    degraded_sink: list[str] | None = None,
+    on_progress: Callable[[str], None] | None = None, client, model,
 ) -> CompetitorAnalysis:
     """分析 Agent 入口:证据 → 结构化分析(逐竞品 profile + 跨竞品对比)。
 
@@ -218,10 +235,12 @@ def analyze(
     ) as ex:
         futures = [
             ex.submit(analyze_competitor, evidence, c,
-                      degraded_sink=degraded_sink, client=client, model=model)
+                      degraded_sink=degraded_sink, on_progress=on_progress,
+                      client=client, model=model)
             for c in competitors
         ]
         profiles = [f.result() for f in futures]
     comparison = build_comparison(
-        profiles, evidence, dimensions=dimensions, client=client, model=model)
+        profiles, evidence, dimensions=dimensions, on_progress=on_progress,
+        client=client, model=model)
     return CompetitorAnalysis(competitors=profiles, comparison=comparison)
