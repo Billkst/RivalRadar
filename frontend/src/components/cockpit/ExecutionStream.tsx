@@ -8,6 +8,11 @@
  *     「↺ 第N轮 · 证据 X→Y」,沿用 DAG 招牌动效时长 900ms ease-in-out 单次不循环
  *
  * 双路径:live(node/progress event,structured summary)+ replay(trace event,output 串)。
+ *
+ * 进行中折叠(等待体验,真跑 analyze ~174s/qc ~94s 长节点):同一角色的多条 progress 事件
+ * **原地折叠成一条"进行中"行**(更新最新 summary + 画 metric 进度条),而非每事件 append 一行
+ * (否则 collect 快时几十条 query 瞬间堆成刷屏)。角色 node-done 时清掉其 live 行 + push 一条带
+ * ✓ 的完成行。replay(trace)路径无细粒度 progress 事件 → live 恒空,回放行为完全不变。
  */
 import * as React from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
@@ -31,17 +36,27 @@ const QC_VERDICT_ZH: Record<string, string> = {
   insufficient_evidence: '证据耗尽,标降级',
 }
 
+type Metric = Record<string, number>
+
 type Row =
-  | { kind: 'step'; key: string; ts: string; agentId: AgentId; summary: string; done: boolean }
-  | { kind: 'decide'; key: string; ts: string; summary: string; degraded: boolean }
+  | { kind: 'step'; key: string; ts: string; agentId: AgentId; summary: string; done: boolean; metric?: Metric }
+  | { kind: 'decide'; key: string; ts: string; summary: string; degraded: boolean; done: boolean; metric?: Metric }
   | { kind: 'retry'; key: string; ts: string; round: number; evFrom: number; evTo: number | null }
 
-/** 把有序 SSE event 派生成时间线行 + 重试环标记(live node/progress + replay trace 双路径)。 */
+/** 把有序 SSE event 派生成时间线行 + 重试环标记(live node/progress + replay trace 双路径)。
+ * progress 事件按角色折叠成单条"进行中"行(见文件头注释);node-done 提交为带 ✓ 的完成行。 */
 function deriveRows(events: SSEEvent[]): Row[] {
   const rows: Row[] = []
   let cumulative = 0
   let round = 1
   let pendingRetry: Extract<Row, { kind: 'retry' }> | null = null
+  // 角色 → 当前"进行中"行(最新 progress 折叠;node-done 时删除)。
+  const live = new Map<string, { ts: string; summary: string; metric?: Metric }>()
+  const liveOrder: string[] = []
+  const setLive = (id: string, ts: string, summary: string, metric?: Metric) => {
+    if (!live.has(id)) liveOrder.push(id)
+    live.set(id, { ts, summary, metric })
+  }
 
   const pushRetry = (ts: string) => {
     round += 1
@@ -54,41 +69,39 @@ function deriveRows(events: SSEEvent[]): Row[] {
 
   events.forEach((ev, i) => {
     if (ev.type === 'progress') {
-      const aid = ev.data.agent_id
-      // decide 节点 progress(backend _emit_progress(emit,"decide",…))的 agent_id 不是
-      // 4 角色之一 → 路由到 decide 行样式,避免 RoleChip 拿不到 seat 色渲染崩。
-      if (aid === 'decide') {
-        rows.push({ kind: 'decide', key: `p${i}`, ts: ev.data.ts, summary: ev.data.summary, degraded: false })
-      } else {
-        rows.push({ kind: 'step', key: `p${i}`, ts: ev.data.ts, agentId: aid as AgentId,
-          summary: ev.data.summary, done: false })
-      }
+      // 进行中:折叠更新该角色的 live 行(decide 也走 live;各角色 node-done 时清掉)。
+      setLive(ev.data.agent_id, ev.data.ts, ev.data.summary, ev.data.metric)
       return
     }
     if (ev.type === 'node') {
       const node = ev.data.node
       const s = ev.data.summary
       if (node === 'collect') {
+        live.delete('collector')
         const added = s.evidence_added ?? 0
         cumulative += added
         if (pendingRetry && pendingRetry.evTo === null) pendingRetry.evTo = cumulative
         rows.push({ kind: 'step', key: `n${i}`, ts: ev.data.ts, agentId: 'collector',
           summary: `新增 ${added} 条证据,累计 ${cumulative} 条`, done: true })
       } else if (node === 'analyze') {
+        live.delete('analyst')
         rows.push({ kind: 'step', key: `n${i}`, ts: ev.data.ts, agentId: 'analyst',
           summary: `比较 ${s.competitors ?? 0} 个竞品 · ${s.comparison_rows ?? 0} 维对比`, done: true })
       } else if (node === 'write') {
+        live.delete('writer')
         rows.push({ kind: 'step', key: `n${i}`, ts: ev.data.ts, agentId: 'writer',
           summary: `生成报告 ${s.report_chars ?? 0} 字`, done: true })
       } else if (node === 'qc') {
+        live.delete('qc')
         const verdict = s.verdict ?? ''
         rows.push({ kind: 'step', key: `n${i}`, ts: ev.data.ts, agentId: 'qc',
           summary: `裁决:${QC_VERDICT_ZH[verdict] ?? verdict}(${s.issues ?? 0} 项问题)`, done: true })
         if (verdict === 'retry_collect' || verdict === 'retry_analyze') pushRetry(ev.data.ts)
       } else if (node === 'decide') {
+        live.delete('decide')
         const n = s.decisions ?? 0
         rows.push({ kind: 'decide', key: `n${i}`, ts: ev.data.ts,
-          summary: `生成 ${n} 条决策建议`, degraded: s.decision_degraded === true })
+          summary: `生成 ${n} 条决策建议`, degraded: s.decision_degraded === true, done: true })
       }
       return
     }
@@ -99,7 +112,7 @@ function deriveRows(events: SSEEvent[]): Row[] {
       const out = ev.data.summary?.output ?? ''
       if (node === 'decide') {
         rows.push({ kind: 'decide', key: `t${i}`, ts: ev.data.ts, summary: out || '生成决策建议',
-          degraded: out.includes('degraded=True') })
+          degraded: out.includes('degraded=True'), done: true })
       } else if (agentId) {
         // 重试环招牌数「证据 X→Y」replay 时也要真数:collect trace.output 形如
         // "+78 (total 78)" / "+10 (total 88)",解析 (total N) 喂 cumulative,镜像 live
@@ -118,6 +131,19 @@ function deriveRows(events: SSEEvent[]): Row[] {
       }
     }
   })
+
+  // 追加当前"进行中"行(通常只有 1 个活跃角色),置于已完成行之后、按起始序。
+  for (const id of liveOrder) {
+    const l = live.get(id)
+    if (!l) continue
+    if (id === 'decide') {
+      rows.push({ kind: 'decide', key: 'live-decide', ts: l.ts, summary: l.summary,
+        degraded: false, done: false, metric: l.metric })
+    } else {
+      rows.push({ kind: 'step', key: `live-${id}`, ts: l.ts, agentId: id as AgentId,
+        summary: l.summary, done: false, metric: l.metric })
+    }
+  }
   return rows
 }
 
@@ -131,6 +157,38 @@ function RoleChip({ agentId }: { agentId: AgentId }) {
     >
       {name}
     </span>
+  )
+}
+
+/** 进行中脉冲点(替代完成行的 ✓):青绿小圆点缓慢呼吸,示意该角色正在工作。 */
+function LiveDot() {
+  const reduce = useReducedMotion()
+  return (
+    <motion.span
+      className="inline-block h-1.5 w-1.5 rounded-full bg-accent"
+      aria-label="进行中"
+      animate={reduce ? undefined : { opacity: [1, 0.3, 1] }}
+      transition={{ duration: 1.2, repeat: Infinity, ease: 'easeInOut' }}
+    />
+  )
+}
+
+/** 进度条:metric.current/total → 青绿条 + N/M 文案(进行中长节点等待可见进度)。 */
+function ProgressBar({ metric }: { metric: Metric }) {
+  const cur = metric.current ?? 0
+  const tot = metric.total ?? 0
+  const pct = tot > 0 ? Math.min(100, Math.round((cur / tot) * 100)) : 0
+  return (
+    <div className="mt-1.5 flex items-center gap-2">
+      <div className="h-1 flex-1 overflow-hidden rounded-full bg-border">
+        <motion.div
+          className="h-full rounded-full bg-accent"
+          animate={{ width: `${pct}%` }}
+          transition={{ duration: 0.3, ease: 'easeOut' }}
+        />
+      </div>
+      <span className="shrink-0 font-mono text-[10px] text-text-muted">{cur}/{tot}</span>
+    </div>
   )
 }
 
@@ -225,10 +283,15 @@ export function ExecutionStream() {
                         决策
                       </span>
                       <time className="font-mono text-[10px] text-text-muted">{row.ts.slice(11, 19)}</time>
-                      <span className="text-[10px] text-success" aria-label="完成">✓</span>
+                      {row.done ? (
+                        <span className="text-[10px] text-success" aria-label="完成">✓</span>
+                      ) : (
+                        <LiveDot />
+                      )}
                       {row.degraded && <span className="text-[10px] text-warning">· 降级</span>}
                     </div>
                     <p className="mt-1 text-[13px] leading-snug text-text-primary">{row.summary}</p>
+                    {!row.done && row.metric && <ProgressBar metric={row.metric} />}
                   </li>
                 )
               }
@@ -237,9 +300,14 @@ export function ExecutionStream() {
                   <div className="flex items-baseline gap-2">
                     <RoleChip agentId={row.agentId} />
                     <time className="font-mono text-[10px] text-text-muted">{row.ts.slice(11, 19)}</time>
-                    {row.done && <span className="text-[10px] text-success" aria-label="完成">✓</span>}
+                    {row.done ? (
+                      <span className="text-[10px] text-success" aria-label="完成">✓</span>
+                    ) : (
+                      <LiveDot />
+                    )}
                   </div>
                   <p className="mt-1 text-[13px] leading-snug text-text-primary">{row.summary}</p>
+                  {!row.done && row.metric && <ProgressBar metric={row.metric} />}
                 </li>
               )
             })}
