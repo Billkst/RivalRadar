@@ -207,12 +207,14 @@ def make_qc_node(*, conn, client, model):
         save_analysis(conn, run_id, curated)
 
         # 确定性门跑在**策展后**的分析上:traceability(comparison_only,策展后应已干净)+
-        # ontology + coverage(只查请求维度)。策展丢空某维度 → low_coverage → retry_collect →
-        # broaden 补搜环(诚实自纠 money-shot);broaden 补到有据证据后重分析再策展,收敛成
-        # pass 或诚实 insufficient,绝不再因 hallucination 盖 degraded 章。
+        # ontology + coverage(只查请求维度,且传 evidence 区分两类缺口)。**零证据**维度 →
+        # low_coverage → retry_collect → broaden 补搜环(诚实自纠 money-shot,broaden 能补且会
+        # 收敛);**采到了证据但 cell 被策展丢掉**的维度显「—」不重采(broaden 补不了"证据撑不住
+        # 结论",非确定策展反复重开缺口=不收敛的重试空转,真 run 暴露)。收敛成 pass 或诚实
+        # insufficient,绝不再因 hallucination 盖 degraded 章。
         issues = qc.check_traceability(curated, evidence, comparison_only=True)
         issues += qc.check_ontology(curated, evidence)
-        issues += qc.check_coverage(curated, required=requested_dims)
+        issues += qc.check_coverage(curated, required=requested_dims, evidence=evidence)
         # degraded sticky OR 累积:一旦任何一轮发生蕴含降级,持续标记到 finalize(而非每轮
         # 覆盖)— 防 round 1 降级 / round 2 成功 → 终态 degraded=False 隐瞒"曾降级"。
         degraded = bool(state.get("degraded", False)) or local_degraded
@@ -346,8 +348,16 @@ def make_finalize_node(*, conn, max_retries):
         verdict = result["verdict"]
         report = state["report"]
         substantive = _has_substantive_output(state)
-        if verdict == "pass":
+        if verdict == "pass" and substantive:
             status = "done"
+        elif verdict == "pass":
+            # ship-time 双模型评审 MAJOR(Claude+Codex 共识):verdict=pass 但策展后空手
+            # (每个请求维度都有证据 → coverage 无缺口 → pass,但所有 cell 被蕴含判不支撑
+            # 全丢 + 无决策)→ 绝不出"看似通过实则空白"的 done。这是 _has_substantive_output
+            # 要防的病的镜像反面(89% 满盖数据不足 ↔ 0% 满盖 done),必须诚实 insufficient。
+            result["verdict"] = "insufficient_evidence"
+            report = _BANNER_INSUFFICIENT + report
+            status = "insufficient_evidence"
         elif substantive:
             # 重试耗尽但有可交付产出 → done。verdict 记 pass(可交付),issues 保留
             # 缺口记录(/qc 诚实显示"通过,有这些维度缺口");缺格矩阵显「—」+ 轻量说明。

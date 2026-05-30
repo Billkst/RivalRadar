@@ -1,5 +1,6 @@
 import hashlib
 import json
+import threading
 from types import SimpleNamespace
 
 from rivalradar.agents import qc
@@ -251,6 +252,22 @@ def test_finalize_pass_marks_done(conn):
     assert repo.get_run(conn, "r1")["status"] == "done"
 
 
+def test_finalize_pass_but_empty_becomes_insufficient(conn):
+    """ship-time 双模型评审 MAJOR(Claude+Codex 共识):verdict=pass 但策展后空手
+    (每个请求维度都有证据 → coverage 无缺口 → pass,但所有 cell 被蕴含判不支撑全丢 + 无决策)
+    → 绝不出"看似通过实则空白"的 done,必须诚实 insufficient_evidence。
+    旧 finalize 的 `if verdict=="pass": done` 先于 substantive 闸命中 → 空 done(本测试钉死)。"""
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    node = make_finalize_node(conn=conn, max_retries=2)
+    state = {"analysis": _empty_analysis(), "report": "# 竞品分析报告\n正文",
+             "qc_result": {"verdict": "pass", "issues": []}, "retry_count": 0}
+    out = node(state, _CFG)
+    assert out["status"] == "insufficient_evidence"                  # 空手不出 done
+    assert out["qc_result"]["verdict"] == "insufficient_evidence"    # 终态 verdict 改写
+    assert "数据不足" in out["report"]                               # 诚实 banner
+    assert repo.get_run(conn, "r1")["status"] == "insufficient_evidence"
+
+
 def test_finalize_persists_qc_result(conn):
     """Epic 2.4:finalize 持久化终态 QCResult(/qc 端点 serve)。"""
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
@@ -367,19 +384,41 @@ def test_finalize_persists_state_degraded_with_pass_verdict(conn):
 
 
 # ── decide 节点(full-C / Epic 2.2-2.3)──────────────────────────────────────
+def _dec_wrap(p):
+    return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+        tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=p))]))],
+        usage=SimpleNamespace(total_tokens=10))
+
+
 class _DecCompletions:
-    def __init__(self, payloads):
+    """decide 节点桩。curate_decisions 现在**并行**判蕴含 → entailment 调用顺序不确定,
+    不能再按 call-order 派发 verdict(否则"留我/丢我"会随机错配)。entail_map 给定时,
+    蕴含调用按 prompt 里的决策 action 内容键匹配(顺序无关、线程安全);generate 调用仍走
+    order-index。entail_map=None 时退回纯 order-index(0/1 个蕴含调用的老测试不受影响)。"""
+    _ENTAIL_MARK = "判断下列证据是否支撑该决策建议"
+
+    def __init__(self, payloads, entail_map=None):
         self.payloads = list(payloads); self.calls = 0
+        self.entail_map = entail_map  # {action_substr: supported_bool}
+        self._lock = threading.Lock()
+
     def create(self, **kwargs):
-        p = self.payloads[self.calls]; self.calls += 1
-        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
-            tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=p))]))],
-            usage=SimpleNamespace(total_tokens=10))
+        content = ""
+        try:
+            content = kwargs.get("messages", [{}])[0].get("content", "") or ""
+        except Exception:  # noqa: BLE001 — 桩防御,内容取不到就走 order-index
+            content = ""
+        if self.entail_map is not None and self._ENTAIL_MARK in content:
+            ok = next((v for a, v in self.entail_map.items() if a in content), True)
+            return _dec_wrap(json.dumps({"supported": bool(ok), "reason": ""}))
+        with self._lock:
+            p = self.payloads[self.calls]; self.calls += 1
+        return _dec_wrap(p)
 
 
 class _DecClient:
-    def __init__(self, payloads):
-        self.chat = SimpleNamespace(completions=_DecCompletions(payloads))
+    def __init__(self, payloads, entail_map=None):
+        self.chat = SimpleNamespace(completions=_DecCompletions(payloads, entail_map))
 
 
 def _decision_payload(eid="g1"):
@@ -448,8 +487,8 @@ def test_decide_node_drops_unsupported_keeps_grounded(conn):
          "risk_cost": "低", "why": "y", "evidence_refs": [{"evidence_id": "g1", "quote": "q"}], "watch": None},
         {"stance": "建议采用", "action": "丢我", "horizon": "短期", "risk_reversibility": "可逆",
          "risk_cost": "低", "why": "y", "evidence_refs": [{"evidence_id": "g1", "quote": "q"}], "watch": None}]})
-    unsupported = json.dumps({"supported": False, "reason": "证据与建议无关"})
-    client = _DecClient([two, _SUPPORTED, unsupported])  # gen + 蕴含×2(留我 supported / 丢我 not)
+    # 并行蕴含:verdict 按决策 action 内容键派发(顺序无关),不再靠 call-order(会随机错配)。
+    client = _DecClient([two], entail_map={"留我": True, "丢我": False})
     node = make_decide_node(conn=conn, client=client, model="m", as_of="2026-05-26")
     out = node({"analysis": _full_clean_analysis("g1").model_dump(),
                 "evidence": _evidence_all_dims("g1")}, _CFG)

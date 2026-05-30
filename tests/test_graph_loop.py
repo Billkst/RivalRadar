@@ -6,7 +6,7 @@ from rivalradar.agents import qc
 from rivalradar.graph.build import run_research
 from rivalradar.schema.models import (
     CONTROLLED_DIMENSIONS, CompetitorAnalysis, CompetitorProfile, PricingModel,
-    SWOT, ComparisonRow, ComparisonCell, EvidenceRef, ReportInsight,
+    SWOT, ComparisonRow, ComparisonCell, EvidenceRef, QCIssue, ReportInsight,
 )
 from rivalradar.search.base import SearchResult
 from rivalradar.storage import repository as repo
@@ -52,6 +52,16 @@ class _DeadProvider:
 
     def search(self, query, *, max_results=5):
         return []
+
+
+class _CoversAllProvider:
+    """任何 query 都采到 → 所有请求维度首遍即有证据(用于"重试空转"修复的集成证明:
+    维度有证据、只是 cell 被策展丢掉时,不该再打回重采)。"""
+    name = "covers"
+
+    def search(self, query, *, max_results=5):
+        url = "https://fake.example/" + hashlib.sha1(query.encode()).hexdigest()[:10]
+        return [SearchResult(url=url, title="t", content="s", raw_content="body for " + query)]
 
 
 def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, client, model):
@@ -143,3 +153,26 @@ def test_bounded_retry_truly_empty_becomes_insufficient(conn):
     assert final["status"] == "insufficient_evidence"
     assert "未找到公开数据" in final["report"]
     assert final["retry_count"] == 2                      # retry_count 封顶,无限循环防护
+
+
+def test_curated_out_dim_with_evidence_does_not_retry(conn, monkeypatch):
+    """重试空转修复(真 run 暴露)集成证明:某维度**采到了证据**但 cell 被策展判不支撑丢掉 →
+    check_coverage 见有证据不报 low_coverage → 不打回重采 → **首轮即 done**(缺格显「—」)。
+    旧逻辑会因缺 cell 报 low_coverage → retry_collect 耗尽(2 次重采、3 轮空转,~2 轮真 run
+    wall-clock 纯亏)。本测试在旧代码上必失败(collects==3 / retry_count==2),钉死修复。"""
+    # 蕴含判定丢掉 Notion/core_workflows 这个 cell(模拟"采到了但结论站不住"):
+    def _drop_core(analysis, evidence, **kwargs):
+        return [QCIssue(competitor="Notion", dimension="core_workflows",
+                        problem_type="hallucination", detail="证据不支撑")]
+    monkeypatch.setattr(qc, "check_entailment", _drop_core)
+
+    run_id, final = run_research(
+        ["Notion"], ["pricing", "core_workflows"],
+        conn=conn, client=None, model="m", provider=_CoversAllProvider(),
+        as_of="2026-05-26", max_retries=2)
+
+    collects = [t for t in repo.list_trace(conn, run_id) if t["node"] == "collect"]
+    assert len(collects) == 1                             # 不打回重采(核心断言:空转消除)
+    assert final["retry_count"] == 0                      # 首轮即收敛
+    assert final["status"] == "done"                      # pricing 有据产出 → done
+    assert final["qc_result"]["verdict"] == "pass"        # core_workflows 显「—」不算欠采

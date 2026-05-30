@@ -1,4 +1,5 @@
 import json
+import threading
 from types import SimpleNamespace
 
 from rivalradar.agents.qc import (
@@ -98,12 +99,45 @@ def test_check_coverage_only_checks_requested_dimensions():
     assert issues == []
 
 
+def test_check_coverage_skips_curated_out_dim_with_evidence():
+    """重试空转修复(真 run 暴露):某维度**采到了证据**但 cell 被策展丢掉(策展后矩阵无该 cell)
+    → 视为已覆盖(矩阵显「—」),**不报 low_coverage** → 不触发不收敛的 retry_collect 空转。"""
+    analysis = CompetitorAnalysis(  # 策展后矩阵全空(core_workflows cell 被蕴含判不支撑丢掉)
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[])
+    ev = [_ev("e1", dimension="core_workflows")]  # 但确实采到了该维度证据
+    assert check_coverage(analysis, required=("core_workflows",), evidence=ev) == []
+
+
+def test_check_coverage_flags_zero_evidence_dim():
+    """真·欠采(该维度**零证据**)→ 仍报 low_coverage → retry_collect(broaden 能补且会收敛)。
+    证明修复不是"一律不报"——money-shot 补搜环在真欠采时照样触发。"""
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[])
+    issues = check_coverage(analysis, required=("core_workflows",), evidence=[])  # 零证据
+    assert any(i.problem_type == "low_coverage" and i.dimension == "core_workflows" for i in issues)
+
+
+def test_check_coverage_backward_compat_without_evidence_arg():
+    """向后兼容:不传 evidence → 老行为(任何缺 cell 都 low_coverage),老调用/单测不破。"""
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[])
+    assert any(i.problem_type == "low_coverage"
+               for i in check_coverage(analysis, required=("core_workflows",)))
+
+
 class _Completions:
     def __init__(self, payloads):
         self.payloads = list(payloads); self.calls = 0
+        self._lock = threading.Lock()
 
     def create(self, **kwargs):
-        p = self.payloads[self.calls]; self.calls += 1
+        # check_entailment / curate_decisions 现已线程池并发判蕴含 → create 必须线程安全:
+        # 锁内原子「取-增」calls,保证每个 payload 恰好被消费一次、并行下也不越界/不重复。
+        with self._lock:
+            p = self.payloads[self.calls]; self.calls += 1
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(
                 tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=p))]))],
@@ -215,6 +249,35 @@ def test_check_entailment_comparison_only_with_dimensions_production_path():
                               dimensions=("pricing",), comparison_only=True, client=client, model="m")
     assert len(issues) == 1
     assert issues[0].dimension == "pricing"
+
+
+def test_check_entailment_runs_concurrently():
+    """蕴含判定并行化(契约锁死):N 条对比 cell → 线程池并发判;barrier 证明真并发——
+    串行执行会卡在 barrier(只有 1 线程到达)超时 BrokenBarrierError → 测试失败。"""
+    n = 4
+    barrier = threading.Barrier(n, timeout=5)
+
+    class _BarrierCompletions:
+        def create(self, **kwargs):
+            barrier.wait()  # 串行则永远等不齐 n 个 → 超时抛 BrokenBarrierError
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[SimpleNamespace(
+                    function=SimpleNamespace(arguments=json.dumps({"supported": True, "reason": ""})))]))],
+                usage=SimpleNamespace(total_tokens=10))
+
+    class _BarrierClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=_BarrierCompletions())
+
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name=f"C{i}", pricing=PricingModel(model_type="x"), swot=SWOT())
+                     for i in range(n)],
+        comparison=[ComparisonRow(dimension="pricing", cells=[
+            ComparisonCell(competitor=f"C{i}", value_type="enum", value="v", evidence_refs=[_ref("e1")])
+            for i in range(n)])])
+    issues = check_entailment(analysis, [_ev("e1")], comparison_only=True,
+                              client=_BarrierClient(), model="m")
+    assert issues == []  # 全 supported → 无 issue;能返回即证明 n 个线程都越过了 barrier
 
 
 def test_decide_verdict_pass_when_no_issues():
