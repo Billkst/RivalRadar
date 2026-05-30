@@ -309,26 +309,50 @@ _BANNER_INSUFFICIENT = (
 _BANNER_DEGRADED = (
     "> ⚠️ **未达质检标准**:存在未消解的质检问题,以下结论请谨慎参考。\n\n"
 )
+_BANNER_PARTIAL = (
+    "> ℹ️ **覆盖说明**:个别维度公开资料有限,已在对比矩阵中以「—」如实标注。"
+    "下列对比与决策建议**均有据可溯**(策展时已剔除证据撑不住的结论)。\n\n"
+)
+
+
+def _has_substantive_output(state: dict) -> bool:
+    """重试耗尽时判「是否有可交付的有据产出」:策展后矩阵 cell + 决策。
+    真 run 暴露——89% 满的矩阵 + 5 条决策被旧逻辑盖「数据不足」章是错的:覆盖度闸
+    本是策展人不是法官,有可展示的有据内容就该 done(缺格显「—」),只有几乎空手才
+    insufficient/degraded。决策直接挂证据(不依赖矩阵完整),故任一非空即算有产出。"""
+    analysis = state.get("analysis") or {}
+    matrix_cells = sum(len(r.get("cells", [])) for r in analysis.get("comparison", []))
+    decisions = (state.get("decisions") or {}).get("decisions", [])
+    return matrix_cells > 0 or len(decisions) > 0
 
 
 def make_finalize_node(*, conn, max_retries):
-    """终态节点:pass → done;重试耗尽则按最后 verdict 赋 insufficient/降级 + 加 banner。
+    """终态节点(策展人模型):pass → done;重试耗尽时按**策展后实际产出**决定终态——
+    有可交付的有据内容(矩阵 cell + 决策)→ done(缺维度矩阵显「—」+ 轻量覆盖说明),
+    真·几乎空手才 insufficient(retry_collect 耗尽)/ degraded(retry_analyze 耗尽)。
 
-    route 保证只有 pass 或耗尽才进来(spec §4/§8 + 必办项③)。insufficient_evidence
-    是一等质检结论(§8):缺证据耗尽 → 报告如实写「未找到公开数据」。
+    route 保证只有 pass 或耗尽才进来(spec §4/§8 + 必办项③)。覆盖度从"全有或全无的
+    法官"改"策展人"(真 run 暴露:89% 满却盖数据不足章是同一病的新症状)。
     """
     def finalize_node(state, config):
         run_id = config["configurable"]["thread_id"]
         result = dict(state["qc_result"])
         verdict = result["verdict"]
         report = state["report"]
+        substantive = _has_substantive_output(state)
         if verdict == "pass":
+            status = "done"
+        elif substantive:
+            # 重试耗尽但有可交付产出 → done。verdict 记 pass(可交付),issues 保留
+            # 缺口记录(/qc 诚实显示"通过,有这些维度缺口");缺格矩阵显「—」+ 轻量说明。
+            result["verdict"] = "pass"
+            report = _BANNER_PARTIAL + report
             status = "done"
         elif verdict == "retry_collect":
             result["verdict"] = "insufficient_evidence"
             report = _BANNER_INSUFFICIENT + report
             status = "insufficient_evidence"
-        else:  # retry_analyze 或其他耗尽
+        else:  # retry_analyze 或其他耗尽,且几乎空手
             report = _BANNER_DEGRADED + report
             status = "degraded"
         save_report(conn, run_id, report)

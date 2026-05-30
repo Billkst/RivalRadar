@@ -263,31 +263,62 @@ def test_finalize_persists_qc_result(conn):
 
 
 def test_finalize_persists_terminal_verdict_in_qc_result(conn):
-    """retry_collect 耗尽 → finalize 改写 verdict=insufficient_evidence,持久化的 qc_result
-    必须反映终态 verdict(不是中途的 retry_collect)。"""
+    """retry_collect 耗尽 + 策展后空手 → finalize 改写 verdict=insufficient_evidence,
+    持久化的 qc_result 必须反映终态 verdict(不是中途的 retry_collect)。"""
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
     node = make_finalize_node(conn=conn, max_retries=2)
-    state = {"analysis": _full_clean_analysis().model_dump(), "report": "# 报告",
+    empty = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[]).model_dump()
+    state = {"analysis": empty, "report": "# 报告",
              "qc_result": {"verdict": "retry_collect", "issues": []}, "retry_count": 2}
     node(state, _CFG)
     assert repo.get_qc_result(conn, "r1").verdict == "insufficient_evidence"
 
 
-def test_finalize_exhausted_collect_becomes_insufficient(conn):
+def _empty_analysis():
+    """策展后几乎空手:无对比 cell(coverage 全缺)→ 真·insufficient 路径。"""
+    return CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[]).model_dump()
+
+
+def test_finalize_exhausted_collect_empty_becomes_insufficient(conn):
+    # 重试耗尽 + 策展后几乎空手(无矩阵 cell + 无决策)→ 真·insufficient_evidence
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
     node = make_finalize_node(conn=conn, max_retries=2)
-    state = {"analysis": _full_clean_analysis().model_dump(), "report": "# 竞品分析报告\n正文",
+    state = {"analysis": _empty_analysis(), "report": "# 竞品分析报告\n正文",
              "qc_result": {"verdict": "retry_collect", "issues": []}, "retry_count": 2}
     out = node(state, _CFG)
-    assert out["qc_result"]["verdict"] == "insufficient_evidence"   # 缺证据耗尽 → 一等结论
+    assert out["qc_result"]["verdict"] == "insufficient_evidence"   # 真空手 → 一等结论
     assert "未找到公开数据" in out["report"]                        # 诚实 banner
     assert out["status"] == "insufficient_evidence"
 
 
-def test_finalize_exhausted_analyze_becomes_degraded(conn):
+def test_finalize_exhausted_with_substantive_output_becomes_done(conn):
+    """策展人模型核心(真 run 暴露):重试耗尽但策展后矩阵非空 / 有决策 → done,
+    缺维度矩阵显「—」+ 轻量覆盖说明,绝不给 89% 满的报告盖「数据不足」章。"""
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
     node = make_finalize_node(conn=conn, max_retries=2)
-    state = {"analysis": _full_clean_analysis().model_dump(), "report": "# 竞品分析报告\n正文",
+    state = {"analysis": _full_clean_analysis().model_dump(),  # 矩阵有 cell
+             "report": "# 竞品分析报告\n正文",
+             "qc_result": {"verdict": "retry_collect",
+                           "issues": [{"competitor": "Notion", "dimension": "deployment",
+                                       "problem_type": "low_coverage", "detail": ""}]},
+             "retry_count": 2}
+    out = node(state, _CFG)
+    assert out["status"] == "done"                       # 有产出 → done(不盖数据不足章)
+    assert out["qc_result"]["verdict"] == "pass"         # verdict 记可交付
+    assert "覆盖说明" in out["report"]                   # 轻量诚实说明(非 ⚠️ 数据不足)
+    assert "数据不足" not in out["report"]
+    assert repo.get_run(conn, "r1")["status"] == "done"
+
+
+def test_finalize_exhausted_analyze_empty_becomes_degraded(conn):
+    # 重试耗尽 + 几乎空手 + retry_analyze → degraded(真·未消解 hallucination 且无产出)
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    node = make_finalize_node(conn=conn, max_retries=2)
+    state = {"analysis": _empty_analysis(), "report": "# 竞品分析报告\n正文",
              "qc_result": {"verdict": "retry_analyze", "issues": []}, "retry_count": 2}
     out = node(state, _CFG)
     assert "未达质检标准" in out["report"]

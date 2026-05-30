@@ -35,13 +35,22 @@ class _ImprovingProvider:
 
 
 class _StuckProvider:
-    """broaden 也补不到(模拟源头本就无该数据)→ 必然耗尽 → insufficient_evidence。"""
+    """只有 pricing 能采到、其余维度 broaden 也补不到 → 策展人模型:pricing 矩阵非空 →
+    done(部分覆盖,缺维度显「—」),不再因缺 5 维盖 insufficient 章(真 run 暴露的修复)。"""
     name = "stuck"
 
     def search(self, query, *, max_results=5):
         if ("pricing" in query) or ("价格" in query):
             url = "https://fake.example/" + hashlib.sha1(query.encode()).hexdigest()[:10]
             return [SearchResult(url=url, title="t", content="s", raw_content="pricing body")]
+        return []
+
+
+class _DeadProvider:
+    """任何 query 都采不到 → 策展后矩阵全空 + 无决策 → 真·insufficient_evidence。"""
+    name = "dead"
+
+    def search(self, query, *, max_results=5):
         return []
 
 
@@ -108,15 +117,29 @@ def test_real_feedback_loop_improves_to_pass(conn):
     assert final["status"] == "done"
 
 
-def test_bounded_retry_exhausts_to_insufficient(conn):
+def test_bounded_retry_partial_coverage_becomes_done(conn):
+    """策展人模型(真 run 暴露的修复):只有 pricing 能采到、其余 5 维补不到 → 有界重试
+    耗尽,但 pricing 矩阵非空 → done(缺维度显「—」+ 轻量覆盖说明),绝不盖数据不足章。"""
     run_id, final = run_research(
         ["Notion"], list(CONTROLLED_DIMENSIONS),
         conn=conn, client=None, model="m", provider=_StuckProvider(),
         as_of="2026-05-26", max_retries=2)
 
-    # 补不到缺口 → 有界重试耗尽 → 一等结论 insufficient_evidence + 诚实 banner
+    assert final["status"] == "done"                      # 有 pricing 产出 → done
+    assert final["qc_result"]["verdict"] == "pass"        # 可交付
+    assert "覆盖说明" in final["report"]                  # 轻量诚实说明
+    assert "数据不足" not in final["report"]
+    assert final["retry_count"] == 2                      # 仍跑满有界重试(broaden 环不变)
+
+
+def test_bounded_retry_truly_empty_becomes_insufficient(conn):
+    """真·空手(任何维度都采不到)→ 策展后矩阵全空 + 无决策 → insufficient_evidence + 诚实 banner。"""
+    run_id, final = run_research(
+        ["Notion"], list(CONTROLLED_DIMENSIONS),
+        conn=conn, client=None, model="m", provider=_DeadProvider(),
+        as_of="2026-05-26", max_retries=2)
+
     assert final["qc_result"]["verdict"] == "insufficient_evidence"
     assert final["status"] == "insufficient_evidence"
     assert "未找到公开数据" in final["report"]
-    # retry_count 封顶 = max_retries(没有无限循环)
-    assert final["retry_count"] == 2
+    assert final["retry_count"] == 2                      # retry_count 封顶,无限循环防护
