@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import re
+from collections.abc import Callable
 from urllib.parse import urlparse
 
 from rivalradar.collect.pipeline import collect
@@ -56,11 +57,14 @@ def collect_evidence(
     max_results: int = 5,
     max_workers: int = 4,
     broaden: bool = False,
+    on_progress: Callable[[str], None] | None = None,
 ) -> list[Evidence]:
-    """采集 Agent:C-1 collect() → 清洗正文 → 按来源优先级排序。"""
+    """采集 Agent:C-1 collect() → 清洗正文 → 按来源优先级排序。
+    on_progress 透传给 collect(每 query 完成报一次);None = 不报(向后兼容/单测)。"""
     official_domains = official_domains or {}
     raw = collect(competitors, dimensions, provider=provider, languages=languages,
-                  max_results=max_results, max_workers=max_workers, broaden=broaden)
+                  max_results=max_results, max_workers=max_workers, broaden=broaden,
+                  on_progress=on_progress)
     cleaned: list[Evidence] = []
     for ev in raw:
         body = clean_text(ev.content)

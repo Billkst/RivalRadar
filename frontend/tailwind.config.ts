@@ -24,6 +24,13 @@ export default {
         info: 'var(--info)',
         'evidence-highlight': 'var(--evidence-highlight)',
         'source-line': 'var(--source-line)',
+        // support_verdict tokens (DESIGN.md §support_verdict — v4). 唯一信任信号.
+        // 同步 globals.css :root 定义;verdict-* alias 到 success/warning/error 自动
+        // 跟随 dark。三处复用(矩阵/依据行/原文卡)用 `text-verdict-supported` 等.
+        'verdict-supported': 'var(--verdict-supported)',
+        'verdict-partial': 'var(--verdict-partial)',
+        'verdict-unsupported': 'var(--verdict-unsupported)',
+        'evidence-stale': 'var(--evidence-stale)',
         // Office tokens — utility classes like `bg-seat-1` / `text-seat-2`
         // 同步 globals.css `:root` + `.dark` 定义,改名 / 删 token 前先 grep
         // `frontend/src/components/office/` 调用点,避免静默断色。

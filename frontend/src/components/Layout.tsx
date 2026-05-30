@@ -3,14 +3,14 @@ import { Link, Outlet, useParams } from 'react-router-dom'
 import { cn } from '@/lib/utils'
 import { useThemeStore } from '@/stores/themeStore'
 import { ThemeToggle } from './ThemeToggle'
-import { AgentTeamRoster } from './office/AgentTeamRoster'
 
 /**
- * RivalRadar 三栏 analyst console 布局(DESIGN.md §Layout + spec §11.1 IA + Codex #13)
- *   ┌ 顶栏: 项目名 / 副标 / 条件式 CredibilityBadge / ThemeToggle / disabled "EN" ┐
- *   ├ 左 rail (208px): "竞品列表 + 滤过"(Task 3+ 路由后填充)/ 主区 (flex)        ┤
- *   └─────────────────────────────────────────────────────────────────────────────┘
- * 右侧证据面板 (420-520px) 由 Sheet 触发时滑入 overlay,不占常驻空间。
+ * RivalRadar 应用外壳(v0.4 证据驾驶舱)。
+ *   ┌ 顶栏: 项目名 / 副标 / run_id / ThemeToggle / disabled "EN" ┐
+ *   └ run 页:cockpit 全宽(CockpitLayout 自带分屏);列表页:左 rail(208px)+ 主区 ┘
+ *
+ * v0.4:run 页退役 office AgentTeamRoster 左轨(卡通动物违背机构级 cockpit 美学),
+ * cockpit(StatusBar + 决策面 + 实时分析流程)占满主区。列表页保留轻量 rail 占位。
  *
  * themeStore.init() 在 mount 时挂载 matchMedia listener;cleanup 在 unmount/strict-mode
  * re-effect 时移除,防 listener leak (CQ4).
@@ -48,25 +48,22 @@ export function Layout() {
         </div>
       </header>
       <div className="flex flex-1 overflow-hidden">
-        <aside
-          className={cn(
-            'flex flex-shrink-0 flex-col border-r border-border bg-surface-subtle p-4',
-            'w-rail',
-          )}
-        >
-          {run_id ? (
-            <AgentTeamRoster />
-          ) : (
-            <>
-              <div className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-                Agent 团队
-              </div>
-              <div className="mt-2 text-xs italic text-text-muted">
-                选一个 run 看 4 个 agent 实时协作
-              </div>
-            </>
-          )}
-        </aside>
+        {/* run 页:cockpit 全宽(无 office 左轨);列表/其它页:保留轻量 rail 占位 */}
+        {!run_id && (
+          <aside
+            className={cn(
+              'flex flex-shrink-0 flex-col border-r border-border bg-surface-subtle p-4',
+              'w-rail',
+            )}
+          >
+            <div className="text-xs font-semibold uppercase tracking-wide text-text-muted">
+              证据驾驶舱
+            </div>
+            <div className="mt-2 text-xs italic text-text-muted">
+              选一个 run 看决策面板 + 实时分析流程
+            </div>
+          </aside>
+        )}
         <main className="flex-1 overflow-auto p-6">
           <Outlet />
         </main>

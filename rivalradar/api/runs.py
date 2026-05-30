@@ -7,12 +7,14 @@ import uuid
 from fastapi import APIRouter, Depends, HTTPException
 from sse_starlette.sse import EventSourceResponse
 
+from rivalradar.agents.discover import DiscoverySet, discover_competitors
 from rivalradar.api.deps import (
     get_db_conn, get_doubao_client, get_provider, get_as_of, get_max_retries,
 )
-from rivalradar.api.schemas import RunDetail, RunRequest, RunSummary
+from rivalradar.api.schemas import DiscoverRequest, RunDetail, RunRequest, RunSummary
 from rivalradar.api.sse import _ACTIVE_RUN_TASKS, _replay_from_trace, graph_event_stream
 from rivalradar.config import doubao_model
+from rivalradar.llm.structured import StructuredCallError
 from rivalradar.graph.build import build_research_graph
 from rivalradar.storage import repository as repo
 from rivalradar.storage.repository import create_run
@@ -32,7 +34,8 @@ def post_run(
 ) -> EventSourceResponse:
     """触发一次完整调研,SSE 流式回推每节点进度,直到 done/error。"""
     run_id = "run_" + uuid.uuid4().hex[:12]
-    create_run(conn, run_id, req.competitors, req.dimensions)
+    create_run(conn, run_id, req.competitors, req.dimensions,
+               decision_context=req.decision_context)
     graph = build_research_graph(
         conn=conn, client=client, model=doubao_model(), provider=provider,
         as_of=as_of, max_retries=max_retries,
@@ -42,12 +45,30 @@ def post_run(
         "dimensions": req.dimensions,
         "evidence": [],
         "retry_count": 0,
+        "decision_context": req.decision_context,  # full-C:decide 节点 grounding(Epic 2)
     }
     config = {"configurable": {"thread_id": run_id}}
     return EventSourceResponse(
         graph_event_stream(graph, initial, config, run_id, conn=conn),
         ping=15,  # context7 验证的 keep-alive 默认,投影场景必备
     )
+
+
+@router.post("/discover-competitors", response_model=DiscoverySet)
+def post_discover(
+    req: DiscoverRequest,
+    client=Depends(get_doubao_client),
+) -> DiscoverySet:
+    """引导式 setup 第①步(Epic 1.1):种子产品 → LLM 建议直接竞品 + 一句话理由。
+
+    诚实(plan T4):只返建议,前端让用户勾选增删确认后才 POST /run。LLM 不通时
+    返 503(非静默空列表)—— 前端据此提示"手动输入竞品名"兜底。
+    """
+    try:
+        return discover_competitors(
+            req.seed, req.industry_hint, client=client, model=doubao_model())
+    except StructuredCallError:
+        raise HTTPException(503, "竞品发现暂时不可用,请手动输入竞品名")
 
 
 @router.get("/stream/{run_id}")

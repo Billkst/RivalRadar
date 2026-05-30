@@ -36,6 +36,23 @@ def test_collect_produces_evidence_per_query():
     assert all(e.competitor == "Notion" and e.content == "body" for e in evs)
 
 
+def test_collect_emits_per_query_progress():
+    """增量进度:每个 query 完成报一次(等待体验——采集段实时显进度,不再静默)。
+    on_progress 在 worker 线程并发调,用锁汇聚不丢。"""
+    provider = _MockProvider()
+    calls = []
+    lock = threading.Lock()
+
+    def rec(detail):
+        with lock:
+            calls.append(detail)
+
+    collect(["Notion", "Linear"], ["pricing", "integrations"], provider=provider,
+            languages=("en", "zh"), max_workers=4, on_progress=rec)
+    assert len(calls) == 8  # 2 竞品 × 2 维度 × 2 语 = 8 query → 8 次进度
+    assert all("采集" in c for c in calls)
+
+
 def test_bounded_concurrency_respected():
     provider = _MockProvider()
     collect(["A", "B", "C"], list("pqrs"), provider=provider,

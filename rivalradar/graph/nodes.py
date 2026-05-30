@@ -1,18 +1,21 @@
 from __future__ import annotations
 
 import logging
+import threading
 import time
 from typing import Any, Callable
 
 from rivalradar.agents.analyst import analyze
 from rivalradar.agents.collector import collect_evidence
-from rivalradar.agents.writer import write_report
+from rivalradar.agents.writer import generate_decisions, render_body, write_report_with_insight
 from rivalradar.graph.router import extract_collect_targets
 from rivalradar.agents import qc
-from rivalradar.schema.models import CompetitorAnalysis, Evidence, QCResult
+from rivalradar.schema.models import (
+    CONTROLLED_DIMENSIONS, CompetitorAnalysis, DecisionSet, Evidence, QCResult,
+)
 from rivalradar.storage.repository import (
     append_trace, insert_evidence, mark_run_finalized, save_analysis,
-    save_report, update_run_degraded,
+    save_decisions, save_insight, save_qc_result, save_report, update_run_degraded,
 )
 
 logger = logging.getLogger(__name__)
@@ -51,6 +54,30 @@ def _emit_progress(
     emit("progress", payload)
 
 
+def _make_ticker(
+    emit: Callable[[str, dict[str, Any]], None] | None,
+    agent_id: str, step: str, total: int,
+) -> Callable[[str], None] | None:
+    """线程安全增量进度回调:长节点(analyze ~174s / qc ~94s / collect)内并行 worker 各自
+    完成一个工作单元时调 tick(detail),锁内自增计数 + emit progress(current/total)。锁
+    **串行化并发 put_nowait**(emit 桥跨 worker 线程→事件循环边界,见 sse.py)——这是从 worker
+    线程安全 emit 的关键。emit is None(单测/CLI)→ 返 None,调用方据此跳过(零开销、向后兼容)。
+    total 低估时 max(total,n) 兜底,进度条永不显示 >100%。"""
+    if emit is None:
+        return None
+    lock = threading.Lock()
+    counter = {"n": 0}
+
+    def tick(detail: str) -> None:
+        with lock:
+            counter["n"] += 1
+            n = counter["n"]
+            _emit_progress(emit, agent_id, step, detail,
+                           metric={"current": min(n, total), "total": max(total, n)})
+
+    return tick
+
+
 def make_collect_node(*, conn, provider, official_domains, max_results: int = 5):
     """采集节点:首遍全量采;retry 时按 qc issues 只补缺口 + broaden 广搜。
     只 insert 真新增(对 state 已有 id 去重),证据 dict 由 reducer 累加去重。"""
@@ -65,22 +92,28 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
                 emit, "collector", "search",
                 f"开始搜索 {len(state['competitors'])} 个竞品 × {len(state['dimensions'])} 个维度",
             )
+            # 增量进度:每 query 完成报一次(竞品×维度×2 语 = 总 query 数,采集段不再静默)。
+            tick = _make_ticker(emit, "collector", "search",
+                                len(state["competitors"]) * len(state["dimensions"]) * 2)
             evs = collect_evidence(state["competitors"], state["dimensions"],
                                    provider=provider, official_domains=official_domains,
-                                   max_results=max_results)
+                                   max_results=max_results, on_progress=tick)
             tgt_desc = "all"
         else:
-            targets = extract_collect_targets(qc_result["issues"], state["competitors"])
+            targets = extract_collect_targets(
+                qc_result["issues"], state["competitors"],
+                allowed_dimensions=tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS))
             _emit_progress(
                 emit, "collector", "broaden",
                 f"按质检反馈广搜 {len(targets)} 个证据缺口",
                 metric={"current": 0, "total": len(targets)},
             )
+            tick = _make_ticker(emit, "collector", "broaden", max(len(targets), 1) * 2)
             evs = []
             for comp, dim in targets:
                 evs += collect_evidence([comp], [dim], provider=provider,
                                         official_domains=official_domains,
-                                        max_results=max_results, broaden=True)
+                                        max_results=max_results, broaden=True, on_progress=tick)
             tgt_desc = f"{len(targets)} gaps"
         fresh = [e for e in evs if e.id not in existing]
         for e in fresh:
@@ -109,19 +142,31 @@ def make_analyze_node(*, conn, client, model):
             emit, "analyst", "thinking",
             f"正在分析 {len(evidence)} 条证据,提取 {len(state['competitors'])} 个竞品的特征",
         )
-        analysis = analyze(evidence, state["competitors"], client=client, model=model)
+        # 收集本轮 profile 抽取降级(单项 LLM 截断/失败优雅降级,见 analyst._safe_extract)。
+        # 非空 → 置 run 级 degraded,保证「降级必可见」(否则整竞品 profile 半瘫却 done)。
+        degraded_sink: list[str] = []
+        # 增量进度:每竞品 4 抽取 + 1 对比 = 总单元数,逐项 emit(~174s 最长静默段 → 竞品·维度逐项亮起)。
+        tick = _make_ticker(emit, "analyst", "thinking", len(state["competitors"]) * 4 + 1)
+        analysis = analyze(evidence, state["competitors"],
+                           dimensions=tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS),
+                           degraded_sink=degraded_sink, on_progress=tick, client=client, model=model)
         save_analysis(conn, run_id, analysis)
         _emit_progress(
             emit, "analyst", "done",
             f"完成分析:{len(analysis.competitors)} 个竞品 profile + {len(analysis.comparison)} 维对比",
             metric={"current": len(analysis.competitors), "total": len(state["competitors"])},
         )
+        # 降级 marker 折进现有 trace 行(一节点一 trace 行,reviewer ISSUE A),不另起一行。
+        degraded_note = f" (降级: {', '.join(degraded_sink)})" if degraded_sink else ""
         append_trace(conn, run_id, "analyze",
                      input_summary=f"{len(evidence)} evidence",
                      output_summary=f"{len(analysis.competitors)} profiles, "
-                                    f"{len(analysis.comparison)} rows",
+                                    f"{len(analysis.comparison)} rows{degraded_note}",
                      latency_ms=int((time.monotonic() - t0) * 1000))
-        return {"analysis": analysis.model_dump()}
+        out: dict = {"analysis": analysis.model_dump()}
+        if degraded_sink:
+            out["degraded"] = True  # qc_node read-then-OR 保 sticky 到 finalize
+        return out
     return analyze_node
 
 
@@ -137,8 +182,10 @@ def make_write_node(*, conn, client, model, as_of):
             emit, "writer", "drafting",
             f"正在撰写 {len(analysis.competitors)} 个竞品的对比报告",
         )
-        report = write_report(analysis, evidence, as_of=as_of, client=client, model=model)
+        report, insight = write_report_with_insight(
+            analysis, evidence, as_of=as_of, client=client, model=model)
         save_report(conn, run_id, report)
+        save_insight(conn, run_id, insight)  # Epic 2.4:结构化洞察持久化(/insight 端点)
         _emit_progress(
             emit, "writer", "done",
             f"完成报告 {len(report)} 字",
@@ -153,11 +200,10 @@ def make_write_node(*, conn, client, model, as_of):
 
 
 def make_qc_node(*, conn, client, model):
-    """质检节点:确定性三闸(始终跑)+ LLM 蕴含(失败则降级,必办项①)。
-
-    不调 qc.check(它会上抛),而是在本层组合子函数:traceability/ontology/coverage
-    决定 verdict 主体;check_entailment 包在 try/except StructuredCallError,失败则
-    degraded=True、记 trace,verdict 仅由确定性闸决定。
+    """质检节点(策展人模型):curate_analysis 丢弃站不住的对比 cell(机械悬空 + LLM 蕴含
+    不支撑),持久化策展后的分析;再跑确定性门(traceability comparison_only + ontology +
+    coverage 请求维度)定 verdict。策展丢空维度 → low_coverage → retry_collect 补搜环。
+    curate 的 LLM 蕴含失败 → degraded + 机械门 fallback(必办项①),绝不崩整图。
     retry_count 仅在「带着上一轮 qc_result 进来」时 +1(每轮唯一计数点,避免双重计数)。
     """
     def qc_node(state, config):
@@ -170,24 +216,43 @@ def make_qc_node(*, conn, client, model):
             emit, "qc", "validate",
             f"开始质检 {len(analysis.competitors)} 个竞品 profile",
         )
-        issues = qc.check_traceability(analysis, evidence)
-        issues += qc.check_ontology(analysis, evidence)
-        issues += qc.check_coverage(analysis)
+        requested_dims = tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS)
+        # 增量进度:每个对比 cell 蕴含判完报一次(~94s 静默段 → 逐格亮起)。
+        tick = _make_ticker(emit, "qc", "validate",
+                            sum(len(r.cells) for r in analysis.comparison
+                                if r.dimension in requested_dims))
+        # 策展(信任模型「否决闸」→「策展人」):站不住的对比 cell(机械悬空 + LLM 蕴含
+        # 不支撑)被丢弃,而非把整个 run 打回 retry_analyze → 耗尽 degraded。人类分析师不
+        # 因某格证据薄就给整份报告盖降级章,而是只展示站得住的。LLM 蕴含失败(网络/限流)→
+        # 降级 + 机械门 fallback(只丢悬空,免 LLM)。
         local_degraded = False
         try:
-            # TODO(Lane E/Day-4): 多竞品时 check_entailment 调用数=结论数,可并行/抽样降本(spec §13 ⑤)
-            issues += qc.check_entailment(analysis, evidence, client=client, model=model)
-        except Exception as e:  # noqa: BLE001 — 蕴含是尽力而为辅助闸,任何失败(解析/网络/限流)都降级,绝不崩整图(必办项①/spec §5)
+            curated, dropped = qc.curate_analysis(
+                analysis, evidence, dimensions=requested_dims, on_progress=tick,
+                client=client, model=model)
+        except Exception as e:  # noqa: BLE001 — 蕴含是尽力而为辅助闸,任何失败都降级,绝不崩整图(必办项①/spec §5)
             local_degraded = True
-            # 只记 type(e).__name__,**绝不**写 str(e) 入 trace(GET /trace/:run 公开
-            # 暴露,Codex Critical #1:OpenAI APIStatusError str() 可能含 Authorization
-            # header → 泄 ARK_API_KEY。server log 已记完整 traceback 给运维)
-            logger.exception("qc entailment failed for run %s", run_id)
+            # 只记 type(e).__name__,**绝不**写 str(e) 入 trace(GET /trace/:run 公开暴露,
+            # Codex Critical #1:OpenAI APIStatusError str() 可能含 Authorization → 泄 KEY)
+            logger.exception("qc curate failed for run %s", run_id)
             append_trace(conn, run_id, "qc",
-                         output_summary=f"entailment degraded: {type(e).__name__}")
-        # degraded sticky OR 累积:一旦任何一轮发生蕴含降级,持续标记到 finalize
-        # (而非每轮覆盖)— 防止 round 1 降级 / round 2 成功 → 终态 degraded=False
-        # 让前端 §11.5 警示横幅消失、对用户隐瞒"曾发生过降级"的事实
+                         output_summary=f"curate degraded: {type(e).__name__}")
+            curated, dropped = qc._curate_mechanical(analysis, evidence, requested_dims)
+        # 持久化策展后的分析(showcase 只显示活下来的 cell),并经 state 传给 decide 节点
+        # (decide 用 curated body 生成决策,不会基于已丢弃的 cell)。
+        save_analysis(conn, run_id, curated)
+
+        # 确定性门跑在**策展后**的分析上:traceability(comparison_only,策展后应已干净)+
+        # ontology + coverage(只查请求维度,且传 evidence 区分两类缺口)。**零证据**维度 →
+        # low_coverage → retry_collect → broaden 补搜环(诚实自纠 money-shot,broaden 能补且会
+        # 收敛);**采到了证据但 cell 被策展丢掉**的维度显「—」不重采(broaden 补不了"证据撑不住
+        # 结论",非确定策展反复重开缺口=不收敛的重试空转,真 run 暴露)。收敛成 pass 或诚实
+        # insufficient,绝不再因 hallucination 盖 degraded 章。
+        issues = qc.check_traceability(curated, evidence, comparison_only=True)
+        issues += qc.check_ontology(curated, evidence)
+        issues += qc.check_coverage(curated, required=requested_dims, evidence=evidence)
+        # degraded sticky OR 累积:一旦任何一轮发生蕴含降级,持续标记到 finalize(而非每轮
+        # 覆盖)— 防 round 1 降级 / round 2 成功 → 终态 degraded=False 隐瞒"曾降级"。
         degraded = bool(state.get("degraded", False)) or local_degraded
         verdict = qc.decide_verdict(issues)
         result = QCResult(verdict=verdict, issues=issues)
@@ -202,16 +267,83 @@ def make_qc_node(*, conn, client, model):
         }.get(verdict, verdict)
         _emit_progress(
             emit, "qc", "done",
-            f"裁决:{verdict_zh}(发现 {len(issues)} 项问题,第 {new_rc + 1} 轮)",
+            f"裁决:{verdict_zh}(策展 {len(dropped)} 项 / 发现 {len(issues)} 项问题,第 {new_rc + 1} 轮)",
             metric={"current": len(issues), "total": len(issues)},
         )
         append_trace(conn, run_id, "qc",
                      input_summary=f"{len(evidence)} evidence",
-                     output_summary=f"verdict={verdict} issues={len(issues)} "
+                     output_summary=f"verdict={verdict} curated={len(dropped)} issues={len(issues)} "
                                     f"degraded={degraded} retry={new_rc}",
                      latency_ms=int((time.monotonic() - t0) * 1000))
-        return {"qc_result": result.model_dump(), "retry_count": new_rc, "degraded": degraded}
+        return {"analysis": curated.model_dump(), "qc_result": result.model_dump(),
+                "retry_count": new_rc, "degraded": degraded}
     return qc_node
+
+
+def make_decide_node(*, conn, client, model, as_of):
+    """决策节点(full-C / Epic 2.2-2.3,策展人模型):分析正文(已被 qc 策展)+ 用户处境 →
+    结构化决策建议,curate_decisions 丢弃 ungrounded 决策(机械悬空 + LLM 蕴含不支撑),
+    只留站得住的。ungrounded 决策被丢弃而非标 decision_degraded —— 与 qc_node 策展对称。
+
+    错误契约(对齐 qc 节点必办项①):generate 失败 → 空决策 + degraded;curate 蕴含失败 →
+    机械门 fallback(只丢悬空)+ degraded。绝不崩整图。decision_degraded 只为真·LLM 失败保留。
+    """
+    def decide_node(state, config):
+        run_id = config["configurable"]["thread_id"]
+        emit = _get_emit(config)
+        t0 = time.monotonic()
+        analysis = CompetitorAnalysis(**state["analysis"])  # 已被 qc_node 策展
+        evidence = [Evidence(**d) for d in state["evidence"]]
+        decision_context = state.get("decision_context") or ""
+        body = render_body(analysis, evidence, as_of=as_of)  # 确定性,无 LLM
+        _emit_progress(emit, "decide", "deciding", "正在基于证据生成决策建议")
+
+        decision_degraded = False
+        dropped: list[str] = []  # 被策展掉的 ungrounded 决策 action(可见性,非降级)
+        try:
+            decision_set = generate_decisions(body, decision_context, client=client, model=model)
+        except Exception as e:  # noqa: BLE001 — 生成失败降级,绝不崩图
+            logger.exception("decide generate failed for run %s", run_id)
+            append_trace(conn, run_id, "decide",
+                         output_summary=f"generate degraded: {type(e).__name__}")
+            decision_set = DecisionSet(decisions=[])
+            decision_degraded = True
+        else:
+            # 策展:丢弃 ungrounded 决策(机械悬空免 LLM + 蕴含不支撑),只留站得住的。
+            try:
+                kept, dropped = qc.curate_decisions(
+                    decision_set.decisions, evidence, client=client, model=model)
+                decision_set = DecisionSet(decisions=kept)
+            except Exception as e:  # noqa: BLE001 — 蕴含失败:机械门 fallback(只丢悬空)+ 降级,绝不崩图
+                logger.exception("decide curate failed for run %s", run_id)
+                append_trace(conn, run_id, "decide",
+                             output_summary=f"entailment degraded: {type(e).__name__}")
+                valid = {ev.id for ev in evidence}
+                kept = [d for d in decision_set.decisions
+                        if d.evidence_refs and all(r.evidence_id in valid for r in d.evidence_refs)]
+                dropped = [d.action for d in decision_set.decisions if d not in kept]
+                decision_set = DecisionSet(decisions=kept)
+                decision_degraded = True
+
+        save_decisions(conn, run_id, decision_set)
+        # 策展丢弃 ungrounded 决策是**健康的策展路径,不是降级**(丢≠degrade,与 qc_node 同模型),
+        # 但仍须**可见**(ship outside-voice C1:_dropped 静默吞掉违反「降级必可见」精神)——
+        # 故把丢弃数记入 trace + emit,但**不**置 decision_degraded(那会回退到一票否决的病)。
+        _emit_progress(
+            emit, "decide", "done",
+            f"生成 {len(decision_set.decisions)} 条决策建议"
+            + (f"(策展剔除 {len(dropped)} 条无据)" if dropped else "")
+            + ("(蕴含降级,机械门兜底)" if decision_degraded else ""),
+            metric={"current": len(decision_set.decisions),
+                    "total": len(decision_set.decisions)},
+        )
+        append_trace(conn, run_id, "decide",
+                     input_summary=f"context={'set' if decision_context else 'generic'}",
+                     output_summary=f"decisions={len(decision_set.decisions)} "
+                                    f"dropped={len(dropped)} degraded={decision_degraded}",
+                     latency_ms=int((time.monotonic() - t0) * 1000))
+        return {"decisions": decision_set.model_dump(), "decision_degraded": decision_degraded}
+    return decide_node
 
 
 _BANNER_INSUFFICIENT = (
@@ -221,36 +353,75 @@ _BANNER_INSUFFICIENT = (
 _BANNER_DEGRADED = (
     "> ⚠️ **未达质检标准**:存在未消解的质检问题,以下结论请谨慎参考。\n\n"
 )
+_BANNER_PARTIAL = (
+    "> ℹ️ **覆盖说明**:个别维度公开资料有限,已在对比矩阵中以「—」如实标注。"
+    "下列对比与决策建议**均有据可溯**(策展时已剔除证据撑不住的结论)。\n\n"
+)
+
+
+def _has_substantive_output(state: dict) -> bool:
+    """重试耗尽时判「是否有可交付的有据产出」:策展后矩阵 cell + 决策。
+    真 run 暴露——89% 满的矩阵 + 5 条决策被旧逻辑盖「数据不足」章是错的:覆盖度闸
+    本是策展人不是法官,有可展示的有据内容就该 done(缺格显「—」),只有几乎空手才
+    insufficient/degraded。决策直接挂证据(不依赖矩阵完整),故任一非空即算有产出。"""
+    analysis = state.get("analysis") or {}
+    matrix_cells = sum(len(r.get("cells", [])) for r in analysis.get("comparison", []))
+    decisions = (state.get("decisions") or {}).get("decisions", [])
+    return matrix_cells > 0 or len(decisions) > 0
 
 
 def make_finalize_node(*, conn, max_retries):
-    """终态节点:pass → done;重试耗尽则按最后 verdict 赋 insufficient/降级 + 加 banner。
+    """终态节点(策展人模型):pass → done;重试耗尽时按**策展后实际产出**决定终态——
+    有可交付的有据内容(矩阵 cell + 决策)→ done(缺维度矩阵显「—」+ 轻量覆盖说明),
+    真·几乎空手才 insufficient(retry_collect 耗尽)/ degraded(retry_analyze 耗尽)。
 
-    route 保证只有 pass 或耗尽才进来(spec §4/§8 + 必办项③)。insufficient_evidence
-    是一等质检结论(§8):缺证据耗尽 → 报告如实写「未找到公开数据」。
+    route 保证只有 pass 或耗尽才进来(spec §4/§8 + 必办项③)。覆盖度从"全有或全无的
+    法官"改"策展人"(真 run 暴露:89% 满却盖数据不足章是同一病的新症状)。
     """
     def finalize_node(state, config):
         run_id = config["configurable"]["thread_id"]
         result = dict(state["qc_result"])
         verdict = result["verdict"]
         report = state["report"]
-        if verdict == "pass":
+        substantive = _has_substantive_output(state)
+        if verdict == "pass" and substantive:
+            status = "done"
+        elif verdict == "pass":
+            # ship-time 双模型评审 MAJOR(Claude+Codex 共识):verdict=pass 但策展后空手
+            # (每个请求维度都有证据 → coverage 无缺口 → pass,但所有 cell 被蕴含判不支撑
+            # 全丢 + 无决策)→ 绝不出"看似通过实则空白"的 done。这是 _has_substantive_output
+            # 要防的病的镜像反面(89% 满盖数据不足 ↔ 0% 满盖 done),必须诚实 insufficient。
+            result["verdict"] = "insufficient_evidence"
+            report = _BANNER_INSUFFICIENT + report
+            status = "insufficient_evidence"
+        elif substantive:
+            # 重试耗尽但有可交付产出 → done。verdict 记 pass(可交付),issues 保留
+            # 缺口记录(/qc 诚实显示"通过,有这些维度缺口");缺格矩阵显「—」+ 轻量说明。
+            result["verdict"] = "pass"
+            report = _BANNER_PARTIAL + report
             status = "done"
         elif verdict == "retry_collect":
             result["verdict"] = "insufficient_evidence"
             report = _BANNER_INSUFFICIENT + report
             status = "insufficient_evidence"
-        else:  # retry_analyze 或其他耗尽
+        else:  # retry_analyze 或其他耗尽,且几乎空手
             report = _BANNER_DEGRADED + report
             status = "degraded"
         save_report(conn, run_id, report)
+        # Epic 2.4:持久化终态 QCResult(/qc 端点 sanitized serve)。result 已含本轮
+        # 终态 verdict(可能被上面改写成 insufficient_evidence)。
+        save_qc_result(conn, run_id, QCResult.model_validate(result))
         # post-ship review fix:mark_run_finalized CAS 守 expected='running',
         # 防 cancel race(cancel CAS 把 status 设 'cancelled' 后,finalize 内
         # 50ms sync 代码 跑完用非 CAS update_run_status 覆盖)。对称 mark_run_failed
         # /mark_run_cancelled CAS pattern。
         mark_run_finalized(conn, run_id, status)
-        # 持久化蕴含降级标志(Lane D 遗留收口,spec §11.5 前端横幅依赖)
-        update_run_degraded(conn, run_id, state.get("degraded", False))
+        # 持久化降级标志(Lane D 遗留收口,spec §11.5 前端横幅依赖)。Epic 2.3:决策
+        # 降级(decision_degraded)并入同一 degraded 信号 —— 用户看到的"以下结论请谨慎"
+        # 横幅同样覆盖"决策未达溯源标准"(reuse degraded-on-failure pattern)。
+        update_run_degraded(
+            conn, run_id,
+            bool(state.get("degraded", False)) or bool(state.get("decision_degraded", False)))
         append_trace(conn, run_id, "finalize",
                      output_summary=f"status={status} verdict={result['verdict']}")
         return {"report": report, "qc_result": result, "status": status}

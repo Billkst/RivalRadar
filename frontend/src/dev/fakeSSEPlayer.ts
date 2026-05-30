@@ -32,7 +32,18 @@ export const SAMPLE_EVENTS: SSEEvent[] = [
 
   // ── analyst 分析员:thinking + chunk(reasoning typing) ─────────────────
   { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
-      summary: '正在分析 12 条证据,提取 3 个竞品的特征', ts: '2026-05-28T10:00:09Z' } },
+      summary: '正在分析 12 条证据,提取 3 个竞品的特征',
+      metric: { current: 0, total: 13 }, ts: '2026-05-28T10:00:09Z' } },
+  // 逐竞品·逐抽取增量进度(真 backend analyze 内 _make_ticker emit;在 cockpit 折成一条
+  // 会动的进度条「分析 X·Y (n/13)」,而非每事件一行 —— 真跑 ~174s 长节点等待不静默)。
+  { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
+      summary: '分析 飞书·功能', metric: { current: 2, total: 13 }, ts: '2026-05-28T10:00:10Z' } },
+  { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
+      summary: '分析 钉钉·定价', metric: { current: 5, total: 13 }, ts: '2026-05-28T10:00:12Z' } },
+  { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
+      summary: '分析 企业微信·用户画像', metric: { current: 9, total: 13 }, ts: '2026-05-28T10:00:13Z' } },
+  { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
+      summary: '生成跨竞品对比矩阵', metric: { current: 13, total: 13 }, ts: '2026-05-28T10:00:14Z' } },
   // 5 段 chunk 模拟 LLM typing(每段几字符,backend stream_chat 产出的 delta 形态)
   { type: 'chunk', data: { agent_id: 'analyst', step: 'reasoning', delta: '正在', ts: '2026-05-28T10:00:10Z' } },
   { type: 'chunk', data: { agent_id: 'analyst', step: 'reasoning', delta: '比较 ', ts: '2026-05-28T10:00:10Z' } },
@@ -59,20 +70,45 @@ export const SAMPLE_EVENTS: SSEEvent[] = [
   { type: 'node', data: { node: 'write',
       summary: { node: 'write', report_chars: 1842 }, ts: '2026-05-28T10:00:22Z' } },
 
-  // ── qc 质检员:validate + verdict ───────────────────────────────────────
+  // ── qc 质检员(第 1 轮):证据不足,打回采集(招牌时刻 #2 — 重试环触发) ──────
   { type: 'progress', data: { agent_id: 'qc', step: 'validate',
       summary: '开始质检 3 个竞品 profile', ts: '2026-05-28T10:00:23Z' } },
   { type: 'progress', data: { agent_id: 'qc', step: 'done',
-      summary: '裁决:通过(发现 0 项问题,第 1 轮)',
-      metric: { current: 0, total: 0 }, ts: '2026-05-28T10:00:26Z' } },
+      summary: '裁决:证据不足,打回采集(2 项问题,第 1 轮)', ts: '2026-05-28T10:00:26Z' } },
+  { type: 'node', data: { node: 'qc',
+      summary: { node: 'qc', verdict: 'retry_collect', issues: 2,
+                 issue_types: { low_coverage: 2 }, retry_count: 0, degraded: false },
+      ts: '2026-05-28T10:00:26Z' } },
+
+  // ── 第 2 轮:采集员按反馈广搜补缺口 → 重试环显示「证据 12→19」 ─────────────────
+  { type: 'progress', data: { agent_id: 'collector', step: 'broaden',
+      summary: '按质检反馈广搜 2 个证据缺口', ts: '2026-05-28T10:00:27Z' } },
+  { type: 'node', data: { node: 'collect',
+      summary: { node: 'collect', evidence_added: 7 }, ts: '2026-05-28T10:00:32Z' } },
+  { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
+      summary: '重新分析 19 条证据,补齐缺失维度', ts: '2026-05-28T10:00:33Z' } },
+  { type: 'node', data: { node: 'analyze',
+      summary: { node: 'analyze', competitors: 3, comparison_rows: 6 }, ts: '2026-05-28T10:00:38Z' } },
+  { type: 'progress', data: { agent_id: 'writer', step: 'drafting',
+      summary: '更新对比报告', ts: '2026-05-28T10:00:39Z' } },
+  { type: 'node', data: { node: 'write',
+      summary: { node: 'write', report_chars: 2156 }, ts: '2026-05-28T10:00:43Z' } },
+  { type: 'progress', data: { agent_id: 'qc', step: 'done',
+      summary: '裁决:通过(0 项问题,第 2 轮)', ts: '2026-05-28T10:00:46Z' } },
   { type: 'node', data: { node: 'qc',
       summary: { node: 'qc', verdict: 'pass', issues: 0, issue_types: {},
-                 retry_count: 0, degraded: false }, ts: '2026-05-28T10:00:26Z' } },
+                 retry_count: 1, degraded: false }, ts: '2026-05-28T10:00:46Z' } },
+
+  // ── decide 决策(full-C / Epic 2)─────────────────────────────────────────
+  { type: 'progress', data: { agent_id: 'decide', step: 'deciding',
+      summary: '基于证据生成决策建议', ts: '2026-05-28T10:00:47Z' } },
+  { type: 'node', data: { node: 'decide',
+      summary: { node: 'decide', decisions: 3, decision_degraded: false }, ts: '2026-05-28T10:00:50Z' } },
 
   // ── finalize + done ────────────────────────────────────────────────────
   { type: 'node', data: { node: 'finalize',
-      summary: { node: 'finalize', status: 'done', verdict: 'pass' }, ts: '2026-05-28T10:00:27Z' } },
-  { type: 'done', data: { run_id: 'run_fake01', status: 'done', ts: '2026-05-28T10:00:27Z' } },
+      summary: { node: 'finalize', status: 'done', verdict: 'pass' }, ts: '2026-05-28T10:00:51Z' } },
+  { type: 'done', data: { run_id: 'run_fake01', status: 'done', ts: '2026-05-28T10:00:51Z' } },
 ]
 
 export interface PlayFakeSSEOptions {

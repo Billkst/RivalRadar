@@ -22,6 +22,11 @@ export type ProblemType =
   | 'hallucination'
   | 'low_coverage'
 export type QCVerdict = 'pass' | 'retry_collect' | 'retry_analyze' | 'insufficient_evidence'
+// full-C 决策管道(Epic 2)。术语锁定:与 backend enum / UI 同一字面值,不加映射层。
+export type Stance = '建议采用' | '需要警惕' | '持续观察'
+export type Horizon = '短期' | '中期' | '长期'
+export type Reversibility = '可逆' | '不可逆'
+export type RiskCost = '低' | '中' | '高'
 
 // ─── Controlled vocabulary (mirror Python CONTROLLED_DIMENSIONS tuple) ─────
 export const CONTROLLED_DIMENSIONS = [
@@ -134,10 +139,66 @@ export interface QCResult {
   issues: QCIssue[]
 }
 
+// ── full-C 决策管道(models.py — Epic 2)。stance 自解释标签;risk_* 是决策后果,
+//    与 support_verdict(证据支持度)正交;watch 仅 stance=持续观察 时非空。 ──
+export interface Watch {
+  metric: string
+  threshold: string
+  trigger: string
+}
+
+export interface Decision {
+  stance: Stance
+  action: string // 命令式动作句
+  horizon: Horizon
+  risk_reversibility: Reversibility
+  risk_cost: RiskCost
+  why: string
+  evidence_refs: EvidenceRef[]
+  watch?: Watch | null // 持续观察 REQUIRED,其余 null
+}
+
+export interface DecisionSet {
+  decisions: Decision[]
+}
+
+export interface ReportInsight {
+  market_context: string // rubric #1 市场锚定
+  differentiation_thesis: string // rubric #7 战略推论
+  actionable_takeaway: string // rubric #9 时间分层
+}
+
+// GET /qc/:run 的 sanitized 形状(schemas.py — Codex #9:detail 是罐装文案,无模型文本)。
+export interface SanitizedQCIssue {
+  competitor: string
+  dimension: string
+  problem_type: string
+  detail: string
+}
+
+export interface SanitizedQCResult {
+  verdict: string
+  issues: SanitizedQCIssue[]
+}
+
+// ── 竞品自动发现(Epic 1.1 — agents/discover.py + schemas.py)──────────────
+export interface DiscoveredCompetitor {
+  name: string
+  rationale: string
+}
+export interface DiscoverySet {
+  competitors: DiscoveredCompetitor[]
+}
+export interface DiscoverRequest {
+  seed: string
+  industry_hint?: string | null
+}
+
 // ─── HTTP boundary models (schemas.py) ─────────────────────────────────────
 export interface RunRequest {
   competitors: string[] // 1-5
   dimensions: string[] // 1-6 (controlled)
+  decision_context?: string // full-C 用户决策处境(Epic 2;空 / 省略 = 通用浏览)
 }
 
 export interface RunSummary {
@@ -149,8 +210,10 @@ export interface RunSummary {
   degraded: boolean
 }
 
-// RunDetail extends RunSummary with no extra fields currently.
-export type RunDetail = RunSummary
+// RunDetail extends RunSummary with decision_context (Epic 2 — cockpit 回访显示处境)。
+export interface RunDetail extends RunSummary {
+  decision_context: string
+}
 
 export interface AnnotationCreate {
   run_id: string
@@ -199,6 +262,10 @@ export interface NodeSummary {
   retry_count?: number // qc
   degraded?: boolean // qc
   status?: string // finalize
+  decisions?: number // decide (full-C)
+  // decide 节点发出,但当前 runStore 尚未消费(Epic 3/4 cockpit DecisionBoard 接);
+  // 实时降级信号现仅经 GET /run/:id.degraded 暴露,勿当已生效 SSE 信号用。
+  decision_degraded?: boolean // decide
 }
 
 export interface SSENodeData {

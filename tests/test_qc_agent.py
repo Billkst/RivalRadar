@@ -1,14 +1,16 @@
 import json
+import threading
 from types import SimpleNamespace
 
 from rivalradar.agents.qc import (
     check_traceability, check_ontology, check_coverage, EntailmentVerdict, check_entailment,
-    decide_verdict, check,
+    decide_verdict, check, check_decision_traceability, check_decision_entailment,
+    sanitize_qc_result, curate_analysis, curate_decisions,
 )
 from rivalradar.schema.models import (
     CompetitorAnalysis, CompetitorProfile, FeatureItem, PricingModel,
     SWOT, SWOTPoint, ComparisonRow, ComparisonCell, EvidenceRef, Evidence,
-    QCIssue, QCResult,
+    QCIssue, QCResult, Decision,
 )
 
 
@@ -16,10 +18,20 @@ def _ref(eid):
     return EvidenceRef(evidence_id=eid, quote="q")
 
 
-def _ev(eid, dimension="pricing"):
+def _ev(eid="e1", dimension="pricing"):
     return Evidence(id=eid, competitor="Notion", dimension=dimension, content="c",
                     source_url="u", source_title="t", language="en",
                     fetched_at="2026-05-25T00:00:00Z")
+
+
+def _analysis_with_cell(dim="pricing", refs=None):
+    """构造一份只含单个对比 cell(默认 Notion/pricing 挂有效引用 e1)的分析,供 Part B
+    策展测试复用。带一个空 profile(Notion)以便 traceability comparison_only 测试加 feature。"""
+    refs = [_ref("e1")] if refs is None else refs
+    return CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[ComparisonRow(dimension=dim, cells=[
+            ComparisonCell(competitor="Notion", value_type="enum", value="v", evidence_refs=refs)])])
 
 
 def test_check_traceability_flags_empty_refs():
@@ -72,12 +84,60 @@ def test_check_coverage_flags_missing_dimension():
     assert "deployment" in missing_dims and "pricing" not in missing_dims
 
 
+def test_check_coverage_only_checks_requested_dimensions():
+    """真 run 暴露的 bug 回归:只查请求的维度,不要求未请求的维度(如 review_sentiment)。
+
+    原先 qc_node 用默认 required=全 6 受控本体 → 用户只请求 pricing 时,review_sentiment
+    永远 low_coverage → retry_collect 死循环 → insufficient_evidence(再多采集也补不上)。
+    """
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[ComparisonRow(dimension="pricing", cells=[
+            ComparisonCell(competitor="Notion", value_type="enum", value="freemium")])])
+    # 只请求 pricing(已覆盖)→ 0 low_coverage;绝不因 review_sentiment 等未请求维度报缺。
+    issues = check_coverage(analysis, required=("pricing",))
+    assert issues == []
+
+
+def test_check_coverage_skips_curated_out_dim_with_evidence():
+    """重试空转修复(真 run 暴露):某维度**采到了证据**但 cell 被策展丢掉(策展后矩阵无该 cell)
+    → 视为已覆盖(矩阵显「—」),**不报 low_coverage** → 不触发不收敛的 retry_collect 空转。"""
+    analysis = CompetitorAnalysis(  # 策展后矩阵全空(core_workflows cell 被蕴含判不支撑丢掉)
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[])
+    ev = [_ev("e1", dimension="core_workflows")]  # 但确实采到了该维度证据
+    assert check_coverage(analysis, required=("core_workflows",), evidence=ev) == []
+
+
+def test_check_coverage_flags_zero_evidence_dim():
+    """真·欠采(该维度**零证据**)→ 仍报 low_coverage → retry_collect(broaden 能补且会收敛)。
+    证明修复不是"一律不报"——money-shot 补搜环在真欠采时照样触发。"""
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[])
+    issues = check_coverage(analysis, required=("core_workflows",), evidence=[])  # 零证据
+    assert any(i.problem_type == "low_coverage" and i.dimension == "core_workflows" for i in issues)
+
+
+def test_check_coverage_backward_compat_without_evidence_arg():
+    """向后兼容:不传 evidence → 老行为(任何缺 cell 都 low_coverage),老调用/单测不破。"""
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[])
+    assert any(i.problem_type == "low_coverage"
+               for i in check_coverage(analysis, required=("core_workflows",)))
+
+
 class _Completions:
     def __init__(self, payloads):
         self.payloads = list(payloads); self.calls = 0
+        self._lock = threading.Lock()
 
     def create(self, **kwargs):
-        p = self.payloads[self.calls]; self.calls += 1
+        # check_entailment / curate_decisions 现已线程池并发判蕴含 → create 必须线程安全:
+        # 锁内原子「取-增」calls,保证每个 payload 恰好被消费一次、并行下也不越界/不重复。
+        with self._lock:
+            p = self.payloads[self.calls]; self.calls += 1
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(
                 tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=p))]))],
@@ -115,6 +175,131 @@ def test_check_entailment_skips_empty_refs():
         name="Notion", pricing=PricingModel(model_type="x", evidence_refs=[]), swot=SWOT())])
     client = _FakeClient([])
     assert check_entailment(analysis, [_ev("e1")], client=client, model="m") == []
+
+
+def test_check_entailment_scopes_to_requested_dimensions():
+    # 真 run 续集:out-of-scope 的 SWOT(dimension="swot")结论不进 entailment 闸。
+    # 用户只请求 pricing → 仅 pricing 结论被 LLM 蕴含判定,SWOT 前瞻推断不被严判
+    # (SWOT/persona 是综合产物,严格 entailment 是范畴错误;in-scope 仍全判)。
+    analysis = CompetitorAnalysis(competitors=[CompetitorProfile(
+        name="Notion",
+        pricing=PricingModel(model_type="freemium", evidence_refs=[_ref("e1")]),
+        swot=SWOT(threats=[SWOTPoint(text="可能被巨头分流", evidence_refs=[_ref("e2")])]))])
+    # 两个 payload 都判 not supported;scope 后只该消费 pricing 那次 → 仅 1 issue
+    client = _FakeClient([json.dumps({"supported": False, "reason": "x"}),
+                          json.dumps({"supported": False, "reason": "y"})])
+    issues = check_entailment(analysis, [_ev("e1"), _ev("e2", dimension="swot")],
+                              dimensions=("pricing",), client=client, model="m")
+    assert len(issues) == 1
+    assert issues[0].dimension == "pricing"
+
+
+def test_check_entailment_no_scope_checks_all_dimensions():
+    # 向后兼容:不传 dimensions → 全维度判(老行为),SWOT 也被判
+    analysis = CompetitorAnalysis(competitors=[CompetitorProfile(
+        name="Notion",
+        pricing=PricingModel(model_type="freemium", evidence_refs=[_ref("e1")]),
+        swot=SWOT(threats=[SWOTPoint(text="t", evidence_refs=[_ref("e2")])]))])
+    client = _FakeClient([json.dumps({"supported": False, "reason": "x"}),
+                          json.dumps({"supported": False, "reason": "y"})])
+    issues = check_entailment(analysis, [_ev("e1"), _ev("e2", dimension="swot")],
+                              client=client, model="m")
+    assert len(issues) == 2
+
+
+def test_check_entailment_comparison_only_skips_profile_conclusions():
+    # 真 run 续集:阻断性蕴含判定只严判 showcase 呈现的对比矩阵 cell;profile 的描述性
+    # feature(喂退役报告、不进驾驶舱)即使越界也不进 LLM 闸 → 不否决整个 run。
+    analysis = CompetitorAnalysis(competitors=[CompetitorProfile(
+        name="Notion",
+        features=[FeatureItem(id="f1", name="子功能臆测", description="d", category="c",
+                              evidence_refs=[_ref("e1")])],
+        pricing=PricingModel(model_type="freemium", evidence_refs=[_ref("e2")]),
+        swot=SWOT())],
+        comparison=[ComparisonRow(dimension="pricing", cells=[
+            ComparisonCell(competitor="Notion", value_type="enum", value="免费起",
+                           evidence_refs=[_ref("e3")])])])
+    # 三个 payload 都判 not supported;comparison_only 后只该消费对比 cell 那次 → 仅 1 issue
+    client = _FakeClient([json.dumps({"supported": False, "reason": "a"}),
+                          json.dumps({"supported": False, "reason": "b"}),
+                          json.dumps({"supported": False, "reason": "c"})])
+    issues = check_entailment(analysis, [_ev("e1"), _ev("e2"), _ev("e3")],
+                              comparison_only=True, client=client, model="m")
+    assert len(issues) == 1
+    assert issues[0].detail.startswith("证据不支撑结论(对比:")
+
+
+def test_check_entailment_comparison_only_with_dimensions_production_path():
+    # reviewer ISSUE-3:钉死生产实际走的组合 comparison_only=True + dimensions=请求维度。
+    # 只有在请求维度内的对比 cell 进蕴含;越界维度的对比行被 dimensions 过滤掉。
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[
+            ComparisonRow(dimension="pricing", cells=[
+                ComparisonCell(competitor="Notion", value_type="enum", value="免费起",
+                               evidence_refs=[_ref("e1")])]),
+            ComparisonRow(dimension="integrations", cells=[
+                ComparisonCell(competitor="Notion", value_type="enum", value="开放平台",
+                               evidence_refs=[_ref("e2")])]),
+        ])
+    # 两个 cell 都判 not supported;dimensions=("pricing",) 后只 pricing cell 进蕴含 → 1 issue
+    client = _FakeClient([json.dumps({"supported": False, "reason": "a"}),
+                          json.dumps({"supported": False, "reason": "b"})])
+    issues = check_entailment(analysis, [_ev("e1"), _ev("e2", dimension="integrations")],
+                              dimensions=("pricing",), comparison_only=True, client=client, model="m")
+    assert len(issues) == 1
+    assert issues[0].dimension == "pricing"
+
+
+def test_check_entailment_runs_concurrently():
+    """蕴含判定并行化(契约锁死):N 条对比 cell → 线程池并发判;barrier 证明真并发——
+    串行执行会卡在 barrier(只有 1 线程到达)超时 BrokenBarrierError → 测试失败。"""
+    n = 4
+    barrier = threading.Barrier(n, timeout=5)
+
+    class _BarrierCompletions:
+        def create(self, **kwargs):
+            barrier.wait()  # 串行则永远等不齐 n 个 → 超时抛 BrokenBarrierError
+            return SimpleNamespace(
+                choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[SimpleNamespace(
+                    function=SimpleNamespace(arguments=json.dumps({"supported": True, "reason": ""})))]))],
+                usage=SimpleNamespace(total_tokens=10))
+
+    class _BarrierClient:
+        def __init__(self):
+            self.chat = SimpleNamespace(completions=_BarrierCompletions())
+
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name=f"C{i}", pricing=PricingModel(model_type="x"), swot=SWOT())
+                     for i in range(n)],
+        comparison=[ComparisonRow(dimension="pricing", cells=[
+            ComparisonCell(competitor=f"C{i}", value_type="enum", value="v", evidence_refs=[_ref("e1")])
+            for i in range(n)])])
+    issues = check_entailment(analysis, [_ev("e1")], comparison_only=True,
+                              client=_BarrierClient(), model="m")
+    assert issues == []  # 全 supported → 无 issue;能返回即证明 n 个线程都越过了 barrier
+
+
+def test_check_entailment_emits_per_cell_progress():
+    """增量进度:每个对比 cell 蕴含判完报一次(质检 ~94s 静默段 → 逐格亮起)。"""
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name=f"C{i}", pricing=PricingModel(model_type="x"), swot=SWOT())
+                     for i in range(2)],
+        comparison=[ComparisonRow(dimension="pricing", cells=[
+            ComparisonCell(competitor=f"C{i}", value_type="enum", value="v", evidence_refs=[_ref("e1")])
+            for i in range(2)])])
+    client = _FakeClient([json.dumps({"supported": True, "reason": ""}) for _ in range(2)])
+    calls = []
+    lock = threading.Lock()
+
+    def rec(detail):
+        with lock:
+            calls.append(detail)
+
+    check_entailment(analysis, [_ev("e1")], comparison_only=True, on_progress=rec,
+                     client=client, model="m")
+    assert len(calls) == 2  # 2 cell → 2 次进度
+    assert all("质检校验" in c for c in calls)
 
 
 def test_decide_verdict_pass_when_no_issues():
@@ -162,6 +347,101 @@ def test_check_end_to_end_clean_passes():
     assert result.verdict == "pass" and result.issues == []
 
 
+# ── QC-on-decisions(Epic 2.3)───────────────────────────────────────────────
+def _decision(action="本周评估飞书审批接入", refs=("e1",)):
+    return Decision(stance="建议采用", action=action, horizon="短期",
+                    risk_reversibility="可逆", risk_cost="低", why="飞书审批生态成熟",
+                    evidence_refs=[EvidenceRef(evidence_id=r, quote="q") for r in refs])
+
+
+def test_check_decision_traceability_flags_empty_refs():
+    d = Decision(stance="建议采用", action="x", horizon="短期", risk_reversibility="可逆",
+                 risk_cost="低", why="y", evidence_refs=[])
+    issues = check_decision_traceability([d], [_ev("e1")])
+    assert any(i.problem_type == "missing_evidence" and i.dimension == "decision" for i in issues)
+
+
+def test_check_decision_traceability_flags_dangling_id():
+    issues = check_decision_traceability([_decision(refs=("ghost",))], [_ev("e1")])
+    assert any("ghost" in i.detail for i in issues)
+
+
+def test_check_decision_traceability_clean_when_valid():
+    assert check_decision_traceability([_decision(refs=("e1",))], [_ev("e1")]) == []
+
+
+def test_check_decision_entailment_flags_unsupported():
+    client = _FakeClient([json.dumps({"supported": False, "reason": "证据与该建议无关"})])
+    issues = check_decision_entailment([_decision(refs=("e1",))], [_ev("e1")], client=client, model="m")
+    assert len(issues) == 1 and issues[0].problem_type == "hallucination"
+    assert issues[0].dimension == "decision"
+
+
+def test_check_decision_entailment_clean_when_supported():
+    client = _FakeClient([json.dumps({"supported": True, "reason": ""})])
+    assert check_decision_entailment([_decision(refs=("e1",))], [_ev("e1")],
+                                     client=client, model="m") == []
+
+
+def test_check_decision_entailment_cost_guard_caps_calls():
+    """COST GUARD(Codex #4):决策数 > max_calls 时封顶,防 retry-storm 撞 90s timeout。"""
+    decisions = [_decision(action=f"动作{i}", refs=("e1",)) for i in range(10)]
+    client = _FakeClient([json.dumps({"supported": True, "reason": ""}) for _ in range(10)])
+    check_decision_entailment(decisions, [_ev("e1")], client=client, model="m", max_calls=3)
+    assert client.chat.completions.calls == 3  # 只调 3 次,其余 7 条不验证(机械门仍覆盖)
+
+
+def test_check_decision_entailment_skips_empty_refs():
+    d = Decision(stance="建议采用", action="x", horizon="短期", risk_reversibility="可逆",
+                 risk_cost="低", why="y", evidence_refs=[])
+    client = _FakeClient([])  # 不应触发任何调用
+    assert check_decision_entailment([d], [_ev("e1")], client=client, model="m") == []
+    assert client.chat.completions.calls == 0
+
+
+def test_check_decision_entailment_skips_dangling_refs():
+    """悬空引用决策归 traceability,蕴含预过滤跳过,不耗 cost guard 预算(adversarial M3)。"""
+    client = _FakeClient([])  # 悬空 → 0 调用
+    assert check_decision_entailment([_decision(refs=("ghost",))], [_ev("e1")],
+                                     client=client, model="m") == []
+    assert client.chat.completions.calls == 0
+
+
+def test_sanitize_qc_result_strips_model_text_to_canned_detail():
+    """Epic 2.4 / Codex #9:/qc 公开端点 sanitize —— detail 含模型文本必须被罐装文案替换,
+    保留 competitor/dimension/problem_type 供前端;原始模型片段绝不泄漏。"""
+    result = QCResult(verdict="retry_analyze", issues=[QCIssue(
+        competitor="飞书", dimension="decision", problem_type="hallucination",
+        detail="证据不支撑决策(采购飞书):模型原话含敏感片段 SECRET_xyz")])
+    out = sanitize_qc_result(result)
+    assert out["verdict"] == "retry_analyze"
+    issue = out["issues"][0]
+    assert issue["competitor"] == "飞书" and issue["problem_type"] == "hallucination"
+    assert "SECRET_xyz" not in issue["detail"]           # 模型文本不泄漏
+    assert issue["detail"] == "证据未能支撑该结论"        # 罐装文案
+
+
+def test_sanitize_qc_result_whitelists_out_of_ontology_dimension():
+    """schema_incomplete issue 的 dimension 是 LLM 越界文本 → sanitize 替占位,
+    绝不经公开 /qc 回吐模型产出的任意维度名(adversarial M1)。"""
+    result = QCResult(verdict="retry_analyze", issues=[QCIssue(
+        competitor="*", dimension="模型乱吐的越界维度SECRET", problem_type="schema_incomplete",
+        detail="维度不在受控本体")])
+    out = sanitize_qc_result(result)
+    assert out["issues"][0]["dimension"] == "out_of_ontology"  # 越界维度替占位
+    assert "SECRET" not in out["issues"][0]["dimension"]
+
+
+def test_sanitize_qc_result_keeps_controlled_dimension():
+    """受控维度 / decision 维度原样保留(供前端定位)。"""
+    result = QCResult(verdict="retry_collect", issues=[
+        QCIssue(competitor="飞书", dimension="pricing", problem_type="low_coverage", detail="x"),
+        QCIssue(competitor="*", dimension="decision", problem_type="missing_evidence", detail="y")])
+    out = sanitize_qc_result(result)
+    assert out["issues"][0]["dimension"] == "pricing"
+    assert out["issues"][1]["dimension"] == "decision"
+
+
 def test_check_end_to_end_retry_collect_with_issues_flowing_through():
     # pricing 空引用(traceability→missing_evidence)+ 无对比(coverage→6×low_coverage)
     # 空引用结论被 entailment 跳过 → 0 次 LLM 调用 → verdict=retry_collect
@@ -173,3 +453,87 @@ def test_check_end_to_end_retry_collect_with_issues_flowing_through():
     assert result.verdict == "retry_collect"
     assert any(i.problem_type == "missing_evidence" for i in result.issues)
     assert client.chat.completions.calls == 0  # 空引用结论不调 LLM
+
+
+# ── Part B:QC 策展化(信任模型「否决闸」→「策展人」)──────────────────────
+def test_curate_drops_unsupported_cell(monkeypatch):
+    """蕴含判不支撑的对比 cell 被静默丢弃(不再产 hallucination 否决整 run)。"""
+    import rivalradar.agents.qc as qc_mod
+    monkeypatch.setattr(qc_mod, "structured_call",
+                        lambda *a, **k: EntailmentVerdict(supported=False, reason="x"))
+    a = _analysis_with_cell(dim="pricing")
+    curated, dropped = curate_analysis(a, [_ev()], dimensions=("pricing",),
+                                       client=object(), model="m")
+    assert dropped  # 记录了丢弃
+    assert curated.comparison == []  # 唯一 cell 站不住 → row 清空
+
+
+def test_curate_keeps_supported_cell(monkeypatch):
+    """蕴含支撑的 cell 原样保留,dropped 为空。"""
+    import rivalradar.agents.qc as qc_mod
+    monkeypatch.setattr(qc_mod, "structured_call",
+                        lambda *a, **k: EntailmentVerdict(supported=True))
+    a = _analysis_with_cell(dim="pricing")
+    curated, dropped = curate_analysis(a, [_ev()], dimensions=("pricing",),
+                                       client=object(), model="m")
+    assert dropped == []
+    assert len(curated.comparison) == 1
+    assert curated.comparison[0].cells[0].competitor == "Notion"
+
+
+def test_curate_drops_dangling_ref_cell_without_llm(monkeypatch):
+    """无引用/悬空引用的 cell 由机械 traceability 丢弃,且不耗 LLM 调用。"""
+    import rivalradar.agents.qc as qc_mod
+    calls = {"n": 0}
+    def _fake(*a, **k):
+        calls["n"] += 1
+        return EntailmentVerdict(supported=True)
+    monkeypatch.setattr(qc_mod, "structured_call", _fake)
+    a = _analysis_with_cell(refs=[EvidenceRef(evidence_id="ZZZ", quote="x",
+                                              support_verdict="supported")])
+    curated, dropped = curate_analysis(a, [_ev()], dimensions=("pricing",),
+                                       client=object(), model="m")
+    assert dropped
+    assert curated.comparison == []
+    assert calls["n"] == 0  # 悬空引用直接机械丢弃,不送 LLM
+
+
+def test_curate_leaves_out_of_scope_dim_untouched(monkeypatch):
+    """非请求维度的 row 不策展(build_comparison 已 scoped,这里只防御)。"""
+    import rivalradar.agents.qc as qc_mod
+    monkeypatch.setattr(qc_mod, "structured_call",
+                        lambda *a, **k: EntailmentVerdict(supported=False))
+    a = _analysis_with_cell(dim="pricing")
+    curated, dropped = curate_analysis(a, [_ev()], dimensions=("core_workflows",),
+                                       client=object(), model="m")
+    assert dropped == []
+    assert len(curated.comparison) == 1  # pricing 不在请求维度 → 不动
+
+
+def test_check_traceability_comparison_only_skips_profiles():
+    """comparison_only=True:只机械校验对比矩阵 cell,不校验 profile 描述性结论。"""
+    a = _analysis_with_cell()
+    # profile 加一个无引用 feature(全量 traceability 会抓,comparison_only 应跳过)
+    from rivalradar.schema.models import FeatureItem
+    a.competitors[0].features = [FeatureItem(id="f1", name="db", description="",
+                                             category="core_workflows", evidence_refs=[])]
+    full = check_traceability(a, [_ev()])
+    scoped = check_traceability(a, [_ev()], comparison_only=True)
+    assert any(i.problem_type == "missing_evidence" for i in full)  # 全量抓到无引用 feature
+    assert scoped == []  # comparison_only 只看 cell(grounded)→ 干净
+
+
+def test_curate_decisions_drops_ungrounded(monkeypatch):
+    """ungrounded 决策被丢弃(不再 decision_degraded 标降级),grounded 保留。"""
+    import rivalradar.agents.qc as qc_mod
+    monkeypatch.setattr(qc_mod, "structured_call",
+                        lambda *a, **k: EntailmentVerdict(supported=True))
+    good = Decision(stance="建议采用", action="上", why="y", horizon="短期",
+                    risk_reversibility="可逆", risk_cost="低",
+                    evidence_refs=[EvidenceRef(evidence_id="e1", quote="x", support_verdict="supported")])
+    bad = Decision(stance="建议采用", action="瞎搞", why="y", horizon="短期",
+                   risk_reversibility="可逆", risk_cost="低",
+                   evidence_refs=[EvidenceRef(evidence_id="ZZZ", quote="x", support_verdict="supported")])
+    kept, dropped = curate_decisions([good, bad], [_ev()], client=object(), model="m")
+    assert [d.action for d in kept] == ["上"]  # 悬空引用决策被丢
+    assert dropped

@@ -52,3 +52,25 @@ def test_targets_dedup_preserves_order():
         {"competitor": "Notion", "dimension": "pricing", "problem_type": "missing_evidence", "detail": ""},
     ]
     assert extract_collect_targets(issues, ["Notion"]) == [("Notion", "pricing")]
+
+
+# ---- gap-fill 维度作用域(真 run 钓出:SWOT 空引用 → missing_evidence("swot")
+#      → 搜 "swot" → 本体外证据污染 → check_ontology 死循环 → degraded) ----
+def test_targets_filtered_to_allowed_dimensions():
+    # 综合维度 "swot"(非可搜索本体)的 missing_evidence 不得变成搜索目标
+    issues = [
+        {"competitor": "飞书", "dimension": "pricing", "problem_type": "missing_evidence", "detail": ""},
+        {"competitor": "飞书", "dimension": "swot", "problem_type": "missing_evidence", "detail": ""},
+        {"competitor": "飞书", "dimension": "review_sentiment", "problem_type": "low_coverage", "detail": ""},
+    ]
+    targets = extract_collect_targets(
+        issues, ["飞书"], allowed_dimensions=("pricing", "core_workflows", "integrations"))
+    assert ("飞书", "pricing") in targets
+    assert all(d not in ("swot", "review_sentiment") for _, d in targets)
+    assert targets == [("飞书", "pricing")]
+
+
+def test_targets_no_filter_when_allowed_dimensions_none():
+    # 向后兼容:不传 allowed_dimensions → 不过滤(老行为)
+    issues = [{"competitor": "飞书", "dimension": "swot", "problem_type": "missing_evidence", "detail": ""}]
+    assert extract_collect_targets(issues, ["飞书"]) == [("飞书", "swot")]

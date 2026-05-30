@@ -9,9 +9,13 @@ import type {
   AnnotationCreate,
   AnnotationOut,
   CompetitorAnalysis,
+  DecisionSet,
+  DiscoverySet,
   Evidence,
+  ReportInsight,
   RunDetail,
   RunSummary,
+  SanitizedQCResult,
   TraceEntry,
 } from '@/types/api'
 
@@ -69,6 +73,23 @@ export const fetchEvidence = (evidenceId: string) => jsonFetch<Evidence>(`/evide
 export const fetchReport = (runId: string) =>
   jsonFetch<{ run_id: string; markdown: string }>(`/report/${runId}`)
 export const fetchTrace = (runId: string) => jsonFetch<TraceEntry[]>(`/trace/${runId}`)
+
+// ─── full-C 决策管道只读端点(Epic 2.4 → cockpit Epic 4/5 消费)─────────────
+// 老 run / 进行中 run 无对应表行 → 后端 404;cockpitStore catch ApiError(404)
+// 当作 'absent'(空态),区别于 'error'(网络/5xx)。
+export const fetchDecisions = (runId: string) => jsonFetch<DecisionSet>(`/decisions/${runId}`)
+export const fetchInsight = (runId: string) => jsonFetch<ReportInsight>(`/insight/${runId}`)
+export const fetchQc = (runId: string) => jsonFetch<SanitizedQCResult>(`/qc/${runId}`)
+// 批量证据(GET /runs/:id/evidence)— evidenceStore 一次性 seed 防 per-pill N+1。
+export const fetchRunEvidence = (runId: string) => jsonFetch<Evidence[]>(`/runs/${runId}/evidence`)
+
+// ─── Discover competitors (Epic 1.1 引导式 setup)──────────────────────────
+// LLM 不通 → 后端 503;调用方 catch 提示手动输入(非静默)。
+export const discoverCompetitors = (seed: string, industryHint?: string) =>
+  jsonFetch<DiscoverySet>('/discover-competitors', {
+    method: 'POST',
+    body: JSON.stringify({ seed, industry_hint: industryHint || null }),
+  })
 
 // ─── Annotations ──────────────────────────────────────────────────────────
 export const createAnnotation = (payload: AnnotationCreate) =>

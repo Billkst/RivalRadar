@@ -16,7 +16,8 @@ def test_init_db_creates_all_tables():
     names = {r["name"] for r in conn.execute(
         "SELECT name FROM sqlite_master WHERE type='table'"
     )}
-    assert {"runs", "evidence", "analysis", "report", "trace"} <= names
+    assert {"runs", "evidence", "analysis", "report", "trace",
+            "decisions", "qc_result", "insight"} <= names  # +full-C 3 表(Epic 2.4)
 
 
 def test_connect_uses_row_factory():
@@ -131,4 +132,51 @@ def test_ensure_columns_adds_degraded_to_legacy_runs(tmp_path):
     assert "degraded" in cols_after
     row = c.execute("SELECT degraded FROM runs WHERE run_id='r_old'").fetchone()
     assert row["degraded"] == 0, "old rows must get default 0"
+    c.close()
+
+
+def test_ensure_columns_adds_decision_context_to_legacy_runs(tmp_path):
+    """Epic 2.4:老 db(无 decision_context 列)init_db ALTER 加列,既有数据 default ''。"""
+    from rivalradar.storage.db import connect, init_db
+    db = tmp_path / "legacy_dc.db"
+    c = connect(str(db))
+    c.executescript("""
+        CREATE TABLE runs (
+            run_id TEXT PRIMARY KEY, competitors TEXT NOT NULL,
+            dimensions TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        INSERT INTO runs VALUES ('r_old', '[]', '[]', 'done', '2026-05-01');
+    """)
+    c.commit()
+    cols_before = {row[1] for row in c.execute("PRAGMA table_info(runs)").fetchall()}
+    assert "decision_context" not in cols_before, "test prerequisite: legacy db has no column"
+    init_db(c)
+    cols_after = {row[1] for row in c.execute("PRAGMA table_info(runs)").fetchall()}
+    assert "decision_context" in cols_after
+    row = c.execute("SELECT decision_context FROM runs WHERE run_id='r_old'").fetchone()
+    assert row["decision_context"] == "", "old rows must get default ''"
+    c.close()
+
+
+def test_ensure_creates_decision_tables_on_legacy_db(tmp_path):
+    """Epic 2.4:老 db 无 decisions/qc_result/insight 表 → init_db 补建;
+    老 run 查无行 → repo get 返 None(天然 null 态,GET 据此 404)。"""
+    from rivalradar.storage.db import connect, init_db
+    from rivalradar.storage import repository as repo
+    db = tmp_path / "legacy_tables.db"
+    c = connect(str(db))
+    c.executescript("""
+        CREATE TABLE runs (
+            run_id TEXT PRIMARY KEY, competitors TEXT NOT NULL,
+            dimensions TEXT NOT NULL, status TEXT NOT NULL, created_at TEXT NOT NULL
+        );
+        INSERT INTO runs VALUES ('r_old', '[]', '[]', 'done', '2026-05-01');
+    """)
+    c.commit()
+    init_db(c)
+    names = {r["name"] for r in c.execute("SELECT name FROM sqlite_master WHERE type='table'")}
+    assert {"decisions", "qc_result", "insight"} <= names
+    assert repo.get_decisions(c, "r_old") is None
+    assert repo.get_qc_result(c, "r_old") is None
+    assert repo.get_insight(c, "r_old") is None
     c.close()

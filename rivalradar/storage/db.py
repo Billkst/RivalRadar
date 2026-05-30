@@ -35,6 +35,23 @@ CREATE TABLE IF NOT EXISTS report (
     markdown   TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+-- full-C 决策管道持久化(Epic 2.4)。新表靠 CREATE IF NOT EXISTS 在 init_db
+-- 自动建(老 db 也建,老 run 无行 → GET 优雅 404 = 天然 null 态,无需 ALTER)。
+CREATE TABLE IF NOT EXISTS decisions (
+    run_id     TEXT PRIMARY KEY,
+    payload    TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS qc_result (
+    run_id     TEXT PRIMARY KEY,
+    payload    TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
+CREATE TABLE IF NOT EXISTS insight (
+    run_id     TEXT PRIMARY KEY,
+    payload    TEXT NOT NULL,
+    created_at TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS trace (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id         TEXT NOT NULL,
@@ -80,6 +97,12 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
     runs_cols = {row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
     if "degraded" not in runs_cols:
         conn.execute("ALTER TABLE runs ADD COLUMN degraded INTEGER NOT NULL DEFAULT 0")
+        conn.commit()
+
+    # decision_context 列(Epic 2.4 full-C:用户决策处境,decide 节点 grounding 用)。
+    # 老 run 默认 '' = 通用浏览语气(向后兼容,无须回填)。
+    if "decision_context" not in runs_cols:
+        conn.execute("ALTER TABLE runs ADD COLUMN decision_context TEXT NOT NULL DEFAULT ''")
         conn.commit()
 
     # evidence PK 迁移:检测旧单列 PK,重建表

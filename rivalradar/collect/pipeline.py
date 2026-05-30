@@ -1,6 +1,7 @@
 from __future__ import annotations
 
 import logging
+from collections.abc import Callable
 from concurrent.futures import ThreadPoolExecutor
 
 from rivalradar.collect.evidence import to_evidence
@@ -49,21 +50,28 @@ def collect(
     max_results: int = 5,
     max_workers: int = 4,
     broaden: bool = False,
+    on_progress: Callable[[str], None] | None = None,
 ) -> list[Evidence]:
     """并行采集:竞品×维度×语言 → 查询 → 搜索 → 证据,限并发 max_workers,按 id 去重(spec §7/D8)。
     空内容证据(content.strip() 为空)在去重环节一并过滤。
     单 query 异常被 _run_query_safe graceful skip(返 [] + 日志),不 abort 整轮。
+    on_progress:每个 query 完成报一次(worker 线程调,由 caller 的 ticker 锁内串行化);
+    None = 不报(向后兼容直接调用 / 单测)。
     """
     queries: list[Query] = []
     for c in competitors:
         queries.extend(generate_queries(c, dimensions, languages=languages, broaden=broaden))
 
+    def _one(q: Query) -> list[Evidence]:
+        evs = _run_query_safe(provider, q, max_results)
+        if on_progress is not None:
+            on_progress(f"采集 {q.competitor}·{q.dimension}")
+        return evs
+
     by_id: dict[str, Evidence] = {}
     failed_count = 0
     with ThreadPoolExecutor(max_workers=max_workers) as pool:
-        results = list(pool.map(
-            lambda q: _run_query_safe(provider, q, max_results), queries
-        ))
+        results = list(pool.map(_one, queries))
     for evs in results:
         if not evs:
             failed_count += 1

@@ -1,6 +1,9 @@
 # gstack 本地工具状态
 .gstack/
 
+# Claude Code 本地调度锁(wakeup/loop 状态,不入库)
+.claude/scheduled_tasks.lock
+
 # 密钥 / 环境变量(Doubao API key 等)
 .env
 .env.*

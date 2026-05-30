@@ -35,3 +35,7 @@ class ResearchState(TypedDict, total=False):
     retry_count: int                  # 已重试次数(仅 qc 节点递增;首遍=0)
     degraded: bool                    # 本轮 LLM 蕴含是否降级
     status: str                       # 终态:done / insufficient_evidence / degraded
+    # ── full-C 决策管道(Epic 2.2-2.3)──────────────────────────────────────
+    decision_context: str             # 用户决策处境(Epic 1.2 RunRequest 注入;空=通用浏览)
+    decisions: dict                   # DecisionSet.model_dump()(decide 节点产出)
+    decision_degraded: bool           # 决策溯源/蕴含是否降级(并入终态 degraded)

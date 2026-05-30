@@ -22,8 +22,8 @@ import type { AgentDescriptor, AgentId } from '@/types/agents'
 export const AGENTS: readonly AgentDescriptor[] = [
   {
     id: 'collector',
-    name: '收集员',
-    role: '收集员',
+    name: '采集员',
+    role: '采集员',
     avatar: '/agents/owl',
     persona: '🦉 视野广 · 24h 不睡 · 全网搜证据',
     capabilities: ['web_search'],
@@ -40,8 +40,8 @@ export const AGENTS: readonly AgentDescriptor[] = [
   },
   {
     id: 'writer',
-    name: '撰稿员',
-    role: '撰稿员',
+    name: '撰写员',
+    role: '撰写员',
     avatar: '/agents/raccoon',
     persona: '🦝 灵巧 · 文笔老练 · 句句有据',
     capabilities: ['narrative_write'],

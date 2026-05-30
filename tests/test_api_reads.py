@@ -3,7 +3,8 @@ from fastapi.testclient import TestClient
 
 from rivalradar.api.app import create_app
 from rivalradar.schema.models import (
-    CompetitorAnalysis, CompetitorProfile, Evidence, PricingModel, SWOT,
+    CompetitorAnalysis, CompetitorProfile, Decision, DecisionSet, Evidence,
+    EvidenceRef, PricingModel, QCIssue, QCResult, ReportInsight, SWOT,
 )
 from rivalradar.storage import repository as repo
 from rivalradar.storage.db import connect, init_db
@@ -34,6 +35,17 @@ def seeded(db_path):
                       output_summary="+1", latency_ms=12)
     repo.append_trace(c, "r1", "analyze", input_summary="1 evidence",
                       output_summary="1 profiles", latency_ms=34)
+    # full-C 决策管道产物(Epic 2.4):qc_result(含模型文本 detail)/ insight / decisions
+    repo.save_qc_result(c, "r1", QCResult(verdict="pass", issues=[QCIssue(
+        competitor="Notion", dimension="decision", problem_type="hallucination",
+        detail="模型原话敏感片段 LEAK_xyz")]))
+    repo.save_insight(c, "r1", ReportInsight(
+        market_context="协同办公赛道", differentiation_thesis="因为X所以Y",
+        actionable_takeaway="短/中/长"))
+    repo.save_decisions(c, "r1", DecisionSet(decisions=[Decision(
+        stance="建议采用", action="本周评估接入", horizon="短期",
+        risk_reversibility="可逆", risk_cost="低", why="生态成熟",
+        evidence_refs=[EvidenceRef(evidence_id="ev1", quote="q")])]))
     c.close()
 
 
@@ -93,3 +105,54 @@ def test_get_trace_empty_list_for_unknown_run(client):
     r = client.get("/trace/no_run")
     assert r.status_code == 200
     assert r.json() == []
+
+
+# ── full-C 决策管道只读端点(Epic 2.4)──────────────────────────────────────
+def test_get_qc_sanitized_strips_model_text(client):
+    r = client.get("/qc/r1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["verdict"] == "pass"
+    issue = body["issues"][0]
+    assert issue["competitor"] == "Notion" and issue["problem_type"] == "hallucination"
+    assert "LEAK_xyz" not in issue["detail"]          # 关键:模型文本不泄漏(Codex #9)
+    assert issue["detail"] == "证据未能支撑该结论"     # 罐装文案
+
+
+def test_get_qc_404_when_missing(client):
+    assert client.get("/qc/no_run").status_code == 404
+
+
+def test_get_insight_returns_three_sections(client):
+    r = client.get("/insight/r1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["market_context"] == "协同办公赛道"
+    assert body["differentiation_thesis"] == "因为X所以Y"
+
+
+def test_get_insight_404_when_missing(client):
+    assert client.get("/insight/no_run").status_code == 404
+
+
+def test_get_decisions_returns_decision_set(client):
+    r = client.get("/decisions/r1")
+    assert r.status_code == 200
+    body = r.json()
+    assert body["decisions"][0]["action"] == "本周评估接入"
+    assert body["decisions"][0]["stance"] == "建议采用"
+
+
+def test_get_decisions_404_when_missing(client):
+    assert client.get("/decisions/no_run").status_code == 404
+
+
+def test_list_run_evidence_returns_list(client):
+    r = client.get("/runs/r1/evidence")
+    assert r.status_code == 200
+    items = r.json()
+    assert len(items) == 1 and items[0]["id"] == "ev1"
+
+
+def test_list_run_evidence_404_for_unknown_run(client):
+    assert client.get("/runs/no_run/evidence").status_code == 404

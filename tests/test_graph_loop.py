@@ -6,7 +6,7 @@ from rivalradar.agents import qc
 from rivalradar.graph.build import run_research
 from rivalradar.schema.models import (
     CONTROLLED_DIMENSIONS, CompetitorAnalysis, CompetitorProfile, PricingModel,
-    SWOT, ComparisonRow, ComparisonCell, EvidenceRef,
+    SWOT, ComparisonRow, ComparisonCell, EvidenceRef, QCIssue, ReportInsight,
 )
 from rivalradar.search.base import SearchResult
 from rivalradar.storage import repository as repo
@@ -35,7 +35,8 @@ class _ImprovingProvider:
 
 
 class _StuckProvider:
-    """broaden 也补不到(模拟源头本就无该数据)→ 必然耗尽 → insufficient_evidence。"""
+    """只有 pricing 能采到、其余维度 broaden 也补不到 → 策展人模型:pricing 矩阵非空 →
+    done(部分覆盖,缺维度显「—」),不再因缺 5 维盖 insufficient 章(真 run 暴露的修复)。"""
     name = "stuck"
 
     def search(self, query, *, max_results=5):
@@ -45,7 +46,25 @@ class _StuckProvider:
         return []
 
 
-def _fake_analyze(evidence, competitors, *, client, model):
+class _DeadProvider:
+    """任何 query 都采不到 → 策展后矩阵全空 + 无决策 → 真·insufficient_evidence。"""
+    name = "dead"
+
+    def search(self, query, *, max_results=5):
+        return []
+
+
+class _CoversAllProvider:
+    """任何 query 都采到 → 所有请求维度首遍即有证据(用于"重试空转"修复的集成证明:
+    维度有证据、只是 cell 被策展丢掉时,不该再打回重采)。"""
+    name = "covers"
+
+    def search(self, query, *, max_results=5):
+        url = "https://fake.example/" + hashlib.sha1(query.encode()).hexdigest()[:10]
+        return [SearchResult(url=url, title="t", content="s", raw_content="body for " + query)]
+
+
+def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
     """按证据已覆盖的维度产出分析:覆盖 dims_present 的对比行,引用真实证据 id。
     pricing profile 挂合法引用 → 确定性 traceability 过;无 features/personas/swot(空,不被遍历)。"""
     dims_present = {e.dimension for e in evidence}
@@ -71,9 +90,14 @@ def _fake_analyze(evidence, competitors, *, client, model):
 
 @pytest.fixture(autouse=True)
 def _stub_agents(monkeypatch):
-    # 假 analyze / 假 write(报告内容与闭环断言无关)/ 假蕴含(返回无问题)
+    # 假 analyze / 假 write(报告内容与闭环断言无关,返 (md, insight))/ 假蕴含(返回无问题)。
+    # decide 节点用真 generate_decisions:client=None → 优雅降级(空决策),不影响闭环断言。
     monkeypatch.setattr("rivalradar.graph.nodes.analyze", _fake_analyze)
-    monkeypatch.setattr("rivalradar.graph.nodes.write_report", lambda *a, **k: "# 竞品分析报告\n正文")
+    monkeypatch.setattr(
+        "rivalradar.graph.nodes.write_report_with_insight",
+        lambda *a, **k: ("# 竞品分析报告\n正文",
+                         ReportInsight(market_context="m", differentiation_thesis="d",
+                                       actionable_takeaway="a")))
     monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
 
 
@@ -103,15 +127,52 @@ def test_real_feedback_loop_improves_to_pass(conn):
     assert final["status"] == "done"
 
 
-def test_bounded_retry_exhausts_to_insufficient(conn):
+def test_bounded_retry_partial_coverage_becomes_done(conn):
+    """策展人模型(真 run 暴露的修复):只有 pricing 能采到、其余 5 维补不到 → 有界重试
+    耗尽,但 pricing 矩阵非空 → done(缺维度显「—」+ 轻量覆盖说明),绝不盖数据不足章。"""
     run_id, final = run_research(
         ["Notion"], list(CONTROLLED_DIMENSIONS),
         conn=conn, client=None, model="m", provider=_StuckProvider(),
         as_of="2026-05-26", max_retries=2)
 
-    # 补不到缺口 → 有界重试耗尽 → 一等结论 insufficient_evidence + 诚实 banner
+    assert final["status"] == "done"                      # 有 pricing 产出 → done
+    assert final["qc_result"]["verdict"] == "pass"        # 可交付
+    assert "覆盖说明" in final["report"]                  # 轻量诚实说明
+    assert "数据不足" not in final["report"]
+    assert final["retry_count"] == 2                      # 仍跑满有界重试(broaden 环不变)
+
+
+def test_bounded_retry_truly_empty_becomes_insufficient(conn):
+    """真·空手(任何维度都采不到)→ 策展后矩阵全空 + 无决策 → insufficient_evidence + 诚实 banner。"""
+    run_id, final = run_research(
+        ["Notion"], list(CONTROLLED_DIMENSIONS),
+        conn=conn, client=None, model="m", provider=_DeadProvider(),
+        as_of="2026-05-26", max_retries=2)
+
     assert final["qc_result"]["verdict"] == "insufficient_evidence"
     assert final["status"] == "insufficient_evidence"
     assert "未找到公开数据" in final["report"]
-    # retry_count 封顶 = max_retries(没有无限循环)
-    assert final["retry_count"] == 2
+    assert final["retry_count"] == 2                      # retry_count 封顶,无限循环防护
+
+
+def test_curated_out_dim_with_evidence_does_not_retry(conn, monkeypatch):
+    """重试空转修复(真 run 暴露)集成证明:某维度**采到了证据**但 cell 被策展判不支撑丢掉 →
+    check_coverage 见有证据不报 low_coverage → 不打回重采 → **首轮即 done**(缺格显「—」)。
+    旧逻辑会因缺 cell 报 low_coverage → retry_collect 耗尽(2 次重采、3 轮空转,~2 轮真 run
+    wall-clock 纯亏)。本测试在旧代码上必失败(collects==3 / retry_count==2),钉死修复。"""
+    # 蕴含判定丢掉 Notion/core_workflows 这个 cell(模拟"采到了但结论站不住"):
+    def _drop_core(analysis, evidence, **kwargs):
+        return [QCIssue(competitor="Notion", dimension="core_workflows",
+                        problem_type="hallucination", detail="证据不支撑")]
+    monkeypatch.setattr(qc, "check_entailment", _drop_core)
+
+    run_id, final = run_research(
+        ["Notion"], ["pricing", "core_workflows"],
+        conn=conn, client=None, model="m", provider=_CoversAllProvider(),
+        as_of="2026-05-26", max_retries=2)
+
+    collects = [t for t in repo.list_trace(conn, run_id) if t["node"] == "collect"]
+    assert len(collects) == 1                             # 不打回重采(核心断言:空转消除)
+    assert final["retry_count"] == 0                      # 首轮即收敛
+    assert final["status"] == "done"                      # pricing 有据产出 → done
+    assert final["qc_result"]["verdict"] == "pass"        # core_workflows 显「—」不算欠采

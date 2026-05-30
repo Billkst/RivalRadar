@@ -1,10 +1,18 @@
 from __future__ import annotations
 
-from pydantic import BaseModel
-
 from rivalradar.llm.structured import structured_call
 from rivalradar.schema.feature_tree import assemble_tree
-from rivalradar.schema.models import CompetitorAnalysis, CompetitorProfile, ComparisonRow, EvidenceRef, Evidence, FeatureItem
+from rivalradar.schema.models import (
+    CompetitorAnalysis, CompetitorProfile, ComparisonRow, DecisionSet,
+    EvidenceRef, Evidence, FeatureItem, ReportInsight,
+)
+
+# 套话黑名单(反"持续关注/深入研究"型空话)— writer v2 negative-example 纪律的
+# 单一真源,generate_decisions prompt 约束 + Epic 2.5 platitude 机械门复用。
+PLATITUDE_TERMS: tuple[str, ...] = (
+    "持续关注", "深入研究", "保持观察", "密切关注", "进一步了解",
+    "拭目以待", "静观其变", "有待观察", "值得关注",
+)
 
 
 def _fmt_refs(refs: list[EvidenceRef]) -> str:
@@ -132,17 +140,6 @@ def render_body(analysis: CompetitorAnalysis, evidence: list[Evidence], *, as_of
     return "\n\n".join(parts)
 
 
-class ReportInsight(BaseModel):
-    """3 段执行洞察(rubric v1 #1/#7/#9 补强 — 市场锚定 + 战略推论 + 时间分层 actionable)。
-
-    body 仍 deterministic + 引用完整,insight 是 LLM 综合 strategic synthesis
-    显式标"AI 基于正文综合",评委可清楚分辨"哪些是 fact extract 哪些是判断"。
-    """
-    market_context: str        # 1-2 句赛道格局 + 玩家定位(rubric #1 市场锚定)
-    differentiation_thesis: str  # 2-3 句战略路径分歧 reasoning chain(rubric #7 战略推论)
-    actionable_takeaway: str    # 3 句 短/中/长期 PT actionable(rubric #9 时间分层)
-
-
 def generate_insight(body: str, *, client, model) -> ReportInsight:
     """LLM 综合 3 段执行洞察(替代旧 generate_summary 单段事实概括)。
 
@@ -185,23 +182,79 @@ deterministically 渲染好的竞品分析正文(含数据 + 引用 + SWOT + 跨
     return structured_call(ReportInsight, msgs, client=client, model=model)
 
 
-def write_report(analysis: CompetitorAnalysis, evidence: list[Evidence], *,
-                 as_of: str, client, model) -> str:
-    """撰写 Agent 入口(混合):LLM 3 段执行洞察 + 确定性正文(所有引用在正文)。
+def generate_decisions(
+    body: str, decision_context: str | None, *, client, model
+) -> DecisionSet:
+    """LLM 基于正文 + 用户决策处境产出结构化决策建议(full-C / Epic 2.2)。
+
+    设计不变量:
+    - **不碰 generate_insight**(24/30 baseline 守护)。决策是 additive 结构化输出,
+      与 3 段执行洞察各走各的 LLM 调用。
+    - 每条决策必须挂 evidence_refs,evidence_id 取自正文「来源」清单(QC 校验溯源)。
+    - 反套话:action / why 严禁 PLATITUDE_TERMS 型空话(命令式动作 > hedge 语言)。
+    - **通用浏览 / 无处境(D8):** 收敛为中性「市场观察」语气 —— action 写成观察性
+      判断而非命令式动作,并在 why 里点明"这是未设处境的通用判断"。
+    - `持续观察` 必须带完整 watch{metric,threshold,trigger}(schema 强制,缺则
+      structured_call 校验失败重试)。
+    """
+    ctx = (decision_context or "").strip()
+    if ctx:
+        situation = (
+            f"用户的决策处境:{ctx}\n"
+            "请针对该处境给出**命令式、可执行**的行动建议(action 是具体动作,"
+            "不是「评估」「考虑」类 hedge)。"
+        )
+    else:
+        situation = (
+            "用户未设定具体决策处境(通用浏览)。请把全部建议收敛为中性的"
+            "「市场观察」语气:stance 多用 持续观察 / 需要警惕;action 写成观察性"
+            "判断而非命令式动作;每条 why 里点明「你未设定处境,以下为通用判断」。"
+        )
+    banned = "、".join(PLATITUDE_TERMS)
+    prompt = f"""你是企业产品决策顾问。下方是一份已 deterministically 渲染好的竞品分析正文
+(含逐竞品 Profile + 跨竞品对比 + SWOT + 「来源」清单,每条事实挂 [evidence_id] 引用)。
+
+{situation}
+
+请基于正文事实,通过 emit_result 工具产出 3-5 条决策建议(DecisionSet)。每条决策:
+- stance:建议采用 / 需要警惕 / 持续观察(自解释立场)。
+- action:一句话动作。命令式处境下是具体动作;通用浏览下是观察性判断。
+- horizon:短期 / 中期 / 长期。
+- risk_reversibility(可逆 / 不可逆)+ risk_cost(低 / 中 / 高):决策**后果**,
+  与证据支持度无关。
+- why:为什么这么判断(基于正文 SWOT + 对比 + 画像综合推论,严禁引入正文没有的事实)。
+- evidence_refs:**每条决策至少挂 1 条**,evidence_id **必须取自正文「来源」清单里
+  出现过的 id**;quote 摘自该证据。
+- watch:**仅当 stance=持续观察 时必填**,给出 metric(盯什么指标)+ threshold(阈值)
+  + trigger(越线做什么);其余 stance 留空。
+
+硬约束:**严禁出现「{banned}」这类空话**;每条 action 必须 actionable 或 observable。
+
+正文:
+{body}"""
+    msgs = [{"role": "user", "content": prompt}]
+    return structured_call(DecisionSet, msgs, client=client, model=model)
+
+
+def write_report_with_insight(
+    analysis: CompetitorAnalysis, evidence: list[Evidence], *,
+    as_of: str, client, model,
+) -> tuple[str, ReportInsight]:
+    """撰写 Agent 入口(混合):LLM 3 段执行洞察 + 确定性正文 → (markdown, ReportInsight)。
+
+    Epic 2.4:同时返回结构化 insight 供持久化(GET /insight/:run → cockpit 顶部语境),
+    避免 insight 拍平进 markdown 后丢弃(旧 write_report 的行为)。
 
     报告结构(post-rubric-v1 重构):
       # 竞品分析报告
-      ## 执行洞察(AI 基于下方正文综合)     ← NEW:3 段战略综合
-        ### 市场格局
-        ### 战略路径分歧
-        ### 给企业产品团队的 takeaway(短/中/长期)
+      ## 执行洞察(AI 基于下方正文综合)     ← 3 段战略综合
+        ### 市场格局 / ### 战略路径分歧 / ### 给企业产品团队的 takeaway
       ## 飞书 / 钉钉 / ... (deterministic body)  ← 完整引用挂段内
-      ## 跨竞品对比 (deterministic table)
-      ## 来源 (61+ URLs with as_of)
+      ## 跨竞品对比 (deterministic table) / ## 来源 (URLs with as_of)
     """
     body = render_body(analysis, evidence, as_of=as_of)
     insight = generate_insight(body, client=client, model=model)
-    return (
+    markdown = (
         "# 竞品分析报告\n\n"
         "## 执行洞察(AI 基于下方正文综合)\n\n"
         "### 市场格局\n\n"
@@ -212,3 +265,11 @@ def write_report(analysis: CompetitorAnalysis, evidence: list[Evidence], *,
         f"{insight.actionable_takeaway}\n\n"
         f"{body}"
     )
+    return markdown, insight
+
+
+def write_report(analysis: CompetitorAnalysis, evidence: list[Evidence], *,
+                 as_of: str, client, model) -> str:
+    """向后兼容 str wrapper(只要 markdown 的调用方 / 现有测试)。"""
+    return write_report_with_insight(
+        analysis, evidence, as_of=as_of, client=client, model=model)[0]

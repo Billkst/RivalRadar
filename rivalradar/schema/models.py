@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field
+from pydantic import BaseModel, Field, model_validator
 
 Language = Literal["zh", "en"]
 SupportVerdict = Literal["supported", "partial", "unsupported"]
@@ -128,3 +128,81 @@ class QCIssue(BaseModel):
 class QCResult(BaseModel):
     verdict: QCVerdict
     issues: list[QCIssue] = Field(default_factory=list)
+
+
+# ── Decision pipeline(full-C / D7 全扩展,Epic 2.1)─────────────────────────
+# 术语锁定:stance 自解释标签,取代旧稿 下注/防守/观察。backend enum、frontend
+# TS mirror、UI 用同一字面值,不加中间映射层(design-review 设计系统对齐 critical)。
+Stance = Literal["建议采用", "需要警惕", "持续观察"]
+Horizon = Literal["短期", "中期", "长期"]
+Reversibility = Literal["可逆", "不可逆"]
+RiskCost = Literal["低", "中", "高"]
+
+
+class Watch(BaseModel):
+    """`持续观察` 决策的监控触发器:盯什么指标、阈值多少、越线做什么。
+
+    存在意义 = 反套话:一条没有可监控指标的"持续观察"就是"保持关注"型空话,
+    schema 层强制三字段齐备,缺则拒绝(见 Decision._watch_required_for_observe)。
+    """
+
+    metric: str
+    threshold: str
+    trigger: str
+
+
+class Decision(BaseModel):
+    """单条决策建议(D7 全扩展)。
+
+    - stance:自解释立场标签(建议采用/需要警惕/持续观察)。
+    - action:命令式动作句(告诉 PM 下一步具体做什么,不是"评估"类 hedge)。
+    - horizon:行动时间窗(短/中/长期)。
+    - risk_reversibility / risk_cost:决策**后果**(可逆性 / 成本)——与证据支持度
+      (EvidenceRef.support_verdict)是两个正交维度,勿混。
+    - why:为什么这么判断的 reasoning。
+    - evidence_refs:句级溯源(每条决策必须挂证据,QC 校验)。
+    - watch:仅 stance=持续观察 时 REQUIRED(否则 None);防套话强约束。
+    """
+
+    stance: Stance
+    action: str
+    horizon: Horizon
+    risk_reversibility: Reversibility
+    risk_cost: RiskCost
+    why: str
+    evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    watch: Optional[Watch] = None
+
+    @model_validator(mode="after")
+    def _watch_required_for_observe(self) -> "Decision":
+        if self.stance == "持续观察":
+            w = self.watch
+            if w is None or not (w.metric.strip() and w.threshold.strip() and w.trigger.strip()):
+                raise ValueError(
+                    "stance=持续观察 必须提供完整 watch{metric, threshold, trigger}"
+                )
+        return self
+
+
+class DecisionSet(BaseModel):
+    """决策集合 —— LLM function-calling 产出的顶层对象(structured_call 需 BaseModel,
+    list[Decision] 不是 BaseModel 无法作 tool parameters)。
+
+    max_length=8:与 generate_decisions prompt「3-5 条」对齐的硬上限 —— 在 schema 源头
+    封顶决策数,防 LLM 失控吐 N 条把 decide 节点的蕴含调用预算撑爆(cost guard 第一道闸,
+    adversarial review M3)。"""
+
+    decisions: list[Decision] = Field(default_factory=list, max_length=8)
+
+
+class ReportInsight(BaseModel):
+    """3 段执行洞察(rubric v1 #1/#7/#9 补强 — 市场锚定 + 战略推论 + 时间分层 actionable)。
+
+    body 仍 deterministic + 引用完整,insight 是 LLM 综合 strategic synthesis,显式标
+    "AI 基于正文综合",评委可清楚分辨 fact extract vs 判断。结构化形态持久化(Epic 2.4
+    GET /insight/:run)供 cockpit 顶部一句话语境用(market_context/differentiation_thesis)。
+    """
+
+    market_context: str        # 1-2 句赛道格局 + 玩家定位(rubric #1 市场锚定)
+    differentiation_thesis: str  # 2-3 句战略路径分歧 reasoning chain(rubric #7 战略推论)
+    actionable_takeaway: str    # 3 句 短/中/长期 PT actionable(rubric #9 时间分层)

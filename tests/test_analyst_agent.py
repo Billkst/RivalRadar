@@ -1,12 +1,144 @@
 import json
+import threading
 from types import SimpleNamespace
 
 from rivalradar.agents.analyst import (
     evidence_for, FeatureExtraction, PersonaExtraction, ComparisonExtraction,
     extract_features, extract_pricing, build_evidence_block,
-    analyze_competitor, build_comparison, analyze,
+    analyze_competitor, build_comparison, analyze, _safe_extract,
 )
+from rivalradar.llm.structured import StructuredCallError
 from rivalradar.schema.models import Evidence, FeatureItem, PricingModel, SWOT, CompetitorAnalysis, CompetitorProfile
+
+
+def test_safe_extract_degrades_on_structured_call_error():
+    # 真 run 钓出:单项抽取 LLM 截断 → StructuredCallError 不该杀死整个 run
+    def boom():
+        raise StructuredCallError("Unterminated string ...")
+    assert _safe_extract("features", "钉钉", boom, []) == []
+    assert _safe_extract("pricing", "钉钉", boom, PricingModel(model_type="未知")).model_type == "未知"
+
+
+def test_safe_extract_passes_through_on_success():
+    assert _safe_extract("features", "Notion", lambda: ["ok"], []) == ["ok"]
+
+
+def test_safe_extract_records_degrade_into_sink():
+    # silent-failure 修复:降级必可见 —— label 记入 sink 供 analyze_node 置 run 级 degraded
+    def boom():
+        raise StructuredCallError("truncated")
+    sink: list[str] = []
+    _safe_extract("features", "钉钉", boom, [], sink=sink)
+    assert sink == ["钉钉.features"]
+    # 成功路径不污染 sink
+    _safe_extract("pricing", "钉钉", lambda: PricingModel(model_type="x"), None, sink=sink)
+    assert sink == ["钉钉.features"]
+
+
+def test_analyze_threads_degraded_sink_on_extraction_failure(monkeypatch):
+    # analyze() 把单竞品抽取降级汇聚进 degraded_sink(端到端:analyze_node 据此置 degraded)
+    import rivalradar.agents.analyst as an
+    monkeypatch.setattr(an, "extract_features",
+                        lambda *a, **k: (_ for _ in ()).throw(StructuredCallError("boom")))
+    monkeypatch.setattr(an, "extract_pricing", lambda *a, **k: PricingModel(model_type="x"))
+    monkeypatch.setattr(an, "extract_personas", lambda *a, **k: [])
+    monkeypatch.setattr(an, "extract_swot", lambda *a, **k: SWOT())
+    monkeypatch.setattr(an, "build_comparison", lambda *a, **k: [])
+    sink: list[str] = []
+    ev = [Evidence(id="e1", competitor="Notion", dimension="core_workflows", content="c",
+                   source_url="u", source_title="t", language="en", fetched_at="t0")]
+    an.analyze(ev, ["Notion"], degraded_sink=sink, client=None, model="m")
+    assert "Notion.features" in sink
+
+
+def test_safe_extract_degrades_on_any_exception_not_just_structured(monkeypatch):
+    # ship outside-voice C2:_safe_extract 兜**任何**异常(不只 StructuredCallError),
+    # 单项抽取任何失败都降级该项,绝不让一个竞品一项抽取拖垮整轮(并行后还丢兄弟结果)。
+    def boom_value():
+        raise ValueError("pydantic 构造炸了")  # 非 StructuredCallError
+    sink: list[str] = []
+    out = _safe_extract("pricing", "钉钉", boom_value, PricingModel(model_type="未知"), sink=sink)
+    assert out.model_type == "未知"          # 降级返默认,不上抛
+    assert sink == ["钉钉.pricing"]           # 仍记入 sink(可见)
+
+
+def test_analyze_real_nested_pools_run_concurrently():
+    # M1:真跑嵌套线程池拓扑(不 monkeypatch extract_*),用记录线程 id 的 fake client 证明
+    # 抽取确实并发(>1 线程)、且 client 被多线程并发命中。锁住"client 线程安全 + 双层池"契约,
+    # 防未来换非线程安全 client 或退化成串行时静默回归。
+    import threading
+    import rivalradar.agents.analyst as an
+
+    class _ThreadRecordingClient:
+        def __init__(self):
+            self.thread_ids: set[int] = set()
+            self._lock = threading.Lock()
+            self._barrier = threading.Barrier(2, timeout=5)  # 要求至少 2 抽取真并发
+        def _emit(self, title):
+            with self._lock:
+                self.thread_ids.add(threading.get_ident())
+            payloads = _profile_payload_map()
+            payloads["ComparisonExtraction"] = json.dumps({"rows": []})
+            return payloads[title]
+        @property
+        def chat(self):
+            outer = self
+            class _C:
+                class completions:
+                    @staticmethod
+                    def create(**kwargs):
+                        title = kwargs["tools"][0]["function"]["parameters"].get("title")
+                        # 4 项 profile 抽取里,先到的两个在 barrier 上汇合 → 证明真并发
+                        if title in ("FeatureExtraction", "PricingModel"):
+                            try:
+                                outer._barrier.wait()
+                            except threading.BrokenBarrierError:
+                                pass
+                        p = outer._emit(title)
+                        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                            tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=p))]))],
+                            usage=SimpleNamespace(total_tokens=10))
+            return _C()
+
+    client = _ThreadRecordingClient()
+    out = analyze([_ev("e1", "Notion", "core_workflows")], ["Notion"], client=client, model="m")
+    assert isinstance(out, CompetitorAnalysis)
+    # barrier(2) 能通过即证明 features/pricing 两项抽取真并发(否则串行会 timeout BrokenBarrier);
+    # 至少 2 个不同线程命中 client。
+    assert len(client.thread_ids) >= 2, f"抽取未并发,thread_ids={client.thread_ids}"
+
+
+def test_analyze_emits_per_extraction_and_comparison():
+    """增量进度:每竞品 4 抽取 + 1 对比 = 5 次 on_progress(analyze ~174s 最长静默段 →
+    竞品·维度逐项亮起)。on_progress 在 worker 线程并发调,用锁汇聚不丢。"""
+    class _PayloadClient:
+        @property
+        def chat(self):
+            class _C:
+                class completions:
+                    @staticmethod
+                    def create(**kwargs):
+                        title = kwargs["tools"][0]["function"]["parameters"].get("title")
+                        payloads = _profile_payload_map()
+                        payloads["ComparisonExtraction"] = json.dumps({"rows": []})
+                        return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                            tool_calls=[SimpleNamespace(function=SimpleNamespace(
+                                arguments=payloads[title]))]))],
+                            usage=SimpleNamespace(total_tokens=10))
+            return _C()
+
+    calls = []
+    lock = threading.Lock()
+
+    def rec(detail):
+        with lock:
+            calls.append(detail)
+
+    analyze([_ev("e1", "Notion", "core_workflows")], ["Notion"],
+            on_progress=rec, client=_PayloadClient(), model="m")
+    assert len(calls) == 5  # 1 竞品 × 4 抽取 + 1 对比
+    assert any("对比" in c for c in calls)            # 对比那次报了
+    assert sum("Notion" in c for c in calls) == 4     # 4 项抽取都带竞品名
 
 
 def _ev(eid, competitor, dimension):
@@ -34,11 +166,34 @@ def test_wrapper_models_hold_lists():
 
 
 class _Completions:
+    """支持两种喂法:
+    - list:按调用顺序取(单次调用的小测试,顺序无关)。
+    - dict {schema_title: payload | [payloads]}:按请求的 schema title 派发,与
+      调用顺序解耦。analyze 并行化后抽取顺序不确定,顺序索引会拿错 payload,
+      故多调用的 analyze 测试用 dict 模式。计数加锁,使并发下 calls 断言稳定。
+    """
     def __init__(self, payloads):
-        self.payloads = list(payloads); self.calls = 0; self.last_kwargs = None
+        self._dict_mode = isinstance(payloads, dict)
+        if self._dict_mode:
+            self._map = {k: (list(v) if isinstance(v, list) else [v])
+                         for k, v in payloads.items()}
+        else:
+            self.payloads = list(payloads)
+        self.calls = 0
+        self.last_kwargs = None
+        self._lock = threading.Lock()
+
     def create(self, **kwargs):
-        self.last_kwargs = kwargs
-        p = self.payloads[self.calls]; self.calls += 1
+        with self._lock:
+            self.last_kwargs = kwargs
+            idx = self.calls
+            self.calls += 1
+            if self._dict_mode:
+                title = kwargs["tools"][0]["function"]["parameters"].get("title")
+                queue = self._map[title]
+                p = queue.pop(0) if len(queue) > 1 else queue[0]
+            else:
+                p = self.payloads[idx]
         return SimpleNamespace(
             choices=[SimpleNamespace(message=SimpleNamespace(
                 tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=p))]))],
@@ -75,18 +230,19 @@ def test_extract_pricing_returns_pricing_model():
     assert isinstance(pricing, PricingModel) and pricing.model_type == "freemium"
 
 
-def _profile_payloads():
-    # 顺序:features, pricing, personas, swot
-    return [
-        json.dumps({"items": [{"id": "f1", "name": "db", "description": "", "category": "core_workflows", "evidence_refs": []}]}),
-        json.dumps({"model_type": "freemium", "tiers": [], "evidence_refs": []}),
-        json.dumps({"personas": []}),
-        json.dumps({"strengths": [], "weaknesses": [], "opportunities": [], "threats": []}),
-    ]
+def _profile_payload_map():
+    # 按 schema title 派发(与调用顺序解耦):features/pricing/personas/swot 各一份。
+    # analyze 并行化后抽取顺序不确定,顺序索引会错位,故用 title→payload 映射。
+    return {
+        "FeatureExtraction": json.dumps({"items": [{"id": "f1", "name": "db", "description": "", "category": "core_workflows", "evidence_refs": []}]}),
+        "PricingModel": json.dumps({"model_type": "freemium", "tiers": [], "evidence_refs": []}),
+        "PersonaExtraction": json.dumps({"personas": []}),
+        "SWOT": json.dumps({"strengths": [], "weaknesses": [], "opportunities": [], "threats": []}),
+    }
 
 
 def test_analyze_competitor_assembles_profile():
-    client = _FakeClient(_profile_payloads())
+    client = _FakeClient(_profile_payload_map())
     prof = analyze_competitor([_ev("e1", "Notion", "core_workflows")], "Notion", client=client, model="m")
     assert isinstance(prof, CompetitorProfile)
     assert prof.name == "Notion" and prof.features[0].name == "db"
@@ -105,19 +261,35 @@ def test_build_comparison_returns_rows():
 
 def test_analyze_end_to_end_with_fake_client():
     # 1 竞品:4 次抽取 + 1 次对比 = 5 次调用
-    payloads = _profile_payloads() + [json.dumps({"rows": []})]
-    client = _FakeClient(payloads)
+    client = _FakeClient({**_profile_payload_map(), "ComparisonExtraction": json.dumps({"rows": []})})
     out = analyze([_ev("e1", "Notion", "core_workflows")], ["Notion"], client=client, model="m")
     assert isinstance(out, CompetitorAnalysis)
     assert out.competitors[0].name == "Notion"
     assert client.chat.completions.calls == 5
 
 
+def test_analyze_threads_requested_dimensions_into_comparison(monkeypatch):
+    """真 run 回归:analyze 把请求的 dimensions 穿进 build_comparison(约束对比范围),
+    不再硬编码全 6 受控本体(否则分析员超范围产出 → 越界 hallucination + 质检覆盖死循环)。"""
+    captured = {}
+
+    def spy(profiles, evidence, *, dimensions, on_progress=None, client, model):
+        captured["dims"] = dimensions
+        return []
+
+    import rivalradar.agents.analyst as analyst_mod
+    monkeypatch.setattr(analyst_mod, "build_comparison", spy)
+    analyze([_ev("e1", "Notion", "pricing")], ["Notion"],
+            dimensions=("pricing", "core_workflows"), client=_FakeClient(_profile_payload_map()), model="m")
+    assert captured["dims"] == ("pricing", "core_workflows")
+
+
 def test_analyze_two_competitors_aggregates_and_compares():
     # 2 竞品:每个 4 次抽取 + 1 次对比 = 9 次调用;对比 rows 真流入结果
     comparison = json.dumps({"rows": [{"dimension": "pricing", "cells": [
         {"competitor": "Notion", "value_type": "enum", "value": "freemium", "evidence_refs": []}]}]})
-    client = _FakeClient(_profile_payloads() + _profile_payloads() + [comparison])
+    # 2 竞品复用同一份 profile payload map(queue 长度 1 → 每次返回同份);对比一份。
+    client = _FakeClient({**_profile_payload_map(), "ComparisonExtraction": comparison})
     out = analyze([_ev("e1", "Notion", "core_workflows"), _ev("e2", "飞书", "pricing")],
                   ["Notion", "飞书"], client=client, model="m")
     assert [c.name for c in out.competitors] == ["Notion", "飞书"]

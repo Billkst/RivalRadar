@@ -48,6 +48,21 @@ def test_summarize_finalize_returns_status():
     assert s == {"node": "finalize", "status": "done", "verdict": "pass"}
 
 
+def test_summarize_decide_returns_decision_count_and_degraded():
+    """full-C(Epic 2):decide 节点摘要给前端 cockpit DecisionBoard 决策数 + 降级态。
+    delta.decisions 是 DecisionSet.model_dump() = {'decisions': [...]},需取内层 list 长度。"""
+    s = _summarize_delta("decide", {
+        "decisions": {"decisions": [{"action": "a"}, {"action": "b"}]},
+        "decision_degraded": True,
+    })
+    assert s == {"node": "decide", "decisions": 2, "decision_degraded": True}
+
+
+def test_summarize_decide_empty_decisions():
+    s = _summarize_delta("decide", {"decisions": {"decisions": []}, "decision_degraded": False})
+    assert s == {"node": "decide", "decisions": 0, "decision_degraded": False}
+
+
 class _StubGraph:
     """模拟 LangGraph 的 astream 行为:逐步 yield {node_name: delta}。"""
     def astream(self, _input, *, config, stream_mode):

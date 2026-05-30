@@ -19,14 +19,17 @@ interface EvidenceStore {
   cache: Map<string, Evidence>
   inflight: Map<string, Promise<Evidence>>
   getEvidence: (id: string) => Promise<Evidence>
+  /** 批量 seed(Epic 5.2:从 GET /runs/:id/evidence 一次性灌满,EvidencePill
+   *  hover/click 走 cache hit,不再 per-pill cold fetch → 消 N+1)。 */
+  seed: (list: Evidence[]) => void
   clear: () => void
 }
 
-function evict(cache: Map<string, Evidence>): Map<string, Evidence> {
-  if (cache.size <= MAX_ENTRIES) return cache
+function evict(cache: Map<string, Evidence>, cap: number = MAX_ENTRIES): Map<string, Evidence> {
+  if (cache.size <= cap) return cache
   const next = new Map(cache)
   // Drop oldest entries until at capacity. Map iteration is insertion-order.
-  while (next.size > MAX_ENTRIES) {
+  while (next.size > cap) {
     const oldestKey = next.keys().next().value
     if (oldestKey === undefined) break
     next.delete(oldestKey)
@@ -83,5 +86,30 @@ export const useEvidenceStore = create<EvidenceStore>((set, get) => ({
     return promise
   },
 
+  seed: (list) =>
+    set((state) => {
+      const cache = new Map(state.cache)
+      // 后 seed 的移到末尾(LRU 新)。
+      for (const ev of list) {
+        cache.delete(ev.id)
+        cache.set(ev.id, ev)
+      }
+      // seed = 本 run 全量证据,**绝不截断刚 seed 的整批**(真 run 钓出:>50 证据的
+      // run 被 MAX_ENTRIES=50 砍掉前半 → 决策/矩阵引用 useEvidence 返 null → "来源加载中…"
+      // 永不消解)。cap 至少容纳本次 seed;冷取(getEvidence)仍走 MAX_ENTRIES LRU。
+      // 跨 run:下个 run 的 seed 把上个 run 的旧条目挤出(本 run 始终全留)。
+      return { cache: evict(cache, Math.max(MAX_ENTRIES, list.length)) }
+    }),
+
   clear: () => set({ cache: new Map(), inflight: new Map() }),
 }))
+
+/**
+ * useEvidence — 从已 seed 的 cache 同步读单条证据(依据行 / pill popover / slide-over)。
+ *
+ * selector 返 cache.get(id)(Evidence 对象引用稳定:seed/LRU 复用同一对象)或稳定的
+ * null —— 引用稳定不触发 useSyncExternalStore 重渲染循环(memory: zustand selector
+ * 内任何新引用都会爆 Maximum update depth)。miss 时不冷取,调用方按 null 兜底。
+ */
+export const useEvidence = (id: string | null | undefined): Evidence | null =>
+  useEvidenceStore((s) => (id ? s.cache.get(id) ?? null : null))

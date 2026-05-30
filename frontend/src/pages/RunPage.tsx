@@ -6,32 +6,27 @@ import { dimensionLabel } from '@/lib/dimensions'
 import { DEMO_RUN_DETAIL, isDemoRun } from '@/lib/demoFixture'
 import { useSSE } from '@/hooks/useSSE'
 import { useRunStore } from '@/stores/runStore'
-import type { RunDetail } from '@/types/api'
+import { useCockpitStore } from '@/stores/cockpitStore'
+import { aggregateVerdicts } from '@/lib/verdict'
+import type { EvidenceRef, RunDetail } from '@/types/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { CancelButton } from '@/components/office/CancelButton'
-import { ViewSwitcher, type OfficeView } from '@/components/office/ViewSwitcher'
-import { VirtualOfficeView } from '@/components/office/VirtualOfficeView'
-import { DagDetailView } from '@/components/office/DagDetailView'
-import { LiveFeedPanel } from '@/components/office/LiveFeedPanel'
-import { ReportSheet } from '@/components/office/ReportSheet'
-import {
-  ComparisonMatrixRowPlaceholder,
-  CompetitorOverviewPlaceholder,
-  EvidenceSheetPlaceholder,
-} from '@/components/placeholders'
+import { CockpitLayout } from '@/components/cockpit/CockpitLayout'
+import { DecisionSurface } from '@/components/cockpit/DecisionSurface'
 
 /**
- * /run/:run_id — 单 run 详情页(plan v3.2 P0-3 双视图叙事 + Epic 5 集成)。
+ * /run/:run_id — 单 run 详情页(v0.4 证据驾驶舱,Epic 3)。
  *
- * 布局(DESIGN.md §虚拟办公室 layout):
+ * 布局(DESIGN.md §Layout Manus 分屏):
  *   顶部:返回按钮 + CancelButton(只 running 时显示)
  *   RunSummary 卡(中文维度 + storeStatus 优先)
- *   ViewSwitcher + 主画布(office 默认 / DAG 切换)+ 右侧 LiveFeedPanel
- *   Placeholders(Day-3+ Epic 6 实装 TeamRoster + ReportSheet)
+ *   CockpitLayout:顶 StatusBar + 左决策面(Epic 3 骨架,Epic 4 填)/ 右实时分析流程
+ *   (DAG / 虚拟办公室双视图 v0.4 退役 —— ViewSwitcher / VirtualOfficeView / DagDetailView /
+ *    LiveFeedPanel / ReportSheet 不再 import,作 dead code 留待清理,Vite tree-shake 出 bundle)
  *
  * SSE 接入策略(Task 5):
- *   - store 已 tracking 此 run_id 且 running/done → live 流在背后继续,不重启
+ *   - store 已 tracking 此 run_id 且非 idle → live 流在背后继续,不重启
  *   - 否则(deep-link / 刷新)→ 启动 replay (GET /stream/:id)
  */
 export function RunPage() {
@@ -42,7 +37,9 @@ export function RunPage() {
 
   const [run, setRun] = React.useState<RunDetail | null>(null)
   const [error, setError] = React.useState<string | null>(null)
-  const [view, setView] = React.useState<OfficeView>('office')
+  // StrictMode(dev)双调 effect + playFakeSSE 异步起播的竞态守卫:同步标记"已为此
+  // run_id 起播",防双播(证据计数翻倍)。genuine 重挂载(导航离开再回)→ 新 ref → 重播。
+  const demoFiredRef = React.useRef<string | null>(null)
 
   // Fetch RunSummary metadata (independent of SSE stream).
   // Demo path(Epic 7.1):isDemoRun 直接 set fixture,不打 backend。
@@ -73,7 +70,8 @@ export function RunPage() {
   React.useEffect(() => {
     if (!run_id) return
     if (isDemoRun(run_id)) {
-      if (storeRunId === run_id) return
+      if (storeRunId === run_id || demoFiredRef.current === run_id) return
+      demoFiredRef.current = run_id // 同步标记,先于异步 import,挡 StrictMode 第二次进入
       void import('@/dev/fakeSSEPlayer').then((m) =>
         m.playFakeSSE({ speed: 1.0, runId: run_id }),
       )
@@ -81,10 +79,34 @@ export function RunPage() {
     }
     const liveAlreadyHere = storeRunId === run_id && storeStatus !== 'idle'
     if (liveAlreadyHere) return
-    sse.start({ mode: 'replay', runId: run_id }).catch(() => {
-      // Swallow — replay failure is non-fatal; user still sees RunSummary above.
+    sse.start({ mode: 'replay', runId: run_id }).catch((err) => {
+      // replay 不通(run 过期/event log 被裁剪/backend 重启/Clash)—— 非致命但**不静默吞**:
+      // 左决策面已由 DecisionSurface 走 RunDetail.status 回退从 REST 取齐(Codex C-3),
+      // 这里记录便于排查;右执行流无 live 数据时显"正在连接分析流…"。
+      console.warn('SSE replay failed for', run_id, err)
     })
   }, [run_id, storeRunId, storeStatus, sse])
+
+  // StatusBar 决策派生指标(Epic 5):从 cockpitStore 读,防串 run(runId 不匹配显 "—")。
+  const cockpitRunId = useCockpitStore((s) => s.runId)
+  const decisions = useCockpitStore((s) => s.decisions)
+  const analysis = useCockpitStore((s) => s.analysis)
+  const cockpitLive = !!run_id && cockpitRunId === run_id
+  const decisionCount = cockpitLive && decisions ? decisions.decisions.length : undefined
+  const riskCount =
+    cockpitLive && decisions
+      ? decisions.decisions.filter(
+          (d) => d.stance === '需要警惕' || d.risk_reversibility === '不可逆',
+        ).length
+      : undefined
+  const verdictSummary = React.useMemo(() => {
+    if (!cockpitLive) return undefined
+    const refs: EvidenceRef[] = []
+    if (analysis) for (const row of analysis.comparison) for (const cell of row.cells) refs.push(...cell.evidence_refs)
+    if (decisions) for (const d of decisions.decisions) refs.push(...d.evidence_refs)
+    if (refs.length === 0) return undefined
+    return aggregateVerdicts(refs)
+  }, [cockpitLive, analysis, decisions])
 
   return (
     <div className="space-y-4">
@@ -142,66 +164,46 @@ export function RunPage() {
         </CardContent>
       </Card>
 
-      <div className="flex items-center justify-between">
-        <ViewSwitcher value={view} onChange={setView} />
-        <div className="flex items-center gap-3 text-[10px] text-text-muted">
-          {import.meta.env.DEV && (
-            <>
-              <span className="text-[10px] text-warning">🧪 fake SSE</span>
-              {[
-                { label: 'Fast', speed: 0.2, hint: '0.2x — 5s 全程,快速看动画' },
-                { label: 'Real', speed: 1.0, hint: '1.0x — 25s 真 LLM 节奏(与时间戳同步)' },
-                { label: 'Slow', speed: 2.0, hint: '2.0x — 50s 慢动作 spike 节奏' },
-              ].map((preset) => (
-                <button
-                  key={preset.label}
-                  type="button"
-                  onClick={() => {
-                    void import('@/dev/fakeSSEPlayer').then((m) =>
-                      m.playFakeSSE({ speed: preset.speed }),
-                    )
-                  }}
-                  className="rounded border border-dashed border-warning px-2 py-0.5 text-[10px] text-warning hover:bg-warning/10"
-                  title={preset.hint}
-                >
-                  {preset.label}
-                </button>
-              ))}
-            </>
-          )}
-          <span>
-            {view === 'office'
-              ? '看 4 个 agent 在你面前实时工作'
-              : 'agent 协作流程 + 节点详情 + 质检报告'}
-          </span>
+      {import.meta.env.DEV && (
+        <div className="flex items-center gap-2 text-[10px] text-text-muted">
+          <span className="text-warning">🧪 fake SSE</span>
+          {[
+            { label: 'Fast', speed: 0.2, hint: '0.2x — 5s 全程,快速看动画' },
+            { label: 'Real', speed: 1.0, hint: '1.0x — 25s 真 LLM 节奏' },
+            { label: 'Slow', speed: 2.0, hint: '2.0x — 50s 慢动作' },
+          ].map((preset) => (
+            <button
+              key={preset.label}
+              type="button"
+              onClick={() => {
+                void import('@/dev/fakeSSEPlayer').then((m) =>
+                  m.playFakeSSE({ speed: preset.speed }),
+                )
+              }}
+              className="rounded border border-dashed border-warning px-2 py-0.5 text-warning hover:bg-warning/10"
+              title={preset.hint}
+            >
+              {preset.label}
+            </button>
+          ))}
         </div>
-      </div>
+      )}
 
-      {/* 主画布 8 col + LiveFeedPanel 4 col */}
-      <div className="grid grid-cols-12 gap-4">
-        <div className="col-span-12 lg:col-span-8">
-          {view === 'office' ? (
-            <VirtualOfficeView />
-          ) : (
-            <DagDetailView runId={run_id ?? null} />
-          )}
-        </div>
-        <div className="col-span-12 lg:col-span-4">
-          <div className="h-[480px] lg:h-[540px]">
-            <LiveFeedPanel />
-          </div>
-        </div>
-      </div>
-
-      {/* ReportSheet — Epic 6.2 底部 drawer,默认 80px collapsed,展开 60vh */}
-      <ReportSheet />
-
-      {/* Vertical slice 占位(D6 Epic 6.3 EvidenceChip 简化 + 真 vertical slice) */}
-      <div className="grid grid-cols-1 gap-4 md:grid-cols-2">
-        <CompetitorOverviewPlaceholder />
-        <ComparisonMatrixRowPlaceholder />
-      </div>
-      <EvidenceSheetPlaceholder />
+      {/* 证据驾驶舱:StatusBar + 左决策面(Epic 4 实装)/ 右实时分析流程(重试环) */}
+      {run_id && (
+        <CockpitLayout
+          decisionCount={decisionCount}
+          riskCount={riskCount}
+          verdictSummary={verdictSummary}
+        >
+          <DecisionSurface
+            runId={run_id}
+            decisionContext={run?.decision_context}
+            runStatus={run?.status}
+            runDegraded={run?.degraded}
+          />
+        </CockpitLayout>
+      )}
     </div>
   )
 }
