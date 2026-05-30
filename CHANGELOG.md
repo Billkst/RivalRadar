@@ -4,6 +4,30 @@ All notable changes to RivalRadar are documented here per [Keep a Changelog](htt
 
 Versioning follows 4-digit semver `MAJOR.MINOR.PATCH.MICRO`(< 1.0 表 API 未稳定,迭代期允许 breaking changes)。
 
+## [0.4.0.0] - 2026-05-30
+
+**Evidence Cockpit — 从"报告生成器"跳到"决策基础设施"**。v0.4 把 RivalRadar 的输出范式从一份 markdown 报告,换成 Manus 式分屏驾驶舱:左决策面(有据决策流 + 对比矩阵 + 证据支持度三色)/ 右镜湖执行流(4 角色时间线 + 诚实自纠重试环)。配套把决策做成 LLM 产出 + QC 校验的一等公民(full-C),并把 QC 信任模型从"一票否决的法官"翻成"策展人"。真打真 run 双重验证 + ship-time 跨模型对抗评审。
+
+### Added
+
+- **Evidence Cockpit 驾驶舱**(`frontend/`)— `CockpitLayout` Manus 分屏(顶 StatusBar + 左决策面 / 右 `ExecutionStream`):4 角色时间线(采集员/分析员/撰写员/质检员/决策)+ **重试环青绿回环 SVG「↺ 第N轮·证据 X→Y」** money-shot;`DecisionBoard` 决策流 + 对比矩阵 + `EvidencePill` 三色支持度(supported/partial/unsupported,无虚构 confidence);DAG / 虚拟办公室双视图退役,cockpit 全宽。DESIGN.md v4 证据驾驶舱改写。
+- **full-C 决策管道**(`rivalradar/schema/models.py` + `agents/decision.py` + `graph/nodes.py`)— `Decision` schema(stance/action/horizon/risk/watch validator)+ `generate_decisions` LLM 产出(不碰 `generate_insight` 守 24/30 rubric)+ QC-on-decisions 校验 + `decide` 节点(图拓扑 qc→decide→finalize,优雅降级)。真 migration(`qc_result`/`insight`/`decisions` 表 + `decision_context` 列)。
+- **引导式 run setup**(`rivalradar/api/` + `frontend/`)— 种子竞品 → `discover-competitors` 自动发现 → 确认 chips → 决策处境卡片(把"我在为什么决策做调研"显式化)。
+- **9 个 REST 端点 sanitized serve**(`GET /qc`/`/insight`/`/decisions`/`/run/:id`/`/evidence` 等)— `/qc` detail 罐装化(绝不回吐模型原文/越界维度名/KEY)。
+- **eval 机械门**(`tests/test_evals.py`)— 可溯源 / 套话检测 / 结构锚 三类机械评分守 24/30 rubric。
+
+### Changed
+
+- **QC 信任模型:一票否决的法官 → 策展人**(`agents/qc.py` `curate_analysis`/`curate_decisions` + `graph/nodes.py`)— 站得住的(有据)留、站不住的(蕴含判无据)丢、缺的显「—」+ 轻量覆盖说明。防虚构硬门不变:策展后 `check_traceability(comparison_only=True)` 在 curated 输出上重跑,0 个无据结论 survive。覆盖度终态按 `_has_substantive_output` 判(有可交付产出→done,真空手才 insufficient/degraded)。
+- **analyze 并行化**(`agents/analyst.py`)— 双层独立线程池(竞品间 ×4 + 单竞品 4 抽取 ×4,峰值 16),真 LLM 实测 **2.5-5× 提速**,输出零变化。
+- **QC 重试空转修复 + 蕴含并行化**(`agents/qc.py`)— `check_coverage` 加 `evidence` 参数:只对**零证据**维度触发 `retry_collect`(broaden 能补且收敛),"采到了但 cell 被策展丢掉"的维度显「—」不重采(根治非确定策展导致的不收敛重试空转)。`check_entailment`/`curate_decisions` 逐项 LLM 判定改 `ThreadPoolExecutor` 并行(错误上抛契约 + cost-guard + 顺序不变)。真 run 实测同输入 3 轮 → 1 轮收敛,~490-615s → ~321s。
+
+### Fixed
+
+- **维度作用域 bug**(`agents/analyst.py` + `graph/nodes.py`,真 run 暴露)— analyze/check_coverage 不再硬编码全 6 维忽略用户请求维度;请求参数一路穿到所有下游消费点(289 单测全绿但真 run 必 insufficient 的根因)。
+- **7 个管线真实性 bug**(真 run 钓出)+ silent-failure 降级可见性补强。
+- **finalize 空-done 修复**(`graph/nodes.py`,ship-time Claude+Codex 双模型评审 MAJOR 共识)— verdict=pass 但策展后空手(每维有证据→无 coverage 缺口→pass,但所有 cell 被判不支撑全丢+无决策)不再出"看似通过实则空白"的 done,诚实改写 insufficient_evidence。
+
 ## [0.3.0.0] - 2026-05-28
 
 **输出质量第一个 release — writer v2 + production hardening + rubric v1 评估框架**。本轮 RivalRadar 从"demo 跑通"推到"输出质量可量化"。基于 4 份中文 SaaS 竞品 reference baseline(飞书/钉钉/企业微信、文档协作赛道)倒推 10 条 × 0-3 分 rubric,真打两轮迭代:Round 1 写 18507 字真报告 = **18.5/30 Adequate 上端**,#1 市场锚定 / #7 战略推论 / #9 时间分层三块战略向失 7.5 分;改造 writer prompt v2 重跑 Round 2 写 15932 字 = **24/30 Good 中段,距 ref-01 (26/30) 仅 2 分**。同时修两个 production P0:Tavily 单 query timeout 不再 abort 整轮 + Doubao SDK 90s timeout 接住 25K-34K char input。Demo fixture 切到中国本土竞品(飞书 / 钉钉 / 企业微信)与 reference baseline 同赛道,demo 叙事与 evaluator 评分维度对齐。

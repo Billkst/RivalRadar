@@ -35,6 +35,10 @@
 
 ## graph 编排
 
+### 报告 markdown 在 QC 策展前生成 → 可能含被策展丢掉的 cell
+**Priority:** P2
+**详情:** ship-time Codex 跨模型评审揪出(v0.4 优化 PR):`write_node`(`nodes.py:154`)在 `qc_node` 策展**之前**从 pre-curation analysis 生成 `report` markdown,finalize 持久化的是这份 pre-curation 报告。若策展把某 unsupported cell 丢掉,`GET /report` 的 markdown 仍含该 cell,与 `GET /analysis`(curated)不一致。**当前不阻断本次 ship**(逐条裁决后 defer):report 是 v0.4 已退役的 legacy 报告(cockpit 走 curated `/analysis`,`/browse` 已验证只显存活 cell),entailment 按设计只严判 showcase 矩阵,且 demo 种子 `run_55a0745a925b` curated=0 无此不一致;此问题自 curator commit `5325e51` 起即存在,非本次优化引入。**修法:** qc_node 策展后从 curated analysis 重渲染 report body(`render_body` 确定性、免 LLM)再复用既有 insight 组装,或 finalize 重建 —— 收口反幻觉硬不变量对 legacy artifact 的覆盖。
+
 ### SqliteSaver checkpointer 绑入 Lane E
 **Priority:** P2
 **详情:** Lane E 跳过 SqliteSaver(用 trace 表回放代替),Day-4 真要"中断恢复 / 时间旅行"再启用独立 `checkpointer.db` 文件或换 `PostgresSaver`。当前所有 9 端点 + SSE replay 都自洽。
