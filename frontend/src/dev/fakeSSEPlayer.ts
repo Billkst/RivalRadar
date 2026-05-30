@@ -32,7 +32,18 @@ export const SAMPLE_EVENTS: SSEEvent[] = [
 
   // ── analyst 分析员:thinking + chunk(reasoning typing) ─────────────────
   { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
-      summary: '正在分析 12 条证据,提取 3 个竞品的特征', ts: '2026-05-28T10:00:09Z' } },
+      summary: '正在分析 12 条证据,提取 3 个竞品的特征',
+      metric: { current: 0, total: 13 }, ts: '2026-05-28T10:00:09Z' } },
+  // 逐竞品·逐抽取增量进度(真 backend analyze 内 _make_ticker emit;在 cockpit 折成一条
+  // 会动的进度条「分析 X·Y (n/13)」,而非每事件一行 —— 真跑 ~174s 长节点等待不静默)。
+  { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
+      summary: '分析 飞书·功能', metric: { current: 2, total: 13 }, ts: '2026-05-28T10:00:10Z' } },
+  { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
+      summary: '分析 钉钉·定价', metric: { current: 5, total: 13 }, ts: '2026-05-28T10:00:12Z' } },
+  { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
+      summary: '分析 企业微信·用户画像', metric: { current: 9, total: 13 }, ts: '2026-05-28T10:00:13Z' } },
+  { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
+      summary: '生成跨竞品对比矩阵', metric: { current: 13, total: 13 }, ts: '2026-05-28T10:00:14Z' } },
   // 5 段 chunk 模拟 LLM typing(每段几字符,backend stream_chat 产出的 delta 形态)
   { type: 'chunk', data: { agent_id: 'analyst', step: 'reasoning', delta: '正在', ts: '2026-05-28T10:00:10Z' } },
   { type: 'chunk', data: { agent_id: 'analyst', step: 'reasoning', delta: '比较 ', ts: '2026-05-28T10:00:10Z' } },
