@@ -40,6 +40,18 @@ def _extract_tool_args(resp) -> str | None:
     return tool_calls[0].function.arguments
 
 
+# 单次结构化输出的 token 上限,取端点硬上限(给足不保守)。真 run 钓出——竞品功能多时
+# (钉钉 27 项)feature 抽取 JSON 巨大,不设 max_tokens 走模型默认(实测 ~4096 token /
+# char 9575)就被截断 → JSON Unterminated string → 三次重试全败 → StructuredCallError
+# 杀死整个 run。
+#
+# 131072 = 端点 doubao-seed-2-0-lite(256K 上下文)的真实 max_tokens 硬上限(实测探得:
+# max_tokens=131072 接受 / 131073 报 400 InvalidParameter "integer above maximum value")。
+# max_tokens 是输出上限参数,模型自然停止不会真吐满,设最大值只去掉截断天花板,不影响
+# 正常输出速度/成本。若换端点上限不同,API 会 400 报真实上限,据此调整。
+_DEFAULT_MAX_TOKENS = 131072
+
+
 def structured_call(
     model_cls: type[T],
     messages: list[dict],
@@ -47,10 +59,11 @@ def structured_call(
     client,
     model: str,
     max_retries: int = 2,
+    max_tokens: int = _DEFAULT_MAX_TOKENS,
 ) -> T:
     """调 Doubao 吐结构化输出 → Pydantic 校验 → 不合格带错重试 → 封顶显式报错。
 
-    被 4 个 Agent 复用(DRY)。max_retries=2 表示最多 3 次尝试。
+    被 4 个 Agent 复用(DRY)。max_retries=2 表示最多 3 次尝试。max_tokens 给足防截断。
 
     实现走 **function-calling(tools)**:把 JSON Schema 作为工具的 parameters,
     强制 tool_choice,从 tool_call 参数里取结构化结果。原因(见 spikes/SPIKE_RESULTS.md):
@@ -75,7 +88,7 @@ def structured_call(
         try:
             resp = client.chat.completions.create(
                 model=model, messages=convo, tools=tools, tool_choice=tool_choice,
-                timeout=_DEFAULT_REQUEST_TIMEOUT,
+                timeout=_DEFAULT_REQUEST_TIMEOUT, max_tokens=max_tokens,
             )
         except (APITimeoutError, APIConnectionError, APIError) as err:
             # 网络层失败(timeout / connection drop / 上游 5xx)归入 retry 循环。

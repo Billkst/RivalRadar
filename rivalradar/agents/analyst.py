@@ -1,12 +1,43 @@
 from __future__ import annotations
 
+import logging
+from typing import Callable, TypeVar
+
 from pydantic import BaseModel, Field
 
-from rivalradar.llm.structured import structured_call
+from rivalradar.llm.structured import StructuredCallError, structured_call
 from rivalradar.schema.models import (
     ComparisonRow, CompetitorAnalysis, CompetitorProfile, CONTROLLED_DIMENSIONS,
     Evidence, FeatureItem, PricingModel, SWOT, UserPersona,
 )
+
+logger = logging.getLogger(__name__)
+
+_X = TypeVar("_X")
+
+
+def _safe_extract(
+    label: str, competitor: str, fn: Callable[[], _X], default: _X,
+    *, sink: list[str] | None = None,
+) -> _X:
+    """单项 profile 抽取的优雅降级:structured_call 封顶失败(真 run 钓出——竞品功能多时
+    LLM 输出超 max_tokens 被截断 → Unterminated JSON → StructuredCallError)不应杀死整个
+    run。这里记日志 + 把降级 label 记入 sink(供 analyze_node 置 run 级 degraded,保证
+    「降级必可见」契约——否则整竞品 profile 半瘫却 status=done/degraded=False,用户零警示),
+    再返空默认让该竞品其余抽取与下游决策照常产出。
+
+    sink:降级事件汇聚处(`{competitor}.{label}`)。None = 不汇聚(向后兼容直接调用/单测)。
+    注意:被降级的 profile 项(features/personas/swot/pricing)**不进 check_entailment**(qc_node
+    用 comparison_only=True 只严判对比矩阵 cell);它们仍受 check_traceability 全量机械门约束
+    (空引用/悬空 id 仍被抓)。所以降级项的可见性靠 sink→degraded 横幅,而非 entailment。"""
+    try:
+        return fn()
+    except StructuredCallError:
+        logger.warning("analyze_competitor[%s] %s 抽取降级(返空默认)", competitor, label,
+                       exc_info=True)
+        if sink is not None:
+            sink.append(f"{competitor}.{label}")
+        return default
 
 
 # structured_call 返回单个 BaseModel;抽取 list 用 wrapper 模型
@@ -43,7 +74,13 @@ def build_evidence_block(evidence: list[Evidence]) -> str:
 
 _REFS_RULE = (
     "只依据下面证据作答,不得编造。每条结论必须挂 evidence_refs,其中 evidence_id "
-    "只能取自给定证据的 evidence_id,quote 为被引的原句。无证据支撑的结论不要输出。"
+    "只能取自给定证据的 evidence_id,quote 为被引的原句。无证据支撑的结论不要输出。\n"
+    "**粒度不得超过证据(真 run 钓出的过度拆解硬纪律)**:只输出证据原文明确点名的内容,"
+    "严禁把证据里的大类/概称拆成证据未逐一点名的子项。反例(一律禁止):证据只写"
+    "「资源分配」→ 不得输出「人员分配」「预算控制」等未点名子功能;证据只写「数据分析」→ "
+    "不得拆成「绩效分析」「风险分析」;证据只写「团队协作」→ 不得拆成「文件管理」等细项。"
+    "列举多项(如对比 cell 罗列能力清单)时,**每一项都必须能在被引证据原句里找到对应字样**,"
+    "找不到对应字样的项一律删掉。宁可粗粒度但每条都站得住,不要细粒度而被质检判为不支撑。"
 )
 
 
@@ -81,18 +118,33 @@ def extract_swot(evidence: list[Evidence], competitor: str, *, client, model) ->
     return structured_call(SWOT, msgs, client=client, model=model)
 
 
-def analyze_competitor(evidence: list[Evidence], competitor: str, *, client, model) -> CompetitorProfile:
-    """对单个竞品做四项抽取并拼成 CompetitorProfile。"""
+def analyze_competitor(
+    evidence: list[Evidence], competitor: str, *, degraded_sink: list[str] | None = None,
+    client, model,
+) -> CompetitorProfile:
+    """对单个竞品做四项抽取并拼成 CompetitorProfile。
+
+    degraded_sink:任一项抽取降级时,label 记入此 list(透传给 _safe_extract)。None =
+    不汇聚(向后兼容)。pricing 降级占位用中性的 "未知"(不是英文 unknown,也不当错误码——
+    错误信道职责交给 degraded_sink→横幅,model_type 保持纯产品数据字段语言一致)。"""
     ev = evidence_for(evidence, competitor)  # 已按竞品过滤;下面按维度取子集,缺则回退全量
     feat_ev = evidence_for(ev, competitor, dimension="core_workflows") or ev
     price_ev = evidence_for(ev, competitor, dimension="pricing") or ev
     pers_ev = evidence_for(ev, competitor, dimension="review_sentiment") or ev
     return CompetitorProfile(
         name=competitor,
-        features=extract_features(feat_ev, competitor, client=client, model=model),
-        pricing=extract_pricing(price_ev, competitor, client=client, model=model),
-        personas=extract_personas(pers_ev, competitor, client=client, model=model),
-        swot=extract_swot(ev, competitor, client=client, model=model),
+        features=_safe_extract("features", competitor,
+                               lambda: extract_features(feat_ev, competitor, client=client, model=model), [],
+                               sink=degraded_sink),
+        pricing=_safe_extract("pricing", competitor,
+                              lambda: extract_pricing(price_ev, competitor, client=client, model=model),
+                              PricingModel(model_type="未知"), sink=degraded_sink),
+        personas=_safe_extract("personas", competitor,
+                               lambda: extract_personas(pers_ev, competitor, client=client, model=model), [],
+                               sink=degraded_sink),
+        swot=_safe_extract("swot", competitor,
+                           lambda: extract_swot(ev, competitor, client=client, model=model), SWOT(),
+                           sink=degraded_sink),
     )
 
 
@@ -119,14 +171,20 @@ def build_comparison(
 
 def analyze(
     evidence: list[Evidence], competitors: list[str],
-    *, dimensions: tuple[str, ...] = CONTROLLED_DIMENSIONS, client, model,
+    *, dimensions: tuple[str, ...] = CONTROLLED_DIMENSIONS,
+    degraded_sink: list[str] | None = None, client, model,
 ) -> CompetitorAnalysis:
     """分析 Agent 入口:证据 → 结构化分析(逐竞品 profile + 跨竞品对比)。
 
     `dimensions`:本次请求的维度,穿到 build_comparison 约束对比范围(默认全受控本体,
     兼容老调用/单测)。节点传 state["dimensions"];否则对比会超范围触发质检覆盖死循环。
+    `degraded_sink`:任一竞品任一项抽取降级时 label 汇聚于此(透传给 analyze_competitor)。
+    None = 不汇聚(向后兼容)。analyze_node 据此置 run 级 degraded,保证「降级必可见」。
     """
-    profiles = [analyze_competitor(evidence, c, client=client, model=model) for c in competitors]
+    profiles = [
+        analyze_competitor(evidence, c, degraded_sink=degraded_sink, client=client, model=model)
+        for c in competitors
+    ]
     comparison = build_comparison(
         profiles, evidence, dimensions=dimensions, client=client, model=model)
     return CompetitorAnalysis(competitors=profiles, comparison=comparison)

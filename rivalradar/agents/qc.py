@@ -12,23 +12,48 @@ from rivalradar.schema.models import (
 
 
 def _iter_conclusions(
-    analysis: CompetitorAnalysis,
+    analysis: CompetitorAnalysis, *, dimensions: tuple[str, ...] | None = None,
+    comparison_only: bool = False,
 ) -> Iterator[tuple[str, str, str, list[EvidenceRef]]]:
-    """遍历每条挂引用的结论 → (competitor, dimension, 结论文本, evidence_refs)。"""
-    for prof in analysis.competitors:
-        for f in prof.features:
-            yield prof.name, "core_workflows", f"功能:{f.name}", f.evidence_refs
-        yield prof.name, "pricing", f"定价:{prof.pricing.model_type}", prof.pricing.evidence_refs
-        for p in prof.personas:
-            yield prof.name, "review_sentiment", f"画像:{p.segment}", p.evidence_refs
-        quads = (("优势", prof.swot.strengths), ("劣势", prof.swot.weaknesses),
-                 ("机会", prof.swot.opportunities), ("威胁", prof.swot.threats))
-        for label, points in quads:
-            for pt in points:
-                yield prof.name, "swot", f"SWOT-{label}:{pt.text}", pt.evidence_refs
+    """遍历每条挂引用的结论 → (competitor, dimension, 结论文本, evidence_refs)。
+
+    dimensions:只产「请求维度」的结论(None = 全产,向后兼容)。真 run 续集:
+    用户只请求 pricing/core_workflows/integrations 时,analyze_competitor 仍对每个竞品
+    产全套 profile,其中 personas(→review_sentiment)/SWOT(→"swot",非可搜索本体)是
+    综合产物。把这些越界结论喂给 check_entailment 这个 LLM 判定闸,会因前瞻推断/越界断言
+    产 hallucination → degraded;且 SWOT 前瞻判定本就是范畴错误。scope 到请求维度即只对
+    用户真正要的维度严判(check_traceability 仍全量,保证 SWOT 仍需挂引用)。
+
+    comparison_only:只产对比矩阵 cell——即 showcase 真正呈现的「分析主张」,跳过 profile 的
+    features/pricing/personas/SWOT 这些描述性辅助结论(它们喂 v0.4 已退役的报告、不进驾驶舱)。
+    check_entailment(阻断性 LLM 判定)用它把"是否 grounded"的严判聚焦到展示内容;真 run
+    钓出:分析员对细粒度功能过度拆解(证据写「资源分配」→ 脑补「人员分配/预算控制」),这类
+    描述性脚注的小越界不该拿去否决整个 run。矩阵 cell 与决策仍被严判(它们越界照样 degraded,
+    诚实);check_traceability 仍全量(辅助结论仍需挂引用)。
+    """
+    def _in_scope(dim: str) -> bool:
+        return dimensions is None or dim in dimensions
+
+    if not comparison_only:
+        for prof in analysis.competitors:
+            for f in prof.features:
+                if _in_scope("core_workflows"):
+                    yield prof.name, "core_workflows", f"功能:{f.name}", f.evidence_refs
+            if _in_scope("pricing"):
+                yield prof.name, "pricing", f"定价:{prof.pricing.model_type}", prof.pricing.evidence_refs
+            for p in prof.personas:
+                if _in_scope("review_sentiment"):
+                    yield prof.name, "review_sentiment", f"画像:{p.segment}", p.evidence_refs
+            quads = (("优势", prof.swot.strengths), ("劣势", prof.swot.weaknesses),
+                     ("机会", prof.swot.opportunities), ("威胁", prof.swot.threats))
+            for label, points in quads:
+                for pt in points:
+                    if _in_scope("swot"):
+                        yield prof.name, "swot", f"SWOT-{label}:{pt.text}", pt.evidence_refs
     for row in analysis.comparison:
-        for cell in row.cells:
-            yield cell.competitor, row.dimension, f"对比:{cell.value}", cell.evidence_refs
+        if _in_scope(row.dimension):
+            for cell in row.cells:
+                yield cell.competitor, row.dimension, f"对比:{cell.value}", cell.evidence_refs
 
 
 def check_traceability(analysis: CompetitorAnalysis, evidence: list[Evidence]) -> list[QCIssue]:
@@ -91,14 +116,22 @@ class EntailmentVerdict(BaseModel):
 
 
 def check_entailment(
-    analysis: CompetitorAnalysis, evidence: list[Evidence], *, client, model
+    analysis: CompetitorAnalysis, evidence: list[Evidence],
+    *, dimensions: tuple[str, ...] | None = None, comparison_only: bool = False,
+    client, model,
 ) -> list[QCIssue]:
     """LLM 蕴含判定:被引证据是否真支撑结论;不支撑 → hallucination。每条结论一次调用。
+
+    dimensions:只对「请求维度」的结论做蕴含判定(None = 全判,向后兼容)。SWOT/persona
+    等越界综合产物不进这个 LLM 闸(见 _iter_conclusions docstring)。
+    comparison_only:阻断性 LLM 判定只严判 showcase 呈现的对比矩阵 cell,profile 的描述性
+    features/pricing/personas/SWOT 不进此闸(见 _iter_conclusions docstring)。
     错误契约:本函数不吞错——structured_call 失败会上抛;"尽力/失败降级"由 Lane D 编排层
     捕获后降级为仅确定性闸的 verdict(spec §5 尽力 + §8 trace)。"""
     idx = {e.id: e for e in evidence}
     issues: list[QCIssue] = []
-    for comp, dim, text, refs in _iter_conclusions(analysis):
+    for comp, dim, text, refs in _iter_conclusions(
+        analysis, dimensions=dimensions, comparison_only=comparison_only):
         if not refs:
             continue  # 空引用由 check_traceability 负责
         quotes = []

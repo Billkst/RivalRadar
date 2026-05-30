@@ -72,7 +72,9 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
                                    max_results=max_results)
             tgt_desc = "all"
         else:
-            targets = extract_collect_targets(qc_result["issues"], state["competitors"])
+            targets = extract_collect_targets(
+                qc_result["issues"], state["competitors"],
+                allowed_dimensions=tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS))
             _emit_progress(
                 emit, "collector", "broaden",
                 f"按质检反馈广搜 {len(targets)} 个证据缺口",
@@ -111,21 +113,29 @@ def make_analyze_node(*, conn, client, model):
             emit, "analyst", "thinking",
             f"正在分析 {len(evidence)} 条证据,提取 {len(state['competitors'])} 个竞品的特征",
         )
+        # 收集本轮 profile 抽取降级(单项 LLM 截断/失败优雅降级,见 analyst._safe_extract)。
+        # 非空 → 置 run 级 degraded,保证「降级必可见」(否则整竞品 profile 半瘫却 done)。
+        degraded_sink: list[str] = []
         analysis = analyze(evidence, state["competitors"],
                            dimensions=tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS),
-                           client=client, model=model)
+                           degraded_sink=degraded_sink, client=client, model=model)
         save_analysis(conn, run_id, analysis)
         _emit_progress(
             emit, "analyst", "done",
             f"完成分析:{len(analysis.competitors)} 个竞品 profile + {len(analysis.comparison)} 维对比",
             metric={"current": len(analysis.competitors), "total": len(state["competitors"])},
         )
+        # 降级 marker 折进现有 trace 行(一节点一 trace 行,reviewer ISSUE A),不另起一行。
+        degraded_note = f" (降级: {', '.join(degraded_sink)})" if degraded_sink else ""
         append_trace(conn, run_id, "analyze",
                      input_summary=f"{len(evidence)} evidence",
                      output_summary=f"{len(analysis.competitors)} profiles, "
-                                    f"{len(analysis.comparison)} rows",
+                                    f"{len(analysis.comparison)} rows{degraded_note}",
                      latency_ms=int((time.monotonic() - t0) * 1000))
-        return {"analysis": analysis.model_dump()}
+        out: dict = {"analysis": analysis.model_dump()}
+        if degraded_sink:
+            out["degraded"] = True  # qc_node read-then-OR 保 sticky 到 finalize
+        return out
     return analyze_node
 
 
@@ -185,7 +195,14 @@ def make_qc_node(*, conn, client, model):
         local_degraded = False
         try:
             # TODO(Lane E/Day-4): 多竞品时 check_entailment 调用数=结论数,可并行/抽样降本(spec §13 ⑤)
-            issues += qc.check_entailment(analysis, evidence, client=client, model=model)
+            # 阻断性蕴含判定只严判 showcase 呈现的对比矩阵 cell(comparison_only)+ 请求维度:
+            # profile 的描述性 features/pricing/personas/SWOT 不进 LLM 闸(它们喂 v0.4 退役报告、
+            # 不进驾驶舱;真 run 钓出分析员对细粒度功能过度拆解的越界,不该否决整个 run)。
+            # 矩阵 cell 与决策(check_decision_entailment)仍被严判,越界照样 degraded(诚实)。
+            issues += qc.check_entailment(
+                analysis, evidence,
+                dimensions=tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS),
+                comparison_only=True, client=client, model=model)
         except Exception as e:  # noqa: BLE001 — 蕴含是尽力而为辅助闸,任何失败(解析/网络/限流)都降级,绝不崩整图(必办项①/spec §5)
             local_degraded = True
             # 只记 type(e).__name__,**绝不**写 str(e) 入 trace(GET /trace/:run 公开

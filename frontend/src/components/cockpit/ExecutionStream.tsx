@@ -101,6 +101,16 @@ function deriveRows(events: SSEEvent[]): Row[] {
         rows.push({ kind: 'decide', key: `t${i}`, ts: ev.data.ts, summary: out || '生成决策建议',
           degraded: out.includes('degraded=True') })
       } else if (agentId) {
+        // 重试环招牌数「证据 X→Y」replay 时也要真数:collect trace.output 形如
+        // "+78 (total 78)" / "+10 (total 88)",解析 (total N) 喂 cumulative,镜像 live
+        // node 路径(否则 cumulative 停 0 → "证据 0→…")。
+        if (node === 'collect') {
+          const m = out.match(/total\s+(\d+)/)
+          if (m) {
+            cumulative = Number(m[1])
+            if (pendingRetry && pendingRetry.evTo === null) pendingRetry.evTo = cumulative
+          }
+        }
         rows.push({ kind: 'step', key: `t${i}`, ts: ev.data.ts, agentId, summary: out, done: true })
         if (node === 'qc' && (out.includes('retry_collect') || out.includes('retry_analyze'))) {
           pushRetry(ev.data.ts)

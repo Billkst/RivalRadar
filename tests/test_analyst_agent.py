@@ -4,9 +4,78 @@ from types import SimpleNamespace
 from rivalradar.agents.analyst import (
     evidence_for, FeatureExtraction, PersonaExtraction, ComparisonExtraction,
     extract_features, extract_pricing, build_evidence_block,
-    analyze_competitor, build_comparison, analyze,
+    analyze_competitor, build_comparison, analyze, _safe_extract,
 )
+from rivalradar.llm.structured import StructuredCallError
 from rivalradar.schema.models import Evidence, FeatureItem, PricingModel, SWOT, CompetitorAnalysis, CompetitorProfile
+
+
+def test_safe_extract_degrades_on_structured_call_error():
+    # 真 run 钓出:单项抽取 LLM 截断 → StructuredCallError 不该杀死整个 run
+    def boom():
+        raise StructuredCallError("Unterminated string ...")
+    assert _safe_extract("features", "钉钉", boom, []) == []
+    assert _safe_extract("pricing", "钉钉", boom, PricingModel(model_type="未知")).model_type == "未知"
+
+
+def test_safe_extract_passes_through_on_success():
+    assert _safe_extract("features", "Notion", lambda: ["ok"], []) == ["ok"]
+
+
+def test_safe_extract_records_degrade_into_sink():
+    # silent-failure 修复:降级必可见 —— label 记入 sink 供 analyze_node 置 run 级 degraded
+    def boom():
+        raise StructuredCallError("truncated")
+    sink: list[str] = []
+    _safe_extract("features", "钉钉", boom, [], sink=sink)
+    assert sink == ["钉钉.features"]
+    # 成功路径不污染 sink
+    _safe_extract("pricing", "钉钉", lambda: PricingModel(model_type="x"), None, sink=sink)
+    assert sink == ["钉钉.features"]
+
+
+def test_analyze_threads_degraded_sink_on_extraction_failure(monkeypatch):
+    # analyze() 把单竞品抽取降级汇聚进 degraded_sink(端到端:analyze_node 据此置 degraded)
+    import rivalradar.agents.analyst as an
+    monkeypatch.setattr(an, "extract_features",
+                        lambda *a, **k: (_ for _ in ()).throw(StructuredCallError("boom")))
+    monkeypatch.setattr(an, "extract_pricing", lambda *a, **k: PricingModel(model_type="x"))
+    monkeypatch.setattr(an, "extract_personas", lambda *a, **k: [])
+    monkeypatch.setattr(an, "extract_swot", lambda *a, **k: SWOT())
+    monkeypatch.setattr(an, "build_comparison", lambda *a, **k: [])
+    sink: list[str] = []
+    ev = [Evidence(id="e1", competitor="Notion", dimension="core_workflows", content="c",
+                   source_url="u", source_title="t", language="en", fetched_at="t0")]
+    an.analyze(ev, ["Notion"], degraded_sink=sink, client=None, model="m")
+    assert "Notion.features" in sink
+
+
+def test_safe_extract_records_degrade_into_sink():
+    # silent-failure 修复:降级必可见 —— label 记入 sink 供 analyze_node 置 run 级 degraded
+    def boom():
+        raise StructuredCallError("truncated")
+    sink: list[str] = []
+    _safe_extract("features", "钉钉", boom, [], sink=sink)
+    assert sink == ["钉钉.features"]
+    # 成功路径不污染 sink
+    _safe_extract("pricing", "钉钉", lambda: PricingModel(model_type="x"), None, sink=sink)
+    assert sink == ["钉钉.features"]
+
+
+def test_analyze_threads_degraded_sink_on_extraction_failure(monkeypatch):
+    # analyze() 把单竞品抽取降级汇聚进 degraded_sink(端到端:analyze_node 据此置 degraded)
+    import rivalradar.agents.analyst as an
+    monkeypatch.setattr(an, "extract_features",
+                        lambda *a, **k: (_ for _ in ()).throw(StructuredCallError("boom")))
+    monkeypatch.setattr(an, "extract_pricing", lambda *a, **k: PricingModel(model_type="x"))
+    monkeypatch.setattr(an, "extract_personas", lambda *a, **k: [])
+    monkeypatch.setattr(an, "extract_swot", lambda *a, **k: SWOT())
+    monkeypatch.setattr(an, "build_comparison", lambda *a, **k: [])
+    sink: list[str] = []
+    ev = [Evidence(id="e1", competitor="Notion", dimension="core_workflows", content="c",
+                   source_url="u", source_title="t", language="en", fetched_at="t0")]
+    an.analyze(ev, ["Notion"], degraded_sink=sink, client=None, model="m")
+    assert "Notion.features" in sink
 
 
 def _ev(eid, competitor, dimension):

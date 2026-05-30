@@ -25,11 +25,11 @@ interface EvidenceStore {
   clear: () => void
 }
 
-function evict(cache: Map<string, Evidence>): Map<string, Evidence> {
-  if (cache.size <= MAX_ENTRIES) return cache
+function evict(cache: Map<string, Evidence>, cap: number = MAX_ENTRIES): Map<string, Evidence> {
+  if (cache.size <= cap) return cache
   const next = new Map(cache)
   // Drop oldest entries until at capacity. Map iteration is insertion-order.
-  while (next.size > MAX_ENTRIES) {
+  while (next.size > cap) {
     const oldestKey = next.keys().next().value
     if (oldestKey === undefined) break
     next.delete(oldestKey)
@@ -89,12 +89,16 @@ export const useEvidenceStore = create<EvidenceStore>((set, get) => ({
   seed: (list) =>
     set((state) => {
       const cache = new Map(state.cache)
-      // 后 seed 的移到末尾(LRU 新),evict 保留最近 seed 的 MAX_ENTRIES 条。
+      // 后 seed 的移到末尾(LRU 新)。
       for (const ev of list) {
         cache.delete(ev.id)
         cache.set(ev.id, ev)
       }
-      return { cache: evict(cache) }
+      // seed = 本 run 全量证据,**绝不截断刚 seed 的整批**(真 run 钓出:>50 证据的
+      // run 被 MAX_ENTRIES=50 砍掉前半 → 决策/矩阵引用 useEvidence 返 null → "来源加载中…"
+      // 永不消解)。cap 至少容纳本次 seed;冷取(getEvidence)仍走 MAX_ENTRIES LRU。
+      // 跨 run:下个 run 的 seed 把上个 run 的旧条目挤出(本 run 始终全留)。
+      return { cache: evict(cache, Math.max(MAX_ENTRIES, list.length)) }
     }),
 
   clear: () => set({ cache: new Map(), inflight: new Map() }),

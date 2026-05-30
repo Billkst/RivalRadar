@@ -101,7 +101,7 @@ def test_analyze_node_converts_evidence_and_persists(conn, monkeypatch):
         name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
     seen = {}
 
-    def _fake_analyze(evidence, competitors, *, dimensions=None, client, model):
+    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, client, model):
         seen["n"] = len(evidence)                  # 验证 dict→Evidence 转换后传入
         return fake
     monkeypatch.setattr(nodes_mod, "analyze", _fake_analyze)
@@ -113,6 +113,32 @@ def test_analyze_node_converts_evidence_and_persists(conn, monkeypatch):
     assert seen["n"] == 1                                          # 证据 dict 已转 Evidence
     assert out["analysis"]["competitors"][0]["name"] == "Notion"  # 返回 model_dump
     assert repo.get_analysis(conn, "r1") is not None              # 落库
+
+
+def test_analyze_node_sets_degraded_when_extraction_degrades(conn, monkeypatch):
+    # silent-failure 修复端到端:analyze 把降级 label 填进 degraded_sink → 节点置 run 级
+    # degraded(out["degraded"]=True)+ trace output_summary 含降级 marker(降级必可见)。
+    import rivalradar.graph.nodes as nodes_mod
+    from rivalradar.schema.models import (
+        CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
+    )
+    fake = CompetitorAnalysis(competitors=[CompetitorProfile(
+        name="Notion", pricing=PricingModel(model_type="未知"), swot=SWOT())], comparison=[])
+
+    def _degrading_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, client, model):
+        if degraded_sink is not None:
+            degraded_sink.append("Notion.features")  # 模拟单项抽取降级
+        return fake
+    monkeypatch.setattr(nodes_mod, "analyze", _degrading_analyze)
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    node = make_analyze_node(conn=conn, client=None, model="m")
+    ev = [{"id": "e1", "competitor": "Notion", "dimension": "pricing", "content": "c",
+           "source_url": "u", "source_title": "t", "language": "en", "fetched_at": "t0"}]
+    out = node({"competitors": ["Notion"], "evidence": ev}, _CFG)
+    assert out.get("degraded") is True                               # run 级 degraded 置位
+    traces = repo.list_trace(conn, "r1")
+    analyze_trace = [t for t in traces if t["node"] == "analyze"][-1]
+    assert "降级" in analyze_trace["output_summary"]                # trace 含降级 marker(可见)
 
 
 def test_write_node_renders_and_persists(conn, monkeypatch):

@@ -133,6 +133,80 @@ def test_check_entailment_skips_empty_refs():
     assert check_entailment(analysis, [_ev("e1")], client=client, model="m") == []
 
 
+def test_check_entailment_scopes_to_requested_dimensions():
+    # 真 run 续集:out-of-scope 的 SWOT(dimension="swot")结论不进 entailment 闸。
+    # 用户只请求 pricing → 仅 pricing 结论被 LLM 蕴含判定,SWOT 前瞻推断不被严判
+    # (SWOT/persona 是综合产物,严格 entailment 是范畴错误;in-scope 仍全判)。
+    analysis = CompetitorAnalysis(competitors=[CompetitorProfile(
+        name="Notion",
+        pricing=PricingModel(model_type="freemium", evidence_refs=[_ref("e1")]),
+        swot=SWOT(threats=[SWOTPoint(text="可能被巨头分流", evidence_refs=[_ref("e2")])]))])
+    # 两个 payload 都判 not supported;scope 后只该消费 pricing 那次 → 仅 1 issue
+    client = _FakeClient([json.dumps({"supported": False, "reason": "x"}),
+                          json.dumps({"supported": False, "reason": "y"})])
+    issues = check_entailment(analysis, [_ev("e1"), _ev("e2", dimension="swot")],
+                              dimensions=("pricing",), client=client, model="m")
+    assert len(issues) == 1
+    assert issues[0].dimension == "pricing"
+
+
+def test_check_entailment_no_scope_checks_all_dimensions():
+    # 向后兼容:不传 dimensions → 全维度判(老行为),SWOT 也被判
+    analysis = CompetitorAnalysis(competitors=[CompetitorProfile(
+        name="Notion",
+        pricing=PricingModel(model_type="freemium", evidence_refs=[_ref("e1")]),
+        swot=SWOT(threats=[SWOTPoint(text="t", evidence_refs=[_ref("e2")])]))])
+    client = _FakeClient([json.dumps({"supported": False, "reason": "x"}),
+                          json.dumps({"supported": False, "reason": "y"})])
+    issues = check_entailment(analysis, [_ev("e1"), _ev("e2", dimension="swot")],
+                              client=client, model="m")
+    assert len(issues) == 2
+
+
+def test_check_entailment_comparison_only_skips_profile_conclusions():
+    # 真 run 续集:阻断性蕴含判定只严判 showcase 呈现的对比矩阵 cell;profile 的描述性
+    # feature(喂退役报告、不进驾驶舱)即使越界也不进 LLM 闸 → 不否决整个 run。
+    analysis = CompetitorAnalysis(competitors=[CompetitorProfile(
+        name="Notion",
+        features=[FeatureItem(id="f1", name="子功能臆测", description="d", category="c",
+                              evidence_refs=[_ref("e1")])],
+        pricing=PricingModel(model_type="freemium", evidence_refs=[_ref("e2")]),
+        swot=SWOT())],
+        comparison=[ComparisonRow(dimension="pricing", cells=[
+            ComparisonCell(competitor="Notion", value_type="enum", value="免费起",
+                           evidence_refs=[_ref("e3")])])])
+    # 三个 payload 都判 not supported;comparison_only 后只该消费对比 cell 那次 → 仅 1 issue
+    client = _FakeClient([json.dumps({"supported": False, "reason": "a"}),
+                          json.dumps({"supported": False, "reason": "b"}),
+                          json.dumps({"supported": False, "reason": "c"})])
+    issues = check_entailment(analysis, [_ev("e1"), _ev("e2"), _ev("e3")],
+                              comparison_only=True, client=client, model="m")
+    assert len(issues) == 1
+    assert issues[0].detail.startswith("证据不支撑结论(对比:")
+
+
+def test_check_entailment_comparison_only_with_dimensions_production_path():
+    # reviewer ISSUE-3:钉死生产实际走的组合 comparison_only=True + dimensions=请求维度。
+    # 只有在请求维度内的对比 cell 进蕴含;越界维度的对比行被 dimensions 过滤掉。
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        comparison=[
+            ComparisonRow(dimension="pricing", cells=[
+                ComparisonCell(competitor="Notion", value_type="enum", value="免费起",
+                               evidence_refs=[_ref("e1")])]),
+            ComparisonRow(dimension="integrations", cells=[
+                ComparisonCell(competitor="Notion", value_type="enum", value="开放平台",
+                               evidence_refs=[_ref("e2")])]),
+        ])
+    # 两个 cell 都判 not supported;dimensions=("pricing",) 后只 pricing cell 进蕴含 → 1 issue
+    client = _FakeClient([json.dumps({"supported": False, "reason": "a"}),
+                          json.dumps({"supported": False, "reason": "b"})])
+    issues = check_entailment(analysis, [_ev("e1"), _ev("e2", dimension="integrations")],
+                              dimensions=("pricing",), comparison_only=True, client=client, model="m")
+    assert len(issues) == 1
+    assert issues[0].dimension == "pricing"
+
+
 def test_decide_verdict_pass_when_no_issues():
     assert decide_verdict([]) == "pass"
 

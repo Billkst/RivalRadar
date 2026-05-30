@@ -30,7 +30,7 @@ export function RunsPage() {
 /**
  * DemoEntry — D6 demo day bullet-proof 入口(plan v3.2 §10 Epic 7.1)。
  *
- * 评委 / 自己 demo 时一键进入完整 25s office UI 演示,**不依赖 backend / LLM**。
+ * 评委 / 自己 demo 时一键进入完整 25s 证据驾驶舱演示,**不依赖 backend / LLM**。
  * RunPage 检测 isDemoRun(run_id) → 跳过 fetchRun + 跳过 SSE,直接 playFakeSSE。
  *
  * Clash 卡 / API 没钱 / backend down 都不影响 — 只要 vite dev server 在。
@@ -46,9 +46,9 @@ function DemoEntry() {
           🎬
         </span>
         <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold text-accent">Demo 模式 · 一键看 25s office UI 演示</div>
+          <div className="text-sm font-semibold text-accent">Demo 模式 · 一键看 25s 证据驾驶舱演示</div>
           <div className="mt-0.5 text-xs text-text-muted">
-            预录 fixture 走完整 4 agent 协作 cycle:🦉 收集员 → 🦊 分析员 → 🦝 撰稿员 → 🐢 质检员。
+            预录 fixture 走完整 4 agent 协作 cycle:采集员 → 分析员 → 撰写员 → 质检员。
             零依赖,不打 backend / LLM,适合 demo 兜底。
           </div>
         </div>

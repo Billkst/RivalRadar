@@ -104,6 +104,17 @@ def test_passes_timeout_to_sdk_call():
     assert 30 <= kwargs["timeout"] <= 180
 
 
+def test_passes_generous_max_tokens_to_sdk_call():
+    """真 run 钓出:不设 max_tokens 走默认(~4096)→ 大 feature 列表 JSON 被截断 →
+    Unterminated string → StructuredCallError 杀死整个 run。给足 16384+ 防截断。"""
+    client = FakeClient([_VALID])
+    structured_call(EvidenceRef, [{"role": "user", "content": "x"}],
+                    client=client, model="m")
+    kwargs = client.chat.completions.last_kwargs
+    assert "max_tokens" in kwargs
+    assert kwargs["max_tokens"] >= 16384
+
+
 class _NetworkErrorClient:
     """模拟 SDK 抛 APITimeoutError / APIConnectionError 等网络层异常。"""
     def __init__(self, errors_then_responses):
