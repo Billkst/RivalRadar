@@ -35,9 +35,9 @@
 
 ## graph 编排
 
-### 报告 markdown 在 QC 策展前生成 → 可能含被策展丢掉的 cell
-**Priority:** P2
-**详情:** ship-time Codex 跨模型评审揪出(v0.4 优化 PR):`write_node`(`nodes.py:154`)在 `qc_node` 策展**之前**从 pre-curation analysis 生成 `report` markdown,finalize 持久化的是这份 pre-curation 报告。若策展把某 unsupported cell 丢掉,`GET /report` 的 markdown 仍含该 cell,与 `GET /analysis`(curated)不一致。**当前不阻断本次 ship**(逐条裁决后 defer):report 是 v0.4 已退役的 legacy 报告(cockpit 走 curated `/analysis`,`/browse` 已验证只显存活 cell),entailment 按设计只严判 showcase 矩阵,且 demo 种子 `run_55a0745a925b` curated=0 无此不一致;此问题自 curator commit `5325e51` 起即存在,非本次优化引入。**修法:** qc_node 策展后从 curated analysis 重渲染 report body(`render_body` 确定性、免 LLM)再复用既有 insight 组装,或 finalize 重建 —— 收口反幻觉硬不变量对 legacy artifact 的覆盖。
+### ✅ 已修(2026-05-31):report markdown + cockpit insight headline 在 QC 策展前生成 → 含被策展丢掉的结论
+**Priority:** ~~P2~~ DONE
+**详情:** ship-time Codex 跨模型评审揪出(v0.4 优化 PR)+ ship-time 对抗验证补抓更显眼的暴露面:`write_node` 在 `qc_node` 策展**之前**从 pre-curation analysis 生成 ① `report` markdown ② `insight`(3 段 AI 综合判断)。被策展丢的 cell 残留在两者里,与 curated `/analysis` 不一致;`check_traceability(comparison_only)` 只校验对比矩阵 cell,**管不到 report markdown、也从不校验 insight 自由文本**。对抗验证指出真正最显眼的敞口是 `/insight` —— cockpit `DecisionSurface` 把它渲染成顶部 headline(标「AI 基于证据综合判断」),而 `/report` 已无活前端消费者(ReportSheet tree-shake 成死代码)。**修复(`write→qc` 端到端):** `write_node` 把 `insight` 经 state 传给 `qc_node`;`qc_node` 策展后 ① 用 curated analysis 重渲染 body(`render_body` 确定性免 LLM)+ `stitch_report` 拼回 insight → report 对比表/来源与 `/analysis` 一致;② **仅当策展真丢了 cell(`dropped` 非空)时**用 curated body 重生成 insight + 覆盖落库 → 顶部 headline 不再引用被丢结论。**守卫:** happy path(`dropped` 空 = 现有所有种子 curated=0,已查 DB 实证)零触发 → 不动 24/30 baseline、不多花 LLM;只在真丢 cell 那一刻补一刀(那时旧 insight 本就引用了不支撑结论,重生成更正确)。不改 `generate_insight` 逻辑,只按需重调用(计划「不碰 generate_insight」不破)。重生成失败 → 保原 insight + degraded(降级必可见),绝不崩图。回归测试:`test_qc_node_rerenders_report_from_curated_analysis`(report body 重渲染)+ `test_qc_node_regenerates_insight_when_cells_dropped`(丢 cell→重生成覆盖)+ `test_qc_node_does_not_regenerate_insight_when_nothing_dropped`(守卫:0 丢→0 重生成)+ `test_qc_node_rerenders_report_on_entailment_failure_path`(降级路径重渲染不崩)。反幻觉硬不变量现覆盖全部用户可见持久化 artifact(矩阵 cell + report + insight headline)。
 
 ### SqliteSaver checkpointer 绑入 Lane E
 **Priority:** P2

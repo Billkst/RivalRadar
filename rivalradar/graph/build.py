@@ -28,7 +28,7 @@ def build_research_graph(*, conn, client, model, provider, as_of,
         conn=conn, provider=provider, official_domains=official_domains or {}))
     g.add_node("analyze", make_analyze_node(conn=conn, client=client, model=model))
     g.add_node("write", make_write_node(conn=conn, client=client, model=model, as_of=as_of))
-    g.add_node("qc", make_qc_node(conn=conn, client=client, model=model))
+    g.add_node("qc", make_qc_node(conn=conn, client=client, model=model, as_of=as_of))
     g.add_node("decide", make_decide_node(conn=conn, client=client, model=model, as_of=as_of))
     g.add_node("finalize", make_finalize_node(conn=conn, max_retries=max_retries))
 

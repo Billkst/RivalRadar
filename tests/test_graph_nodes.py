@@ -11,7 +11,7 @@ from rivalradar.graph.nodes import (
 from rivalradar.llm.structured import StructuredCallError
 from rivalradar.schema.models import (
     CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
-    ComparisonRow, ComparisonCell, EvidenceRef, ReportInsight,
+    ComparisonRow, ComparisonCell, EvidenceRef, ReportInsight, QCIssue,
 )
 from rivalradar.search.base import SearchResult
 from rivalradar.storage import repository as repo
@@ -187,7 +187,7 @@ def test_qc_node_degrades_on_entailment_failure(conn, monkeypatch):
         raise StructuredCallError("entailment boom")
     monkeypatch.setattr(qc, "check_entailment", _boom)
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
-    node = make_qc_node(conn=conn, client=None, model="m")
+    node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     state = {"analysis": _full_clean_analysis().model_dump(),
              "evidence": _evidence_all_dims(), "retry_count": 0}
     out = node(state, _CFG)
@@ -200,7 +200,7 @@ def test_qc_node_degrades_on_entailment_failure(conn, monkeypatch):
 def test_qc_node_retry_count_bumps_only_with_prior_result(conn, monkeypatch):
     monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
-    node = make_qc_node(conn=conn, client=None, model="m")
+    node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     base = {"analysis": _full_clean_analysis().model_dump(), "evidence": _evidence_all_dims()}
     first = node({**base, "retry_count": 0}, _CFG)          # 首遍无 qc_result
     assert first["retry_count"] == 0
@@ -211,7 +211,7 @@ def test_qc_node_retry_count_bumps_only_with_prior_result(conn, monkeypatch):
 def test_qc_node_low_coverage_triggers_retry_collect(conn, monkeypatch):
     monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
-    node = make_qc_node(conn=conn, client=None, model="m")
+    node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     # 只覆盖 pricing 的分析 → coverage 缺 5 维 → retry_collect
     ref = [EvidenceRef(evidence_id="g1", quote="q")]
     analysis = CompetitorAnalysis(
@@ -231,12 +231,172 @@ def test_qc_node_degrades_on_non_structured_error(conn, monkeypatch):
         raise RuntimeError("rate limit / network blip")
     monkeypatch.setattr(qc, "check_entailment", _boom)
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
-    node = make_qc_node(conn=conn, client=None, model="m")
+    node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     state = {"analysis": _full_clean_analysis().model_dump(),
              "evidence": _evidence_all_dims(), "retry_count": 0}
     out = node(state, _CFG)
     assert out["degraded"] is True
     assert out["qc_result"]["verdict"] == "pass"   # 网络错降级 → 仅确定性闸 → pass,不崩整图
+
+
+def test_qc_node_rerenders_report_from_curated_analysis(conn, monkeypatch):
+    """反幻觉收口(TODOS P2 / Codex defer):report markdown 在 write 节点用**未策展**
+    analysis 生成,被 qc 策展丢掉的 cell 仍留在 report 里(check_traceability comparison_only
+    只校验 curated /analysis,管不到 report)。qc_node 策展后必须用 curated analysis 重渲染
+    body(render_body 确定性免 LLM)+ 拼回 write 阶段已生成的 insight → report 与 /analysis
+    一致,被丢的 cell 不再出现在报告对比表里。"""
+    import rivalradar.graph.nodes as nodes_mod
+    from rivalradar.agents import writer as writer_mod
+    _stub_insight = lambda body, *, client, model: ReportInsight(
+        market_context="MARKET_CTX", differentiation_thesis="DIFF_THESIS",
+        actionable_takeaway="TAKEAWAY")
+    # write 节点经 write_report_with_insight 调 writer.generate_insight;qc 重生成调
+    # nodes.generate_insight(import 绑定不同名字)→ 两侧都桩掉免 LLM
+    monkeypatch.setattr(writer_mod, "generate_insight", _stub_insight)
+    monkeypatch.setattr(nodes_mod, "generate_insight", _stub_insight)
+    # check_entailment 判 pricing 的 cell 不支撑 → 被策展丢;deployment 的 cell 留下
+    monkeypatch.setattr(
+        qc, "check_entailment",
+        lambda *a, **k: [QCIssue(competitor="Notion", dimension="pricing",
+                                 problem_type="hallucination", detail="证据不支撑")])
+    ref = [EvidenceRef(evidence_id="g1", quote="q")]
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion",
+            pricing=PricingModel(model_type="freemium", evidence_refs=ref), swot=SWOT())],
+        comparison=[
+            ComparisonRow(dimension="pricing", cells=[ComparisonCell(
+                competitor="Notion", value_type="enum", value="掉队DROP_ME", evidence_refs=ref)]),
+            ComparisonRow(dimension="deployment", cells=[ComparisonCell(
+                competitor="Notion", value_type="enum", value="留存KEEP_ME", evidence_refs=ref)]),
+        ])
+    evidence = [{"id": "g1", "competitor": "Notion", "dimension": d, "content": "c",
+                 "source_url": "u" + d, "source_title": "t", "language": "en", "fetched_at": "t0"}
+                for d in ("pricing", "deployment")]
+    repo.create_run(conn, "r1", ["Notion"], ["pricing", "deployment"])
+
+    # write 节点:用未策展 analysis 渲染 → 两个 cell 都在报告里(复现泄漏)+ insight 进 state
+    wnode = make_write_node(conn=conn, client=None, model="m", as_of="2026-05-26")
+    wout = wnode({"analysis": analysis.model_dump(), "evidence": evidence}, _CFG)
+    assert "DROP_ME" in wout["report"] and "KEEP_ME" in wout["report"]  # 泄漏 cell 在报告里
+    assert "insight" in wout                                            # insight threaded 进 state
+
+    # qc 节点:策展丢 pricing cell,用 curated analysis 重渲染报告
+    qnode = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
+    qout = qnode({"analysis": analysis.model_dump(), "evidence": evidence,
+                  "insight": wout["insight"], "retry_count": 0}, _CFG)
+    curated_dims = {r["dimension"] for r in qout["analysis"]["comparison"]}
+    assert curated_dims == {"deployment"}              # curated /analysis 已丢 pricing cell
+    assert "DROP_ME" not in qout["report"]             # 泄漏堵住:被丢的 cell 不在报告里
+    assert "KEEP_ME" in qout["report"]                 # 站得住的 cell 留着
+    assert "MARKET_CTX" in qout["report"]              # insight header 重新拼回
+    assert repo.get_report(conn, "r1") == qout["report"]  # 落库也是策展后报告
+
+
+def _two_dim_analysis_with_drop():
+    """pricing cell(将被策展丢)+ deployment cell(留下),均挂合法引用。"""
+    ref = [EvidenceRef(evidence_id="g1", quote="q")]
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion",
+            pricing=PricingModel(model_type="freemium", evidence_refs=ref), swot=SWOT())],
+        comparison=[
+            ComparisonRow(dimension="pricing", cells=[ComparisonCell(
+                competitor="Notion", value_type="enum", value="掉队DROP_ME", evidence_refs=ref)]),
+            ComparisonRow(dimension="deployment", cells=[ComparisonCell(
+                competitor="Notion", value_type="enum", value="留存KEEP_ME", evidence_refs=ref)]),
+        ])
+    evidence = [{"id": "g1", "competitor": "Notion", "dimension": d, "content": "c",
+                 "source_url": "u" + d, "source_title": "t", "language": "en", "fetched_at": "t0"}
+                for d in ("pricing", "deployment")]
+    return analysis, evidence
+
+
+def test_qc_node_regenerates_insight_when_cells_dropped(conn, monkeypatch):
+    """反幻觉收口 Option A:策展真丢了 cell 时,顶部 insight headline 必须用 curated body
+    重生成 + 覆盖落库,否则 headline 仍引用矩阵里已没的结论(cockpit 最显眼敞口)。"""
+    import rivalradar.graph.nodes as nodes_mod
+    calls = []
+
+    def _spy_insight(body, *, client, model):
+        calls.append(body)  # 记录喂给重生成的 body(应是 curated,不含 DROP_ME)
+        return ReportInsight(market_context="REGEN_FROM_CURATED",
+                             differentiation_thesis="d", actionable_takeaway="a")
+    monkeypatch.setattr(nodes_mod, "generate_insight", _spy_insight)  # qc 调的是 nodes 绑定
+    monkeypatch.setattr(
+        qc, "check_entailment",
+        lambda *a, **k: [QCIssue(competitor="Notion", dimension="pricing",
+                                 problem_type="hallucination", detail="x")])
+    analysis, evidence = _two_dim_analysis_with_drop()
+    pre = ReportInsight(market_context="PRECURATION_HEADLINE",
+                        differentiation_thesis="x", actionable_takeaway="y").model_dump()
+    repo.create_run(conn, "r1", ["Notion"], ["pricing", "deployment"])
+    qnode = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
+    out = qnode({"analysis": analysis.model_dump(), "evidence": evidence,
+                 "insight": pre, "retry_count": 0}, _CFG)
+    assert len(calls) == 1                              # 重生成调用了一次
+    assert "DROP_ME" not in calls[0]                    # 喂给重生成的是 curated body(无被丢 cell)
+    assert "REGEN_FROM_CURATED" in out["report"]        # 报告用重生成的 insight
+    assert "PRECURATION_HEADLINE" not in out["report"]  # 旧 headline 不再出现
+    assert repo.get_insight(conn, "r1").market_context == "REGEN_FROM_CURATED"  # 覆盖落库
+
+
+def test_qc_node_does_not_regenerate_insight_when_nothing_dropped(conn, monkeypatch):
+    """守卫:策展没丢任何 cell(happy path = 现有所有种子 curated=0)→ 不重生成 insight,
+    零额外 LLM 调用、不动 24/30 baseline,沿用 write 阶段的原 insight。"""
+    import rivalradar.graph.nodes as nodes_mod
+    calls = []
+    monkeypatch.setattr(
+        nodes_mod, "generate_insight",
+        lambda body, *, client, model: calls.append(body) or ReportInsight(
+            market_context="SHOULD_NOT_APPEAR", differentiation_thesis="d", actionable_takeaway="a"))
+    monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])  # 不丢任何 cell
+    pre = ReportInsight(market_context="ORIG_HEADLINE",
+                        differentiation_thesis="x", actionable_takeaway="y").model_dump()
+    repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
+    qnode = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
+    out = qnode({"analysis": _full_clean_analysis().model_dump(),
+                 "evidence": _evidence_all_dims(), "insight": pre, "retry_count": 0}, _CFG)
+    assert calls == []                                  # 守卫:没丢 cell → 0 次重生成
+    assert "ORIG_HEADLINE" in out["report"]             # 沿用 write 阶段原 insight
+    assert "SHOULD_NOT_APPEAR" not in out["report"]
+
+
+def test_qc_node_rerenders_report_on_entailment_failure_path(conn, monkeypatch):
+    """降级路径回归(ship 对抗验证 nit):check_entailment 抛 → curate 降级走机械门 fallback,
+    但 insight 仍在 state → 重渲染必须仍发生(用 curated body)且不崩图。悬空引用 cell 被机械门
+    丢掉,不残留在报告里;degraded 置位。"""
+    import rivalradar.graph.nodes as nodes_mod
+
+    def _boom(*a, **k):
+        raise RuntimeError("entailment network blip")
+    monkeypatch.setattr(qc, "check_entailment", _boom)
+    monkeypatch.setattr(  # 机械门丢了悬空 cell → dropped 非空 → 重生成 insight(桩掉免 LLM)
+        nodes_mod, "generate_insight",
+        lambda body, *, client, model: ReportInsight(
+            market_context="REGEN_DEGRADED", differentiation_thesis="d", actionable_takeaway="a"))
+    good = [EvidenceRef(evidence_id="g1", quote="q")]
+    dangling = [EvidenceRef(evidence_id="ghost", quote="q")]  # ghost 不在证据集 → 机械门丢
+    analysis = CompetitorAnalysis(
+        competitors=[CompetitorProfile(name="Notion",
+            pricing=PricingModel(model_type="freemium", evidence_refs=good), swot=SWOT())],
+        comparison=[
+            ComparisonRow(dimension="pricing", cells=[ComparisonCell(
+                competitor="Notion", value_type="enum", value="留存KEEP_ME", evidence_refs=good)]),
+            ComparisonRow(dimension="deployment", cells=[ComparisonCell(
+                competitor="Notion", value_type="enum", value="悬空DROP_ME", evidence_refs=dangling)]),
+        ])
+    evidence = [{"id": "g1", "competitor": "Notion", "dimension": d, "content": "c",
+                 "source_url": "u" + d, "source_title": "t", "language": "en", "fetched_at": "t0"}
+                for d in ("pricing", "deployment")]
+    pre = ReportInsight(market_context="PRECURATION",
+                        differentiation_thesis="x", actionable_takeaway="y").model_dump()
+    repo.create_run(conn, "r1", ["Notion"], ["pricing", "deployment"])
+    qnode = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
+    out = qnode({"analysis": analysis.model_dump(), "evidence": evidence,
+                 "insight": pre, "retry_count": 0}, _CFG)
+    assert out["degraded"] is True                      # 蕴含失败 → 降级(必可见)
+    assert "report" in out and "DROP_ME" not in out["report"]  # 重渲染发生 + 悬空 cell 不残留
+    assert "KEEP_ME" in out["report"]                   # 合法 cell 留着
+    assert "REGEN_DEGRADED" in out["report"]            # 机械门丢了 cell → insight 也重生成
 
 
 from rivalradar.graph.nodes import make_finalize_node
@@ -352,7 +512,7 @@ def test_qc_node_degraded_sticky_across_rounds(conn, monkeypatch):
         raise RuntimeError("round 1 rate limit")
     monkeypatch.setattr(qc, "check_entailment", _boom)
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
-    node = make_qc_node(conn=conn, client=None, model="m")
+    node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     base = {"analysis": _full_clean_analysis().model_dump(),
             "evidence": _evidence_all_dims(), "retry_count": 0}
     r1 = node(base, _CFG)
