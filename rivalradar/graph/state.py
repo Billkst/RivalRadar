@@ -31,6 +31,7 @@ class ResearchState(TypedDict, total=False):
     evidence: Annotated[list[dict], merge_evidence]  # Evidence.model_dump() 列表,append-only 去重
     analysis: dict                    # CompetitorAnalysis.model_dump()
     report: str                       # markdown 报告
+    insight: dict                     # ReportInsight.model_dump()(write 生成,qc 重拼报告复用)
     qc_result: dict                   # QCResult.model_dump()
     retry_count: int                  # 已重试次数(仅 qc 节点递增;首遍=0)
     degraded: bool                    # 本轮 LLM 蕴含是否降级

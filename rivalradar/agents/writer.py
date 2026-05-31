@@ -254,7 +254,17 @@ def write_report_with_insight(
     """
     body = render_body(analysis, evidence, as_of=as_of)
     insight = generate_insight(body, client=client, model=model)
-    markdown = (
+    return stitch_report(insight, body), insight
+
+
+def stitch_report(insight: ReportInsight, body: str) -> str:
+    """把 3 段执行洞察(LLM)与确定性正文拼成最终报告 markdown。
+
+    首渲染由 write_report_with_insight 调用;**qc_node 策展后用 curated body 重拼也调它**
+    (反幻觉收口 TODOS P2:report 须与 curated /analysis 一致,被策展丢的 cell 不能仍留在
+    报告对比表里)。insight 不随 body 重生成(守 24/30 baseline,且 insight 是显式标注的
+    AI 综合判断),只换确定性正文。"""
+    return (
         "# 竞品分析报告\n\n"
         "## 执行洞察(AI 基于下方正文综合)\n\n"
         "### 市场格局\n\n"
@@ -265,7 +275,6 @@ def write_report_with_insight(
         f"{insight.actionable_takeaway}\n\n"
         f"{body}"
     )
-    return markdown, insight
 
 
 def write_report(analysis: CompetitorAnalysis, evidence: list[Evidence], *,

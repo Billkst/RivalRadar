@@ -7,11 +7,15 @@ from typing import Any, Callable
 
 from rivalradar.agents.analyst import analyze
 from rivalradar.agents.collector import collect_evidence
-from rivalradar.agents.writer import generate_decisions, render_body, write_report_with_insight
+from rivalradar.agents.writer import (
+    generate_decisions, generate_insight, render_body, stitch_report,
+    write_report_with_insight,
+)
 from rivalradar.graph.router import extract_collect_targets
 from rivalradar.agents import qc
 from rivalradar.schema.models import (
     CONTROLLED_DIMENSIONS, CompetitorAnalysis, DecisionSet, Evidence, QCResult,
+    ReportInsight,
 )
 from rivalradar.storage.repository import (
     append_trace, insert_evidence, mark_run_finalized, save_analysis,
@@ -195,11 +199,13 @@ def make_write_node(*, conn, client, model, as_of):
                      input_summary=f"analysis of {len(state['analysis'].get('competitors', []))} competitors",
                      output_summary=f"report {len(report)} chars",
                      latency_ms=int((time.monotonic() - t0) * 1000))
-        return {"report": report}
+        # insight 经 state 传给 qc 节点:qc 策展后用 curated body 重拼报告时复用同一 insight
+        # (不重生成,守 24/30 baseline)。见 make_qc_node 的反幻觉重渲染。
+        return {"report": report, "insight": insight.model_dump()}
     return write_node
 
 
-def make_qc_node(*, conn, client, model):
+def make_qc_node(*, conn, client, model, as_of):
     """质检节点(策展人模型):curate_analysis 丢弃站不住的对比 cell(机械悬空 + LLM 蕴含
     不支撑),持久化策展后的分析;再跑确定性门(traceability comparison_only + ontology +
     coverage 请求维度)定 verdict。策展丢空维度 → low_coverage → retry_collect 补搜环。
@@ -242,6 +248,36 @@ def make_qc_node(*, conn, client, model):
         # (decide 用 curated body 生成决策,不会基于已丢弃的 cell)。
         save_analysis(conn, run_id, curated)
 
+        # 反幻觉收口(TODOS P2 + ship-time 对抗验证 MAJOR):report markdown 与 cockpit
+        # 顶部 insight headline 都在 write 节点用**未策展** analysis 生成,被策展丢的 cell
+        # 可能残留其中(check_traceability comparison_only 只校验对比矩阵 cell,管不到 report
+        # markdown,也**从不校验 insight 自由文本**)。
+        #   ① 用 curated analysis 重渲染 body(render_body 确定性,免 LLM)→ report 对比表 +
+        #      来源清单与 /analysis 一致。
+        #   ② **仅当策展真丢了 cell(dropped 非空)时**,用 curated body 重生成 insight + 覆盖
+        #      落库 → 顶部 headline 不再引用被丢的结论。happy path(dropped 空 = 现有所有种子
+        #      curated=0)零触发 → 不动 24/30 baseline、不多花一次 LLM。重生成本身不改
+        #      generate_insight 逻辑,只是按需重调用(计划「不碰 generate_insight」不破)。
+        #   重生成失败(网络/限流)→ 保留原 insight(pre-curation 但自洽)+ degraded(降级
+        #   必可见),绝不崩图。insight 缺失(老 checkpoint / 直接单测 qc_node)时整段跳过,
+        #   回退原 report(向后兼容)。重试轮里每轮 write→qc 都重做一次;收敛轮的产物流向 finalize。
+        curated_report = None
+        insight_dict = state.get("insight")
+        if insight_dict is not None:
+            insight_obj = ReportInsight(**insight_dict)
+            curated_body = render_body(curated, evidence, as_of=as_of)
+            if dropped:  # 策展真丢了 cell → headline 须用 curated body 重生成(否则引用已丢结论)
+                try:
+                    insight_obj = generate_insight(curated_body, client=client, model=model)
+                    save_insight(conn, run_id, insight_obj)
+                except Exception as e:  # noqa: BLE001 — 重生成尽力而为,失败保原 insight + 降级,绝不崩图
+                    logger.exception("qc insight regenerate failed for run %s", run_id)
+                    append_trace(conn, run_id, "qc",
+                                 output_summary=f"insight regen degraded: {type(e).__name__}")
+                    local_degraded = True
+            curated_report = stitch_report(insight_obj, curated_body)
+            save_report(conn, run_id, curated_report)
+
         # 确定性门跑在**策展后**的分析上:traceability(comparison_only,策展后应已干净)+
         # ontology + coverage(只查请求维度,且传 evidence 区分两类缺口)。**零证据**维度 →
         # low_coverage → retry_collect → broaden 补搜环(诚实自纠 money-shot,broaden 能补且会
@@ -275,8 +311,11 @@ def make_qc_node(*, conn, client, model):
                      output_summary=f"verdict={verdict} curated={len(dropped)} issues={len(issues)} "
                                     f"degraded={degraded} retry={new_rc}",
                      latency_ms=int((time.monotonic() - t0) * 1000))
-        return {"analysis": curated.model_dump(), "qc_result": result.model_dump(),
-                "retry_count": new_rc, "degraded": degraded}
+        out = {"analysis": curated.model_dump(), "qc_result": result.model_dump(),
+               "retry_count": new_rc, "degraded": degraded}
+        if curated_report is not None:
+            out["report"] = curated_report  # finalize 拿到策展后的报告(与 /analysis 一致)
+        return out
     return qc_node
 
 
