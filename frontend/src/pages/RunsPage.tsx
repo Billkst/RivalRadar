@@ -440,7 +440,8 @@ function CreateRunForm() {
 
 function RunsList() {
   const [runs, setRuns] = React.useState<RunSummary[] | null>(null)
-  const [error, setError] = React.useState<string | null>(null)
+  const [error, setError] = React.useState<string | null>(null) // 仅列表加载失败(早返整屏)
+  const [deleteError, setDeleteError] = React.useState<string | null>(null) // 删除失败:行内显示,不毁列表
   // 二次确认:首次点「删除」只置 confirmingId,再点「确认删除」才真删(避免误删)。
   const [confirmingId, setConfirmingId] = React.useState<string | null>(null)
   const [deletingId, setDeletingId] = React.useState<string | null>(null)
@@ -453,11 +454,13 @@ function RunsList() {
 
   const handleDelete = async (runId: string) => {
     setDeletingId(runId)
+    setDeleteError(null)
     try {
       await deleteRun(runId)
       setRuns((prev) => (prev ? prev.filter((r) => r.run_id !== runId) : prev))
     } catch (err) {
-      setError(`删除失败:${err instanceof Error ? err.message : String(err)}`)
+      // 行内报错,不写 error(那会触发"列表加载失败"早返、把整个列表替换掉)
+      setDeleteError(`删除失败:${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setDeletingId(null)
       setConfirmingId(null)
@@ -500,7 +503,7 @@ function RunsList() {
         <CardDescription>{runs.length} 条 · 点击进入详情</CardDescription>
       </CardHeader>
       <CardContent>
-        {error && <div className="mb-2 text-xs text-error">{error}</div>}
+        {deleteError && <div className="mb-2 text-xs text-error">{deleteError}</div>}
         <ul className="divide-y divide-border">
           {runs.map((r) => {
             const confirming = confirmingId === r.run_id
