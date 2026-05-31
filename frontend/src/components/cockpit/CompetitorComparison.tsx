@@ -25,6 +25,27 @@ function worstVerdict(refs: EvidenceRef[]): SupportVerdict | null {
   return w
 }
 
+interface VerdictAgg {
+  supported: number
+  partial: number
+  unsupported: number
+  total: number
+}
+
+/** 跨全矩阵聚合每格 worst verdict —— 喂头部信任徽章,取代每格绿点。 */
+function aggregateMatrix(analysis: CompetitorAnalysis): VerdictAgg {
+  const a: VerdictAgg = { supported: 0, partial: 0, unsupported: 0, total: 0 }
+  for (const row of analysis.comparison) {
+    for (const cell of row.cells) {
+      const v = worstVerdict(cell.evidence_refs)
+      if (!v) continue
+      a[v] += 1
+      a.total += 1
+    }
+  }
+  return a
+}
+
 /** 列顺序:优先 analysis.competitors,空则从 comparison cells 并集推导。 */
 function competitorOrder(analysis: CompetitorAnalysis): string[] {
   if (analysis.competitors.length > 0) return analysis.competitors.map((c) => c.name)
@@ -69,11 +90,15 @@ function Cell({ cell, matched, dimmed }: { cell: ComparisonCell | null; matched:
           {cell.value}
         </span>
       )}
-      {verdict ? (
+      {/* 绿点重设计:充分佐证不再每格挂点(全绿=噪音),只在「部分/不足」时显标记+文案;
+          整体「佐证充分」信号上移到矩阵头部聚合徽章。stale 仍单独标。 */}
+      {verdict && verdict !== 'supported' ? (
         <div className="mt-1.5 flex items-center gap-1">
-          <VerdictDot verdict={verdict} />
+          <VerdictDot verdict={verdict} showLabel />
           {stale ? <span className="text-[10px] text-evidence-stale" title="证据可能过期">· 旧</span> : null}
         </div>
+      ) : stale ? (
+        <div className="mt-1.5 text-[10px] text-evidence-stale" title="证据可能过期">· 证据偏旧</div>
       ) : null}
     </td>
   )
@@ -123,10 +148,30 @@ export function CompetitorComparison({
 
   const competitors = competitorOrder(analysis)
   const hlActive = highlightIds.size > 0
+  const agg = aggregateMatrix(analysis)
+  const allSupported = agg.total > 0 && agg.partial === 0 && agg.unsupported === 0
 
   return (
     <section className="space-y-2" aria-label="对比矩阵">
-      <SectionTitle>竞品怎么比</SectionTitle>
+      <div className="flex items-center justify-between gap-2">
+        <SectionTitle>竞品怎么比</SectionTitle>
+        {agg.total > 0 ? (
+          allSupported ? (
+            <span
+              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-success/12 px-2.5 py-0.5 text-[11px] font-medium text-verdict-supported"
+              title="每格结论都由引用证据充分支撑(佐证不足的已被质检剔除)"
+            >
+              <span aria-hidden>●</span> {agg.total} 项结论佐证充分
+            </span>
+          ) : (
+            <span className="inline-flex shrink-0 items-center gap-2 rounded-full bg-surface-subtle px-2.5 py-0.5 text-[11px]">
+              <span className="text-verdict-supported" title="佐证充分">● {agg.supported}</span>
+              <span className="text-verdict-partial" title="部分佐证">◐ {agg.partial}</span>
+              <span className="text-verdict-unsupported" title="佐证不足">○ {agg.unsupported}</span>
+            </span>
+          )
+        ) : null}
+      </div>
       <div className="overflow-x-auto rounded-lg border border-border">
         <table className="w-full border-collapse text-left tabular-nums">
           <thead>
@@ -178,6 +223,9 @@ export function CompetitorComparison({
           </tbody>
         </table>
       </div>
+      <p className="text-[11px] text-text-muted">
+        佐证不足的结论已被质检剔除,矩阵仅列站得住的格子;◐/○ 标记表示该格证据偏弱,需谨慎。
+      </p>
       {hlActive ? (
         <p className="text-[11px] text-accent">已高亮选中决策的依据所在行列(再点一次决策的高亮按钮取消)。</p>
       ) : null}

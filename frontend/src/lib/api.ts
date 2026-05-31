@@ -105,3 +105,8 @@ export interface CancelRunResponse {
 }
 export const cancelRun = (runId: string) =>
   jsonFetch<CancelRunResponse>(`/run/${runId}/cancel`, { method: 'POST' })
+
+// ─── Delete run(历史列表手动删除,前端带二次确认)──────────────────────────
+// DELETE /run/:id — 级联删所有关联表;run 不存在 → 404。
+export const deleteRun = (runId: string) =>
+  jsonFetch<{ run_id: string; deleted: boolean }>(`/run/${runId}`, { method: 'DELETE' })

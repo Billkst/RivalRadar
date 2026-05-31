@@ -102,6 +102,25 @@ def get_run(run_id: str,
     return r
 
 
+@router.delete("/run/{run_id}")
+def delete_run(
+    run_id: str,
+    conn: sqlite3.Connection = Depends(get_db_conn),
+) -> dict:
+    """整条删除一个 run 及其全部关联数据(用户在历史列表手动删除,带前端二次确认)。
+
+    破坏性操作:级联删 evidence/analysis/report/qc/insight/decisions/trace/annotations。
+    run 不存在 → 404。删除前若该 run 仍在跑(_ACTIVE_RUN_TASKS),先 cancel in-flight task,
+    避免删除后 SSE 流仍往已删 run 写表(留下孤儿行)。
+    """
+    task = _ACTIVE_RUN_TASKS.get(run_id)
+    if task is not None and not task.done():
+        task.cancel()
+    if not repo.delete_run(conn, run_id):
+        raise HTTPException(404, "run not found")
+    return {"run_id": run_id, "deleted": True}
+
+
 @router.post("/run/{run_id}/cancel")
 def cancel_run(
     run_id: str,

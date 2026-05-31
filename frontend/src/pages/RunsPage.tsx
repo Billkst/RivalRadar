@@ -1,8 +1,9 @@
 import * as React from 'react'
 import { Link, useNavigate } from 'react-router-dom'
-import { Loader2, Play, Plus, Search } from 'lucide-react'
-import { discoverCompetitors, fetchRuns } from '@/lib/api'
+import { Loader2, Play, Plus, Search, Trash2 } from 'lucide-react'
+import { deleteRun, discoverCompetitors, fetchRuns } from '@/lib/api'
 import { dimensionLabel } from '@/lib/dimensions'
+import { formatBeijing } from '@/lib/time'
 import { DEMO_RUN_ID } from '@/lib/demoFixture'
 import { useSSE } from '@/hooks/useSSE'
 import { CONTROLLED_DIMENSIONS, type DiscoveredCompetitor, type RunSummary } from '@/types/api'
@@ -20,9 +21,11 @@ import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/com
 export function RunsPage() {
   return (
     <div className="space-y-6">
-      <DemoEntry />
+      <PhilosophyCard />
       <CreateRunForm />
       <RunsList />
+      {/* 🎬 Demo 兜底入口:挪到页尾不显眼处 + 仅 dev 可见(生产构建自动剔除)。 */}
+      {import.meta.env.DEV && <DemoEntry />}
     </div>
   )
 }
@@ -39,22 +42,69 @@ function DemoEntry() {
   return (
     <Link
       to={`/run/${DEMO_RUN_ID}`}
-      className="block rounded-lg border-2 border-accent bg-accent-soft p-4 transition-shadow hover:shadow-panel"
+      className="flex items-center gap-2 rounded-md border border-dashed border-border px-3 py-1.5 text-xs text-text-muted transition-colors hover:border-accent hover:text-accent"
+      title="预录 fixture,零依赖、不打 backend / LLM,仅作 demo 兜底"
     >
-      <div className="flex items-center gap-3">
-        <span className="text-2xl" aria-hidden>
-          🎬
-        </span>
-        <div className="min-w-0 flex-1">
-          <div className="text-sm font-semibold text-accent">Demo 模式 · 一键看 25s 证据驾驶舱演示</div>
-          <div className="mt-0.5 text-xs text-text-muted">
-            预录 fixture 走完整 4 agent 协作 cycle:采集员 → 分析员 → 撰写员 → 质检员。
-            零依赖,不打 backend / LLM,适合 demo 兜底。
-          </div>
-        </div>
-        <Play className="h-4 w-4 flex-shrink-0 text-accent" aria-hidden />
-      </div>
+      <span aria-hidden>🎬</span>
+      <span>Demo 兜底 · 回放预录 25s 驾驶舱演示(dev only)</span>
     </Link>
+  )
+}
+
+// 成品种子(本地 DB)。首页「看范文」指向它的完整驾驶舱;若该 run 不存在(全新克隆),
+// 目标页各面板优雅显空态,不会崩。
+const SAMPLE_RUN_ID = 'run_selfheal01'
+
+const PARADIGM_PILLARS = [
+  {
+    t: '决策流,不是报告',
+    d: '每条建议 = 做什么 / 为什么(带依据)/ 哪里可能错,而不是一篇让你自己找重点的长文。',
+  },
+  {
+    t: '证据常驻可溯源',
+    d: '点任一结论的证据徽章,立刻看到原始出处——「点结论看收据」,不是 AI 黑盒。',
+  },
+  {
+    t: '自我纠错 + 自我攻击',
+    d: '采集不足会自己打回重采(可见的重试环),每条结论自带反证「这里可能站不住」。',
+  },
+] as const
+
+/**
+ * PhilosophyCard — 把 DESIGN.md 的 positioning(决策基础设施,非报告生成器)在首页显性表达
+ * (Q4:设计哲学应在网站上有所体现)。内含「看范文」入口(Q9),指向成品种子的完整驾驶舱。
+ */
+function PhilosophyCard() {
+  return (
+    <div className="rounded-lg border border-border bg-surface p-5">
+      <div className="flex items-start justify-between gap-4">
+        <div className="min-w-0">
+          <h2 className="text-[17px] font-semibold text-text-primary">
+            这不是又一个「竞品报告生成器」
+          </h2>
+          <p className="mt-1 text-[13px] leading-relaxed text-text-muted">
+            RivalRadar 是<span className="text-accent">决策基础设施</span>:它给你下一步该做什么的
+            <b className="font-medium text-text-primary">决策建议</b>,每条都附
+            <b className="font-medium text-text-primary">证据收据</b>,并主动告诉你它
+            <b className="font-medium text-text-primary">可能错在哪</b>。报告只是副产品。
+          </p>
+        </div>
+        <Link
+          to={`/run/${SAMPLE_RUN_ID}`}
+          className="inline-flex shrink-0 items-center gap-1 rounded-md border border-accent bg-accent-soft px-3 py-1.5 text-xs font-medium text-accent transition-shadow hover:shadow-panel"
+        >
+          看一份完整范文 →
+        </Link>
+      </div>
+      <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
+        {PARADIGM_PILLARS.map((p) => (
+          <div key={p.t} className="rounded-md border border-border bg-surface-subtle p-3">
+            <div className="text-[13px] font-medium text-text-primary">{p.t}</div>
+            <div className="mt-1 text-[12px] leading-relaxed text-text-muted">{p.d}</div>
+          </div>
+        ))}
+      </div>
+    </div>
   )
 }
 
@@ -391,12 +441,28 @@ function CreateRunForm() {
 function RunsList() {
   const [runs, setRuns] = React.useState<RunSummary[] | null>(null)
   const [error, setError] = React.useState<string | null>(null)
+  // 二次确认:首次点「删除」只置 confirmingId,再点「确认删除」才真删(避免误删)。
+  const [confirmingId, setConfirmingId] = React.useState<string | null>(null)
+  const [deletingId, setDeletingId] = React.useState<string | null>(null)
 
   React.useEffect(() => {
     fetchRuns()
       .then(setRuns)
       .catch((err) => setError(String(err)))
   }, [])
+
+  const handleDelete = async (runId: string) => {
+    setDeletingId(runId)
+    try {
+      await deleteRun(runId)
+      setRuns((prev) => (prev ? prev.filter((r) => r.run_id !== runId) : prev))
+    } catch (err) {
+      setError(`删除失败:${err instanceof Error ? err.message : String(err)}`)
+    } finally {
+      setDeletingId(null)
+      setConfirmingId(null)
+    }
+  }
 
   if (error) {
     return (
@@ -434,24 +500,62 @@ function RunsList() {
         <CardDescription>{runs.length} 条 · 点击进入详情</CardDescription>
       </CardHeader>
       <CardContent>
+        {error && <div className="mb-2 text-xs text-error">{error}</div>}
         <ul className="divide-y divide-border">
-          {runs.map((r) => (
-            <li key={r.run_id} className="py-2">
-              <Link
-                to={`/run/${r.run_id}`}
-                className="flex items-center justify-between gap-4 rounded-md px-2 py-1 text-sm hover:bg-surface-subtle"
-              >
-                <div className="flex flex-col">
-                  <span className="font-mono text-xs text-text-muted">{r.run_id}</span>
-                  <span className="text-text-primary">{r.competitors.join(' · ')}</span>
-                </div>
-                <div className="flex items-center gap-2 text-xs">
-                  <StatusBadge status={r.status} degraded={r.degraded} />
-                  <time className="font-mono text-text-muted">{r.created_at.slice(0, 16)}</time>
-                </div>
-              </Link>
-            </li>
-          ))}
+          {runs.map((r) => {
+            const confirming = confirmingId === r.run_id
+            const deleting = deletingId === r.run_id
+            return (
+              <li key={r.run_id} className="flex items-center gap-1 py-2">
+                <Link
+                  to={`/run/${r.run_id}`}
+                  className="flex flex-1 items-center justify-between gap-4 rounded-md px-2 py-1 text-sm hover:bg-surface-subtle"
+                >
+                  <div className="flex flex-col">
+                    <span className="font-mono text-xs text-text-muted">{r.run_id}</span>
+                    <span className="text-text-primary">{r.competitors.join(' · ')}</span>
+                  </div>
+                  <div className="flex items-center gap-2 text-xs">
+                    <StatusBadge status={r.status} degraded={r.degraded} />
+                    <time className="font-mono text-text-muted" title={r.created_at}>
+                      {formatBeijing(r.created_at)}
+                    </time>
+                  </div>
+                </Link>
+                {/* 删除区:Link 之外的兄弟节点,点删除不触发导航 */}
+                {confirming ? (
+                  <div className="flex shrink-0 items-center gap-1 text-xs">
+                    <button
+                      type="button"
+                      onClick={() => void handleDelete(r.run_id)}
+                      disabled={deleting}
+                      className="rounded border border-error px-1.5 py-0.5 text-error hover:bg-error/10 disabled:opacity-50"
+                    >
+                      {deleting ? <Loader2 className="h-3 w-3 animate-spin" /> : '确认删除'}
+                    </button>
+                    <button
+                      type="button"
+                      onClick={() => setConfirmingId(null)}
+                      disabled={deleting}
+                      className="rounded border border-border px-1.5 py-0.5 text-text-muted hover:bg-surface-subtle"
+                    >
+                      取消
+                    </button>
+                  </div>
+                ) : (
+                  <button
+                    type="button"
+                    onClick={() => setConfirmingId(r.run_id)}
+                    aria-label={`删除 ${r.run_id}`}
+                    title="删除此调研记录"
+                    className="shrink-0 rounded p-1.5 text-text-muted hover:bg-error/10 hover:text-error"
+                  >
+                    <Trash2 className="h-3.5 w-3.5" />
+                  </button>
+                )}
+              </li>
+            )
+          })}
         </ul>
       </CardContent>
     </Card>

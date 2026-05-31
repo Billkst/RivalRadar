@@ -4,6 +4,7 @@ import { BackendDownBanner } from '@/components/BackendDownBanner'
 import { RunsPage } from '@/pages/RunsPage'
 import { RunPage } from '@/pages/RunPage'
 import { CompetitorPage } from '@/pages/CompetitorPage'
+import { ReportView } from '@/pages/ReportView'
 
 /**
  * App root — BrowserRouter + Routes (plan v2 Task 3).
@@ -24,6 +25,8 @@ function App() {
     <BrowserRouter>
       <BackendDownBanner />
       <Routes>
+        {/* 全屏报告文档(Layout 外,免应用外壳挤占 + 打印隔离干净) */}
+        <Route path="/run/:run_id/report" element={<ReportView />} />
         <Route element={<Layout />}>
           <Route index element={<Navigate to="/runs" replace />} />
           <Route path="/runs" element={<RunsPage />} />
