@@ -51,10 +51,6 @@ function DemoEntry() {
   )
 }
 
-// 成品种子(本地 DB)。首页「看范文」指向它的完整驾驶舱;若该 run 不存在(全新克隆),
-// 目标页各面板优雅显空态,不会崩。
-const SAMPLE_RUN_ID = 'run_selfheal01'
-
 const PARADIGM_PILLARS = [
   {
     t: '决策流,不是报告',
@@ -72,7 +68,7 @@ const PARADIGM_PILLARS = [
 
 /**
  * PhilosophyCard — 把 DESIGN.md 的 positioning(决策基础设施,非报告生成器)在首页显性表达
- * (Q4:设计哲学应在网站上有所体现)。内含「看范文」入口(Q9),指向成品种子的完整驾驶舱。
+ * (Q4:设计哲学应在网站上有所体现)。内含「看范文」入口(Q9),指向范文库(他人专业范文)。
  */
 function PhilosophyCard() {
   return (
@@ -90,10 +86,10 @@ function PhilosophyCard() {
           </p>
         </div>
         <Link
-          to={`/run/${SAMPLE_RUN_ID}`}
+          to="/samples"
           className="inline-flex shrink-0 items-center gap-1 rounded-md border border-accent bg-accent-soft px-3 py-1.5 text-xs font-medium text-accent transition-shadow hover:shadow-panel"
         >
-          看一份完整范文 →
+          看专业竞品分析范文 →
         </Link>
       </div>
       <div className="mt-4 grid grid-cols-1 gap-3 sm:grid-cols-3">
