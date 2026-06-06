@@ -18,6 +18,7 @@ import * as React from 'react'
 import { motion, useReducedMotion } from 'framer-motion'
 import { useRunStore } from '@/stores/runStore'
 import { AGENT_BY_ID } from '@/lib/agentConstants'
+import { formatBeijingTime } from '@/lib/time'
 import type { AgentId } from '@/types/agents'
 import type { SSEEvent } from '@/types/api'
 
@@ -282,7 +283,7 @@ export function ExecutionStream() {
                       <span className="rounded bg-accent px-1.5 py-0.5 text-[10px] font-medium text-white">
                         决策
                       </span>
-                      <time className="font-mono text-[10px] text-text-muted">{row.ts.slice(11, 19)}</time>
+                      <time className="font-mono text-[10px] text-text-muted">{formatBeijingTime(row.ts)}</time>
                       {row.done ? (
                         <span className="text-[10px] text-success" aria-label="完成">✓</span>
                       ) : (
@@ -299,7 +300,7 @@ export function ExecutionStream() {
                 <li key={row.key} className="px-3 py-2">
                   <div className="flex items-baseline gap-2">
                     <RoleChip agentId={row.agentId} />
-                    <time className="font-mono text-[10px] text-text-muted">{row.ts.slice(11, 19)}</time>
+                    <time className="font-mono text-[10px] text-text-muted">{formatBeijingTime(row.ts)}</time>
                     {row.done ? (
                       <span className="text-[10px] text-success" aria-label="完成">✓</span>
                     ) : (

@@ -8,6 +8,7 @@
 import { useEvidenceViewer } from '@/stores/evidenceViewerStore'
 import { useEvidence } from '@/stores/evidenceStore'
 import { ageDays, isStale } from '@/lib/freshness'
+import { formatBeijingDate } from '@/lib/time'
 import { VerdictDot } from '@/components/cockpit/VerdictDot'
 import type { EvidenceRef } from '@/types/api'
 
@@ -42,7 +43,7 @@ export function EvidencePill({ refItem, index }: { refItem: EvidenceRef; index: 
         </span>
         {ev ? (
           <span className="mt-0.5 block font-mono text-[10px] text-text-muted">
-            采集于 {ev.fetched_at.slice(0, 10)}
+            采集于 {formatBeijingDate(ev.fetched_at)}
             {stale ? ` · ${ageDays(ev.fetched_at)} 天前(可能过期)` : ''}
           </span>
         ) : null}

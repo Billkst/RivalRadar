@@ -110,6 +110,26 @@ def update_run_degraded(conn: sqlite3.Connection, run_id: str, degraded: bool) -
     conn.commit()
 
 
+def delete_run(conn: sqlite3.Connection, run_id: str) -> bool:
+    """整条删除一个 run 及其全部关联数据(evidence/analysis/report/qc/insight/
+    decisions/trace/annotations + runs 本行)。
+
+    扫 sqlite_master 删所有带 run_id 列的表 —— schema 后续加表也自动覆盖,免逐表手列
+    (与 spikes 的幂等清理同策略)。返回 True if run 原本存在(删到了 runs 行),
+    False 表示 run 不存在(供路由层返 404)。
+    """
+    if get_run(conn, run_id) is None:
+        return False
+    tables = [r[0] for r in conn.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")]
+    for t in tables:
+        cols = [c[1] for c in conn.execute(f"PRAGMA table_info({t})")]
+        if "run_id" in cols:
+            conn.execute(f"DELETE FROM {t} WHERE run_id=?", (run_id,))
+    conn.commit()
+    return True
+
+
 # ---- evidence ----
 def insert_evidence(conn: sqlite3.Connection, run_id: str, ev: Evidence) -> None:
     # OR IGNORE:同 run 内重复 (id) 被 reducer 防过,这里是双保险防止意外

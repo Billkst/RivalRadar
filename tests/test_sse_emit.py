@@ -11,11 +11,13 @@
 mock FakeGraph 模拟 LangGraph.astream(初始 + config={configurable:{emit}} +
 stream_mode='updates' yield {node_name: state_delta} 形态)。
 """
+import asyncio
 import json
 
 import pytest
 
 from rivalradar.api.sse import _ACTIVE_RUN_TASKS, graph_event_stream
+from rivalradar.llm.runcontrol import RunAborted
 from rivalradar.storage import repository as repo
 from rivalradar.storage.db import connect, init_db
 
@@ -131,3 +133,72 @@ async def test_graph_event_stream_cleans_up_active_tasks(conn):
 
     # 验 cleaned up — 防 memory leak
     assert "r3" not in _ACTIVE_RUN_TASKS
+
+
+class _AbortingGraph:
+    """astream 抛 RunAborted(模拟包装 client 在协作取消/超时时抛出顺线程池传上来)。"""
+    def __init__(self, reason):
+        self._reason = reason
+
+    async def astream(self, initial, *, config, stream_mode):
+        if False:  # 让它成为 async generator
+            yield {}
+        raise RunAborted(self._reason)
+
+
+async def test_graph_event_stream_cancelled_emits_cancelled_marks_cancelled(conn):
+    """协作取消:RunAborted('cancelled')→ SSE 出 'cancelled',run 标 cancelled(幂等 CAS),
+    绝不被标 failed/done。不预标 → 验证 RunAborted 分支自身会标 cancelled(防僵尸)。"""
+    repo.create_run(conn, "rc", ["Notion"], ["pricing"])  # 仍 running,不预标
+
+    events = []
+    async for ev in graph_event_stream(_AbortingGraph("cancelled"), {}, {}, "rc", conn=conn):
+        events.append(ev)
+
+    types = [e["event"] for e in events]
+    assert types[0] == "start" and "cancelled" in types
+    assert "error" not in types and "done" not in types
+    assert repo.get_run(conn, "rc")["status"] == "cancelled"  # 分支自身标 cancelled,非 failed
+
+
+async def test_graph_event_stream_disconnect_marks_cancelled(conn):
+    """客户端断连(generator 的 __anext__ 被 cancel,无 POST /cancel)→ except CancelledError
+    路径必须 mark_run_cancelled,防 run 永久停 running 成僵尸(对抗审查 confirmed medium)。"""
+    repo.create_run(conn, "rd", ["Notion"], ["pricing"])  # running
+
+    class _HangGraph:
+        async def astream(self, initial, *, config, stream_mode):
+            await asyncio.sleep(30)   # 长跑,drain 阻塞在 queue.get
+            if False:
+                yield {}
+
+    agen = graph_event_stream(_HangGraph(), {}, {}, "rd", conn=conn)
+    assert (await agen.__anext__())["event"] == "start"
+    pending = asyncio.ensure_future(agen.__anext__())  # 阻塞在 await queue.get()
+    await asyncio.sleep(0.05)
+    pending.cancel()  # 模拟断连:注入 CancelledError 到 generator 的 await
+    try:
+        await pending
+    except asyncio.CancelledError:
+        pass
+    try:
+        await agen.aclose()
+    except Exception:  # noqa: BLE001
+        pass
+    assert repo.get_run(conn, "rd")["status"] == "cancelled"  # 不再是僵尸 running
+
+
+async def test_graph_event_stream_timeout_emits_error_marks_failed(conn):
+    """墙钟超时:RunAborted('timeout')→ SSE 出 'error'(超时文案)+ run 标 failed。"""
+    repo.create_run(conn, "rt", ["Notion"], ["pricing"])  # 仍 running
+
+    events = []
+    async for ev in graph_event_stream(_AbortingGraph("timeout"), {}, {}, "rt", conn=conn):
+        events.append(ev)
+
+    types = [e["event"] for e in events]
+    assert types[0] == "start" and "error" in types
+    err = json.loads(next(e for e in events if e["event"] == "error")["data"])
+    assert "超时" in err["error"]
+    assert repo.get_run(conn, "rt")["status"] == "failed"
+    assert "rt" not in _ACTIVE_RUN_TASKS  # 清理

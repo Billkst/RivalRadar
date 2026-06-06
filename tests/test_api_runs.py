@@ -335,6 +335,77 @@ def test_post_run_rejects_oversized_competitor_string(stubbed_client):
     assert "competitors" in r.json()["detail"]
 
 
+def test_delete_run_404_for_unknown(client):
+    """删除不存在的 run → 404(前端据此提示已不存在)。"""
+    r = client.delete("/run/no_such_run")
+    assert r.status_code == 404
+
+
+def test_delete_run_running_returns_409(db_path, client):
+    """运行中的 run 拒删 → 409(对抗审查 P1,Claude+Codex 跨模型一致):协作式取消挡不住一个
+    已过检查点、正在 sync 写库的 worker 线程,删除后它仍会写出无父 runs 行的孤儿数据。故运行中
+    不直接删,让用户先取消。run 必须仍在(未被删),数据零损坏。"""
+    c = connect(db_path); init_db(c)
+    repo.create_run(c, "r_running", ["Notion"], ["pricing"])  # create_run 默认 status=running
+    c.close()
+    r = client.delete("/run/r_running")
+    assert r.status_code == 409
+    assert client.get("/run/r_running").status_code == 200  # 仍在,未被误删
+
+
+def test_delete_run_removes_from_list(db_path, client):
+    """删除后 /runs 不再列出该 run,GET /run/:id 也 404。"""
+    c = connect(db_path); init_db(c)
+    repo.create_run(c, "r_keep", ["Notion"], ["pricing"])
+    repo.update_run_status(c, "r_keep", "done")
+    repo.create_run(c, "r_gone", ["Linear"], ["pricing"])
+    repo.update_run_status(c, "r_gone", "done")
+    c.close()
+
+    r = client.delete("/run/r_gone")
+    assert r.status_code == 200
+    assert r.json() == {"run_id": "r_gone", "deleted": True}
+
+    ids = {x["run_id"] for x in client.get("/runs").json()}
+    assert ids == {"r_keep"}
+    assert client.get("/run/r_gone").status_code == 404
+
+
+def test_delete_run_cascades_all_related_tables(stubbed_client, db_path):
+    """跑完整 run(落 evidence/analysis/report/qc/insight/decisions/trace),DELETE 后
+    所有关联表的该 run 行都必须清空 —— 否则留孤儿行(storage 泄漏 + 列表计数错)。"""
+    r = stubbed_client.post("/run",
+                            json={"competitors": ["Notion"],
+                                  "dimensions": list(CONTROLLED_DIMENSIONS)})
+    run_id = json.loads(_parse_sse(r.content)[-1]["data"])["run_id"]
+
+    # 删除前:确认数据确实落了库(否则级联断言无意义)
+    c = connect(db_path); init_db(c)
+    assert repo.get_run(c, run_id) is not None
+    assert len(repo.list_evidence(c, run_id)) > 0
+    assert repo.get_analysis(c, run_id) is not None
+    assert repo.get_report(c, run_id) is not None
+    assert repo.get_decisions(c, run_id) is not None
+    assert repo.get_qc_result(c, run_id) is not None
+    assert repo.get_insight(c, run_id) is not None
+    assert len(repo.list_trace(c, run_id)) > 0
+    c.close()
+
+    assert stubbed_client.delete(f"/run/{run_id}").status_code == 200
+
+    # 删除后:全部清空
+    c = connect(db_path); init_db(c)
+    assert repo.get_run(c, run_id) is None
+    assert repo.list_evidence(c, run_id) == []
+    assert repo.get_analysis(c, run_id) is None
+    assert repo.get_report(c, run_id) is None
+    assert repo.get_decisions(c, run_id) is None
+    assert repo.get_qc_result(c, run_id) is None
+    assert repo.get_insight(c, run_id) is None
+    assert repo.list_trace(c, run_id) == []
+    c.close()
+
+
 def test_list_runs_summary_includes_degraded_field(db_path, client):
     """ship 修复 — RunSummary 含 degraded 字段(原 Lane E 盲点:只加到 RunDetail)。
     /runs 列表的降级横幅 §11.5 依赖此字段,缺失会被 FastAPI response_model 静默剥除。"""

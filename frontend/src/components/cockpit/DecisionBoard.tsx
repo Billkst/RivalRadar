@@ -16,6 +16,7 @@
  */
 import { useEvidence } from '@/stores/evidenceStore'
 import { ageDays, isStale } from '@/lib/freshness'
+import { formatBeijingDate } from '@/lib/time'
 import { SectionTitle, PanelSkeleton, EmptyNote, ErrorNote } from '@/components/cockpit/parts'
 import { VerdictDot } from '@/components/cockpit/VerdictDot'
 import { EvidencePill } from '@/components/cockpit/EvidencePill'
@@ -71,7 +72,7 @@ function EvidenceLine({ refItem }: { refItem: EvidenceRef }) {
         <span className="truncate">{ev ? ev.source_title : '来源加载中…'}</span>
         {ev ? (
           <span>
-            · {ev.fetched_at.slice(0, 10)}
+            · {formatBeijingDate(ev.fetched_at)}
             {stale ? (
               <span className="text-evidence-stale"> · {ageDays(ev.fetched_at)} 天前(可能过期)</span>
             ) : null}

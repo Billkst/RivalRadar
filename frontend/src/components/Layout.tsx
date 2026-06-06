@@ -64,7 +64,9 @@ export function Layout() {
             </div>
           </aside>
         )}
-        <main className="flex-1 overflow-auto p-6">
+        {/* relative:成为绝对定位后代(如 VerdictDot 的 sr-only span)的包含块,
+            否则它们绕过本容器的 overflow 裁剪、撑高 html → 凭空多一条整页滚动条(Q6 修复)。 */}
+        <main className="relative flex-1 overflow-auto p-6">
           <Outlet />
         </main>
       </div>

@@ -15,6 +15,7 @@ import { Sheet, SheetContent, SheetHeader, SheetTitle } from '@/components/ui/sh
 import { useEvidenceViewer } from '@/stores/evidenceViewerStore'
 import { useEvidence, useEvidenceStore } from '@/stores/evidenceStore'
 import { ageDays, isStale } from '@/lib/freshness'
+import { formatBeijingDate } from '@/lib/time'
 import type { Evidence } from '@/types/api'
 
 export function EvidenceSlideOver() {
@@ -73,7 +74,7 @@ export function EvidenceSlideOver() {
               <span className="rounded bg-surface-subtle px-1.5 py-0.5">{ev.competitor}</span>
               <span className="rounded bg-surface-subtle px-1.5 py-0.5">{ev.dimension}</span>
               <span className="font-mono">
-                采集于 {ev.fetched_at.slice(0, 10)}
+                采集于 {formatBeijingDate(ev.fetched_at)}
                 {stale ? (
                   <span className="ml-1 text-evidence-stale">· {ageDays(ev.fetched_at)} 天前(可能过期)</span>
                 ) : null}

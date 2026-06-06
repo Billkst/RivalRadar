@@ -29,6 +29,17 @@ def test_evidence_ref_defaults_to_supported():
     assert ref.start is None and ref.end is None
 
 
+def test_pricing_tier_coerces_features_included():
+    """post-real-run-7:Doubao 常把 features_included 返成字符串(实测一次错 5-6 个 tier)
+    → 每次必触发校验失败重试拖慢 analyze。validator 把单字符串包成单元素列表、空白串丢弃、
+    None→[]、真列表原样,消掉这一类无谓重试。四条分支都验(成功容错 + 边界丢弃)。"""
+    base = {"name": "Pro", "price": "$10", "billing_cycle": "monthly"}
+    assert PricingTier(**base, features_included="无限协作者").features_included == ["无限协作者"]  # str→[str]
+    assert PricingTier(**base, features_included="   ").features_included == []                    # 空白串丢弃
+    assert PricingTier(**base, features_included=None).features_included == []                     # None→[]
+    assert PricingTier(**base, features_included=["a", "b"]).features_included == ["a", "b"]        # 真列表原样
+
+
 def test_evidence_rejects_unknown_language():
     with pytest.raises(ValidationError):
         Evidence(

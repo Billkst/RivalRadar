@@ -65,6 +65,14 @@ def structured_call(
 
     被 4 个 Agent 复用(DRY)。max_retries=2 表示最多 3 次尝试。max_tokens 给足防截断。
 
+    **3 次而非 5 次的依据(post-real-run-7)**:曾因大矩阵调用偶发坏 JSON 把 max_retries
+    提到 4(5 次),但 build_comparison 已改成**按维度拆分的小调用**(输入骤减、单次坏 JSON
+    概率本就低),5 次属过度保险;且重试是**串行无早停**(structured.py 下方循环),每多 1 次
+    就在最坏路径上叠一个 _DEFAULT_REQUEST_TIMEOUT(90s)——5 次把单调用最坏从 270s 抬到 450s,
+    实测让真 run 的 analyze 最坏墙钟膨胀到 ~22min、用户感知"卡死"(post-real-run-7 诊断)。
+    回到 3 次:单调用最坏 270s,典型 1-2 次即过(spike 实测 attempt2 即合法)。
+    **绝不补括号"修复"** 截断 JSON——会造出残缺/虚构对比行,违反反幻觉硬门;只重试拿干净结果。
+
     实现走 **function-calling(tools)**:把 JSON Schema 作为工具的 parameters,
     强制 tool_choice,从 tool_call 参数里取结构化结果。原因(见 spikes/SPIKE_RESULTS.md):
     目标 EP ${DOUBAO_MODEL} 不支持 response_format 的 json_schema/json_object
@@ -107,11 +115,19 @@ def structured_call(
             return model_cls.model_validate(json.loads(raw))
         except (json.JSONDecodeError, ValidationError, TypeError, ValueError) as err:
             last_err = err
+            # 记录原始 JSON 头尾(不记全文,防日志爆 + 不外泄)便于诊断坏在哪——
+            # 真 run-6 因日志不带 raw,只能靠 spike 复现才看清是"截断不完整"。
+            logger.warning(
+                "structured_call(%s) attempt %d/%d 解析/校验失败:%s | raw head=%r tail=%r",
+                model_cls.__name__, attempt + 1, max_retries + 1, err,
+                (raw or "")[:160], (raw or "")[-160:],
+            )
             convo = convo + [{
                 "role": "user",
                 "content": (
-                    f"上次结构化结果未通过校验:{err}\n"
-                    f"请重新调用工具 {_TOOL_NAME},返回符合 schema 的合法参数。"
+                    f"上次返回的 JSON 无效或不完整({err})。请重新调用工具 {_TOOL_NAME},"
+                    f"一次性输出**完整且语法合法**的 JSON 参数:所有括号 / 方括号闭合、"
+                    f"字符串内的双引号转义为 \\\"、不要中途截断。"
                 ),
             }]
 

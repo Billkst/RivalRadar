@@ -121,3 +121,65 @@ body {
   outline: 2px solid var(--accent);
   outline-offset: 2px;
 }
+
+/* ReportView 导出 PDF:浏览器打印时隐藏工具栏 + A4 页边距 + 强制白底黑字
+   (零依赖出 PDF,中文字体/分页最稳;Tailwind print:hidden 双保险) */
+@media print {
+  @page {
+    margin: 18mm 16mm;
+  }
+  .report-toolbar {
+    display: none !important;
+  }
+  html,
+  body {
+    height: auto !important;
+    background: #fff !important;
+  }
+  .report-page {
+    max-width: none !important;
+    padding: 0 !important;
+  }
+}
+
+/* 范文库阅读视图:杂志式精排。不引衬线(IBM Plex Sans 100% 保留),
+   质感靠层级 / 留白 / 导语区块。行高较 DESIGN.md 阅读 1.55 略放宽到长文友好的 1.72
+   —— 用户明确要「杂志阅读感」,此为受同意的取舍;颜色 / 字体 / accent 全在 token 内。
+   作用域 class 选择器,不影响驾驶舱报告(ReportView)的渲染。 */
+.sample-reading h1 {
+  font-size: 30px;
+  line-height: 1.22;
+  letter-spacing: -0.01em;
+  margin-bottom: 0.5rem;
+}
+.sample-reading h2 {
+  font-size: 21px;
+  margin-top: 2.2rem;
+}
+.sample-reading h3 {
+  font-size: 17px;
+  margin-top: 1.6rem;
+}
+.sample-reading p {
+  font-size: 16px;
+  line-height: 1.72;
+  margin: 1rem 0;
+  color: var(--text-primary);
+}
+.sample-reading li {
+  font-size: 15.5px;
+  line-height: 1.7;
+}
+/* 首个 > 引用块 = 杂志导语:大字、青绿竖条 + 软底、非斜体 */
+.sample-reading blockquote {
+  font-size: 17px;
+  line-height: 1.7;
+  font-style: normal;
+  border-left-width: 3px;
+  border-left-color: var(--accent);
+  background: var(--accent-soft);
+  padding: 0.8rem 1.1rem;
+  border-radius: 0 6px 6px 0;
+  margin: 1.25rem 0 1.9rem;
+  color: var(--text-primary);
+}

@@ -12,7 +12,9 @@ from rivalradar.api.deps import (
     get_db_conn, get_doubao_client, get_provider, get_as_of, get_max_retries,
 )
 from rivalradar.api.schemas import DiscoverRequest, RunDetail, RunRequest, RunSummary
-from rivalradar.api.sse import _ACTIVE_RUN_TASKS, _replay_from_trace, graph_event_stream
+from rivalradar.api.sse import (
+    _ACTIVE_RUN_CONTROLS, _ACTIVE_RUN_TASKS, _replay_from_trace, graph_event_stream,
+)
 from rivalradar.config import doubao_model
 from rivalradar.llm.structured import StructuredCallError
 from rivalradar.graph.build import build_research_graph
@@ -102,8 +104,32 @@ def get_run(run_id: str,
     return r
 
 
+@router.delete("/run/{run_id}")
+async def delete_run(
+    run_id: str,
+    conn: sqlite3.Connection = Depends(get_db_conn),
+) -> dict:
+    """整条删除一个 run 及其全部关联数据(用户在历史列表手动删除,带前端二次确认)。
+
+    破坏性操作:级联删 evidence/analysis/report/qc/insight/decisions/trace/annotations。
+    run 不存在 → 404。**运行中拒删 → 409**(对抗审查 P1,Claude+Codex 跨模型一致):协作式
+    取消挡不住一个已过检查点、正在 sync 写库的 worker 线程,删除后它仍会写出无父 runs 行的
+    孤儿 analysis/report/trace(schema 无 FK 级联)。故运行中不直接删,让用户先 POST /cancel
+    (置 cancelled 终态 + SSE 收尾,所有 worker 停),再删 → 杜绝孤儿。非运行中(终态)的 run
+    finalize 已跑完、无在飞 worker,删除安全。
+    """
+    run = _get_run(conn, run_id)
+    if run is None:
+        raise HTTPException(404, "run not found")
+    if run["status"] == "running":
+        raise HTTPException(409, "运行中不可删除,请先取消该调研再删除")
+    if not repo.delete_run(conn, run_id):
+        raise HTTPException(404, "run not found")  # get→delete 间被并发删:幂等返 404
+    return {"run_id": run_id, "deleted": True}
+
+
 @router.post("/run/{run_id}/cancel")
-def cancel_run(
+async def cancel_run(
     run_id: str,
     conn: sqlite3.Connection = Depends(get_db_conn),
 ) -> dict:
@@ -120,6 +146,12 @@ def cancel_run(
 
     无需 404:已结束的 run cancel 是 no-op,语义清晰返 cancelled=False / db_cancelled=False。
     """
+    # post-real-run-7:协作式取消才能真停在飞 LLM。置 RunControl → 包装后的 client 在下一次
+    # create() 前抛 RunAborted('cancelled'),最多再等 1 个在飞的 90s 调用(而非旧版整轮 5×90s
+    # 空磨)。task.cancel() 保留作 between-node await 边界的兜底(穿不透同步 LLM 阻塞,见 runcontrol)。
+    ctl = _ACTIVE_RUN_CONTROLS.get(run_id)
+    if ctl is not None:
+        ctl.cancel()
     task = _ACTIVE_RUN_TASKS.get(run_id)
     cancelled = False
     if task is not None and not task.done():

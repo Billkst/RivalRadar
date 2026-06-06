@@ -63,17 +63,34 @@ EXA_API_KEY=           # 可选,Tavily 主 / Exa 兜底
 RIVALRADAR_DB=         # 可选,默认 rivalradar.db
 RIVALRADAR_PORT=       # 可选,默认 8000
 RIVALRADAR_HOST=       # 可选,默认 127.0.0.1(跨主机访问设 0.0.0.0)
+RIVALRADAR_RUN_BUDGET_S=  # 可选,默认 900,单 run 墙钟预算(秒);超时中止防卡死
 ```
 
 > **KEY 纪律**:`.env` 已加入 `.gitignore`,绝不提交到仓库。泄露 API key 违反比赛规则且会被即刻取消资格。`/healthz` 端点只返回 `{"ok": true}`,绝不暴露 key 值。
 
 ### 3. 启动服务
 
+仓库已封装好启动脚本(自动处理 WSL2 + Clash 代理兜底,从任意目录运行均可)。**前后端各开一个终端**:
+
 ```bash
-.venv/bin/python main.py
+# 终端 1 —— 后端 FastAPI(http://127.0.0.1:8000)
+./scripts/dev-backend.sh
+
+# 终端 2 —— 前端 Vite(http://localhost:3000,/api/* 自动代理到后端)
+./scripts/dev-frontend.sh
 ```
 
-服务默认监听 `http://127.0.0.1:8000`。
+打开 **http://localhost:3000** 即入口。停止两个服务:
+
+```bash
+./scripts/stop-dev.sh        # 按端口精确 kill :8000 与 :3000
+```
+
+> **两个要点**
+> - **后端无 `--reload`**:改了 `rivalradar/**` 或 `main.py` 后,必须重启 `dev-backend.sh` 才生效(前端 HMR 会自动热更,无需重启)。
+> - **WSL2 + Clash**:脚本已自动 `unset` 代理变量并把 `ark.cn-beijing.volces.com`(Doubao)/ `api.tavily.com` 加入 `NO_PROXY`,否则 LLM 调用会被 fake-ip 路由卡死。手动起服务时也需照此处理。
+>
+> 只跑后端也可直接:`.venv/bin/python main.py`(默认监听 `http://127.0.0.1:8000`)。
 
 ---
 
@@ -115,7 +132,7 @@ RIVALRADAR_HOST=       # 可选,默认 127.0.0.1(跨主机访问设 0.0.0.0)
 .venv/bin/python -m pytest
 ```
 
-198 个测试,约 7 秒。测试覆盖率 94%(58/62 路径)。
+350 个测试,约 10 秒通过。
 
 ---
 

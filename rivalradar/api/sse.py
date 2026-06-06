@@ -16,11 +16,14 @@ from __future__ import annotations
 import asyncio
 import json
 import logging
+import os
 import sqlite3
+import time
 from datetime import datetime, timezone
 from typing import Any, AsyncIterator
 
 from rivalradar.storage import repository as repo
+from rivalradar.llm.runcontrol import RunAborted, RunControl
 
 logger = logging.getLogger(__name__)
 
@@ -34,6 +37,20 @@ logger = logging.getLogger(__name__)
 # in-memory 不持久化(进程崩了 task 也没了 OK);cancelled 状态由
 # storage.repository.mark_run_cancelled CAS 写入 sqlite,供 GET /run/:id 取。
 _ACTIVE_RUN_TASKS: dict[str, asyncio.Task] = {}
+
+# post-real-run-7:协作式取消 + 全局墙钟预算的 per-run 控制注册表。POST /cancel 通过这查到
+# RunControl 并 .cancel() 置位 → 包装后的 client 在下一次 LLM 调用前抛 RunAborted,真正停掉
+# worker 线程里的 5×90s 重试环(asyncio.task.cancel() 穿不透同步 LLM 阻塞调用,见 runcontrol)。
+_ACTIVE_RUN_CONTROLS: dict[str, RunControl] = {}
+
+# run 级墙钟预算(秒)。超出 → 包装 client 抛 RunAborted('timeout') → 标 failed,防病态 run
+# 无上限磨下去。默认 900s(15min)是"肯定卡死"的兜底,典型 run 2-4min,不误伤慢但在跑的 run。
+# 0 或负 = 关闭预算(无 deadline)。可经 RIVALRADAR_RUN_BUDGET_S 调。
+def _run_budget_s() -> float:
+    try:
+        return float(os.getenv("RIVALRADAR_RUN_BUDGET_S", "900"))
+    except ValueError:
+        return 900.0
 
 
 def _now() -> str:
@@ -116,6 +133,12 @@ async def graph_event_stream(
     """
     queue: asyncio.Queue = asyncio.Queue()
     _DONE_SENTINEL: object = object()
+    # emit 来自 worker 线程(analyze/collect 的并行抽取在线程池里调 tick)。asyncio.Queue
+    # 不是线程安全的:从非事件循环线程直接 put_nowait,唤醒走 loop.call_soon(非 threadsafe),
+    # **唤不醒阻塞在 select() 的事件循环** → 进度事件全憋到循环因别的原因(节点完成/15s 心跳)
+    # 醒来才一次性吐出(实测 analyze 161s 期间 10 个事件全延迟到 161s 才送达,UI 看着死机)。
+    # 修法:统一经 loop.call_soon_threadsafe 投递——它会主动唤醒事件循环,事件实时送达。
+    loop = asyncio.get_running_loop()
 
     def emit(ev_type: str, data: dict) -> None:
         """Sync emit —— graph nodes 是 sync function,emit 不能 await。
@@ -127,11 +150,20 @@ async def graph_event_stream(
         """
         if "ts" not in data:
             data = {**data, "ts": _now()}
-        queue.put_nowait({"event": ev_type, "data": json.dumps(data)})
+        item = {"event": ev_type, "data": json.dumps(data)}
+        # call_soon_threadsafe:从 worker 线程也能唤醒事件循环 → drain 实时收到。
+        # 从事件循环线程自身调用同样安全(排进下一拍,FIFO 不乱)。
+        loop.call_soon_threadsafe(queue.put_nowait, item)
 
     # 把 emit 注入 config["configurable"],节点通过 config 取用(non-destructive 浅复制)。
+    # per-run 中止控制(协作式取消 + 墙钟预算)。注入 config → 节点把 client 包一层 →
+    # 每次 LLM 调用前查取消/超时(见 graph/nodes._run_client + llm/runcontrol)。
+    budget = _run_budget_s()
+    control = RunControl(deadline=time.monotonic() + budget if budget > 0 else None)
+    _ACTIVE_RUN_CONTROLS[run_id] = control
+
     cfg: dict = dict(config)
-    cfg["configurable"] = {**cfg.get("configurable", {}), "emit": emit}
+    cfg["configurable"] = {**cfg.get("configurable", {}), "emit": emit, "run_control": control}
 
     async def run_graph() -> None:
         """Background task:跑 graph.astream,每 chunk emit 'node' event 进 queue。
@@ -146,7 +178,9 @@ async def graph_event_stream(
                         "ts": _now(),
                     })
         finally:
-            queue.put_nowait(_DONE_SENTINEL)
+            # DONE 也走 call_soon_threadsafe,与上面所有 emit 同一条调度路径 → 保持 FIFO,
+            # 不会抢在延后投递的 'node'/'progress' 事件前面(否则 drain 见 DONE 即 break,丢事件)。
+            loop.call_soon_threadsafe(queue.put_nowait, _DONE_SENTINEL)
 
     graph_task: asyncio.Task = asyncio.create_task(run_graph())
     # F4: _ACTIVE_RUN_TASKS 存的是 graph_task(背景 task),POST /cancel 调
@@ -175,19 +209,55 @@ async def graph_event_stream(
         # 路径都通过 CancelledError 直接退出生成器。但 cancel 来时我们仍要清理 graph_task
         # + emit 一个 'cancelled' event 给前端看;见下面 except CancelledError。
         except asyncio.CancelledError:
-            # F4: 主 task 被 cancel(client disconnect 或 cancel API task.cancel())。
-            # 取消 graph_task 防 leak —— graph 内 await 抛 CancelledError 顺 cancel 链
-            # 中断 in-flight LLM。yield cancelled event 给前端 confirm(F4 mitigation
-            # 不依赖此 event,但有则更 graceful)。然后 re-raise 让 sse-starlette
-            # task_group 接管清理(不吞 cancel 防孤儿 task)。
+            # 主 task 被 cancel:POST /cancel(task.cancel)或**客户端断连**(sse-starlette
+            # anyio task group 把 CancelledError 注入 drain loop 的 await queue.get())。
+            control.cancel()  # 协作式:停掉 worker 线程在飞的 LLM 重试环(断连也不再空磨烧配额)
             if not graph_task.done():
                 graph_task.cancel()
+            # **断连路径(非 POST /cancel)下,这是唯一的 DB 标记入口** —— 幂等 CAS(已 cancelled/
+            # 终态则 no-op)。否则客户端断连后 run 永久停在 running 成僵尸(对抗审查 confirmed)。
+            try:
+                repo.mark_run_cancelled(conn, run_id)
+            except Exception:  # noqa: BLE001 — DB 写失败不能阻止 re-raise CancelledError
+                pass
             try:
                 yield {"event": "cancelled",
                        "data": json.dumps({"run_id": run_id, "ts": _now()})}
             except Exception:  # noqa: BLE001 — yield 失败也要 raise CancelledError
                 pass
             raise
+        except RunAborted as e:
+            # 协作式取消 / 墙钟超时:包装 client 在 LLM 调用前抛出,顺线程池 future 一路传到这。
+            # RunAborted 是 BaseException,已自动穿透所有 except Exception 降级处理器。
+            if not graph_task.done():
+                graph_task.cancel()
+            if e.reason == "cancelled":
+                # 幂等 CAS 标 cancelled(POST /cancel 通常已标;若取消信号来自断连兜底
+                # control.cancel() 则这里补标),再 emit 'cancelled' 给前端 confirm。
+                try:
+                    repo.mark_run_cancelled(conn, run_id)
+                except Exception:  # noqa: BLE001
+                    pass
+                try:
+                    yield {"event": "cancelled",
+                           "data": json.dumps({"run_id": run_id, "ts": _now()})}
+                except Exception:  # noqa: BLE001
+                    pass
+                return
+            # timeout:run 还是 running,标 failed(诚实告知"超时中止",而非把残缺降级数据当结果)。
+            try:
+                repo.mark_run_failed(conn, run_id)
+            except Exception as db_err:  # noqa: BLE001
+                logger.warning("failed to mark run %s as failed after timeout: %s",
+                               run_id, type(db_err).__name__)
+            try:
+                yield {"event": "error",
+                       "data": json.dumps({
+                           "error": "分析超时:超过墙钟预算已中止,请重试或减少竞品/维度",
+                           "ts": _now()})}
+            except Exception:  # noqa: BLE001 — 连接可能已断,yield 失败也照常 return(与 cancelled 对称)
+                pass
+            return
         except Exception as e:  # noqa: BLE001 — yield error 给客户端后 clean exit(不 re-raise)
             # 先把完整 traceback 写 server log(运维必须能 debug,与下面 sanitize 配对)
             logger.exception("graph pipeline error for run %s", run_id)
@@ -216,16 +286,20 @@ async def graph_event_stream(
                    "status": run["status"] if run else "unknown",
                    "ts": _now()})}
     finally:
+        # 兜底:任何退出路径(正常 / error / cancelled / timeout / 断连)都置取消标志,
+        # 确保 worker 线程在飞的 LLM 在下一次 create() 前停掉,绝不留后台空磨烧配额的孤儿。
+        control.cancel()
         # 清理 _ACTIVE_RUN_TASKS 防 leak —— 无论 graph 正常结束 / Exception clean exit /
         # CancelledError bubble out 都执行(F4)。同时确保 graph_task 也 cleanup
         # 不留孤儿 task(D8 修订:graph crash 后 listener 应识别 + drain on exit)。
         _ACTIVE_RUN_TASKS.pop(run_id, None)
+        _ACTIVE_RUN_CONTROLS.pop(run_id, None)
         if not graph_task.done():
             graph_task.cancel()
             try:
                 await graph_task
-            except (Exception, asyncio.CancelledError):
-                pass  # 静默 cleanup,异常已上面 handled / cancel 是预期
+            except (Exception, asyncio.CancelledError, RunAborted):
+                pass  # 静默 cleanup,异常已上面 handled / cancel|abort 是预期
 
 
 async def _replay_from_trace(

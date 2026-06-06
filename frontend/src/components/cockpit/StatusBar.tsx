@@ -10,6 +10,7 @@
  * 来自决策 + 证据(Epic 4/5 经 props 喂入),未就绪时显 "—"(不留空、不臆造)。
  */
 import { useRunStore } from '@/stores/runStore'
+import { formatBeijingDate } from '@/lib/time'
 import type { RunStatus } from '@/stores/runStore'
 
 export interface VerdictSummary {
@@ -55,7 +56,7 @@ export function StatusBar({ decisionCount, riskCount, verdictSummary }: StatusBa
   const snapshots = useRunStore((s) => s.evidenceCountSnapshots)
 
   const latest = snapshots.at(-1)
-  const latestDate = latest ? latest.ts.slice(0, 10) : '—'
+  const latestDate = latest ? formatBeijingDate(latest.ts) : '—'
   const meta = STATUS_META[status] ?? STATUS_META.idle
   const dash = (n: number | undefined) => (typeof n === 'number' ? n : '—')
 

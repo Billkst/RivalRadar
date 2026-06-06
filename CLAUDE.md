@@ -129,7 +129,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 .venv/bin/python -m pytest
 ```
 
-198 个测试,约 7 秒通过。覆盖率 94%(58/62 路径)。
+350 个测试,约 10 秒通过。
 
 **测试哲学:**
 

@@ -1,8 +1,9 @@
 import * as React from 'react'
 import { Link, useParams } from 'react-router-dom'
-import { ArrowLeft, Loader2 } from 'lucide-react'
+import { ArrowLeft, FileText, Loader2 } from 'lucide-react'
 import { ApiError, fetchRun } from '@/lib/api'
 import { dimensionLabel } from '@/lib/dimensions'
+import { formatBeijing } from '@/lib/time'
 import { DEMO_RUN_DETAIL, isDemoRun } from '@/lib/demoFixture'
 import { useSSE } from '@/hooks/useSSE'
 import { useRunStore } from '@/stores/runStore'
@@ -117,7 +118,17 @@ export function RunPage() {
             返回列表
           </Link>
         </Button>
-        {run_id && <CancelButton runId={run_id} />}
+        <div className="flex items-center gap-2">
+          {run_id && (
+            <Button variant="outline" size="sm" asChild>
+              <Link to={`/run/${run_id}/report`} className="gap-1">
+                <FileText className="h-3 w-3" />
+                查看完整报告
+              </Link>
+            </Button>
+          )}
+          {run_id && <CancelButton runId={run_id} />}
+        </div>
       </div>
 
       <Card>
@@ -157,37 +168,15 @@ export function RunPage() {
               </div>
               <div>
                 <span className="text-xs text-text-muted">创建:</span>{' '}
-                <time className="font-mono">{run.created_at}</time>
+                <time className="font-mono" title={run.created_at}>
+                  {formatBeijing(run.created_at)}
+                </time>
+                <span className="ml-1 text-[11px] text-text-muted">北京时间</span>
               </div>
             </>
           )}
         </CardContent>
       </Card>
-
-      {import.meta.env.DEV && (
-        <div className="flex items-center gap-2 text-[10px] text-text-muted">
-          <span className="text-warning">🧪 fake SSE</span>
-          {[
-            { label: 'Fast', speed: 0.2, hint: '0.2x — 5s 全程,快速看动画' },
-            { label: 'Real', speed: 1.0, hint: '1.0x — 25s 真 LLM 节奏' },
-            { label: 'Slow', speed: 2.0, hint: '2.0x — 50s 慢动作' },
-          ].map((preset) => (
-            <button
-              key={preset.label}
-              type="button"
-              onClick={() => {
-                void import('@/dev/fakeSSEPlayer').then((m) =>
-                  m.playFakeSSE({ speed: preset.speed }),
-                )
-              }}
-              className="rounded border border-dashed border-warning px-2 py-0.5 text-warning hover:bg-warning/10"
-              title={preset.hint}
-            >
-              {preset.label}
-            </button>
-          ))}
-        </div>
-      )}
 
       {/* 证据驾驶舱:StatusBar + 左决策面(Epic 4 实装)/ 右实时分析流程(重试环) */}
       {run_id && (
