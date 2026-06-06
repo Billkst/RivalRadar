@@ -12,6 +12,26 @@ import { HEADING_RE, headingId } from './markdownHeadings'
 
 const CITE_SPLIT = /(\[ev_[^\]]*\])/g
 
+// 图片 src 白名单(对抗审查 F4 / Codex P2):**只放行相对路径与 data:image**。范文配图全是
+// 仓库本地相对路径(如 ref-01-img/x.png);生成报告本不产图。一律拒绝 http(s)/file: 等带网络
+// 语义的 scheme —— 否则 /report 渲染 LLM 自由文本时,prompt-injection 出的独立成行外链/内网图
+// (![x](http://内网/...) / 信标 gif)会被浏览器在用户会话里自动 GET(referrer 泄漏 / SSRF 向量)。
+function isSafeImgSrc(src: string): boolean {
+  const s = src.trim()
+  if (!/^[a-z][a-z0-9+.-]*:/i.test(s)) return true // 无 scheme = 仓库相对路径,放行
+  return /^data:image\//i.test(s) // 仅内联图(无网络请求);http(s)/file: 等一律不渲染 <img>
+}
+
+// markdown 表格(writer.render_comparison 产「| 维度 | 竞品A | … |」对比表):header 行 +
+// 分隔行(|---|---|)+ body 行。Codex 评审 P2:此前 Markdown 无表格分支 → /report 的对比表
+// (核心交付物)散成一行行独立段落。splitTableRow 去掉首尾 | 再按 | 切;isTableSep 认分隔行。
+const splitTableRow = (line: string): string[] =>
+  line.trim().replace(/^\||\|$/g, '').split('|').map((c) => c.trim())
+const isTableSep = (line: string): boolean => {
+  const s = line.trim()
+  return s.includes('-') && /^[\s|:-]+$/.test(s)
+}
+
 // 行内 [ev_xxx] → 弱化收据徽章(RivalRadar 报告专有;范文里不出现,透传为文本)。
 function renderCitations(text: string, keyPrefix: string): React.ReactNode[] {
   return text.split(CITE_SPLIT).map((part, i) =>
@@ -74,8 +94,8 @@ export function Markdown({ source }: { source: string }) {
     items = []
   }
 
-  for (const raw of lines) {
-    const line = raw.trimEnd()
+  for (let li = 0; li < lines.length; li++) {
+    const line = lines[li].trimEnd()
     const bulletMatch = /^(\s*)[-*+]\s+(.*)$/.exec(line)
     if (bulletMatch) {
       const level = Math.floor(bulletMatch[1].length / 2)
@@ -90,8 +110,51 @@ export function Markdown({ source }: { source: string }) {
     }
     flushList()
     if (line.trim() === '') continue
+    // markdown 表格:当前行以 | 起 + 下一行是分隔行(|---|---|)→ 消费整块渲成 <table>。
+    if (line.trim().startsWith('|') && li + 1 < lines.length && isTableSep(lines[li + 1])) {
+      const header = splitTableRow(line)
+      li += 1 // 跳过分隔行
+      const body: string[][] = []
+      while (li + 1 < lines.length && lines[li + 1].trim().startsWith('|')) {
+        li += 1
+        body.push(splitTableRow(lines[li]))
+      }
+      blocks.push(
+        <div key={blocks.length} className="my-4 overflow-x-auto">
+          <table className="w-full border-collapse text-[13px]">
+            <thead>
+              <tr>
+                {header.map((c, i) => (
+                  <th
+                    key={i}
+                    className="border border-border bg-surface-subtle px-3 py-1.5 text-left font-semibold text-text-primary"
+                  >
+                    {renderInline(c)}
+                  </th>
+                ))}
+              </tr>
+            </thead>
+            <tbody>
+              {body.map((row, r) => (
+                <tr key={r}>
+                  {row.map((c, i) => (
+                    <td
+                      key={i}
+                      className="border border-border px-3 py-1.5 align-top text-text-primary"
+                    >
+                      {renderInline(c)}
+                    </td>
+                  ))}
+                </tr>
+              ))}
+            </tbody>
+          </table>
+        </div>,
+      )
+      continue
+    }
     const imgMatch = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec(line)
-    if (imgMatch) {
+    if (imgMatch && isSafeImgSrc(imgMatch[2])) {
       const [, alt, src] = imgMatch
       blocks.push(
         <figure key={blocks.length} className="my-4">

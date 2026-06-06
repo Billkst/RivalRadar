@@ -112,17 +112,19 @@ async def delete_run(
     """整条删除一个 run 及其全部关联数据(用户在历史列表手动删除,带前端二次确认)。
 
     破坏性操作:级联删 evidence/analysis/report/qc/insight/decisions/trace/annotations。
-    run 不存在 → 404。删除前若该 run 仍在跑(_ACTIVE_RUN_TASKS),先 cancel in-flight task,
-    避免删除后 SSE 流仍往已删 run 写表(留下孤儿行)。
+    run 不存在 → 404。**运行中拒删 → 409**(对抗审查 P1,Claude+Codex 跨模型一致):协作式
+    取消挡不住一个已过检查点、正在 sync 写库的 worker 线程,删除后它仍会写出无父 runs 行的
+    孤儿 analysis/report/trace(schema 无 FK 级联)。故运行中不直接删,让用户先 POST /cancel
+    (置 cancelled 终态 + SSE 收尾,所有 worker 停),再删 → 杜绝孤儿。非运行中(终态)的 run
+    finalize 已跑完、无在飞 worker,删除安全。
     """
-    ctl = _ACTIVE_RUN_CONTROLS.get(run_id)
-    if ctl is not None:
-        ctl.cancel()  # 协作式:停掉 worker 线程里在飞的 LLM 重试环(task.cancel 穿不透同步阻塞)
-    task = _ACTIVE_RUN_TASKS.get(run_id)
-    if task is not None and not task.done():
-        task.cancel()
-    if not repo.delete_run(conn, run_id):
+    run = _get_run(conn, run_id)
+    if run is None:
         raise HTTPException(404, "run not found")
+    if run["status"] == "running":
+        raise HTTPException(409, "运行中不可删除,请先取消该调研再删除")
+    if not repo.delete_run(conn, run_id):
+        raise HTTPException(404, "run not found")  # get→delete 间被并发删:幂等返 404
     return {"run_id": run_id, "deleted": True}
 
 

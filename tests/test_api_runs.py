@@ -341,6 +341,18 @@ def test_delete_run_404_for_unknown(client):
     assert r.status_code == 404
 
 
+def test_delete_run_running_returns_409(db_path, client):
+    """运行中的 run 拒删 → 409(对抗审查 P1,Claude+Codex 跨模型一致):协作式取消挡不住一个
+    已过检查点、正在 sync 写库的 worker 线程,删除后它仍会写出无父 runs 行的孤儿数据。故运行中
+    不直接删,让用户先取消。run 必须仍在(未被删),数据零损坏。"""
+    c = connect(db_path); init_db(c)
+    repo.create_run(c, "r_running", ["Notion"], ["pricing"])  # create_run 默认 status=running
+    c.close()
+    r = client.delete("/run/r_running")
+    assert r.status_code == 409
+    assert client.get("/run/r_running").status_code == 200  # 仍在,未被误删
+
+
 def test_delete_run_removes_from_list(db_path, client):
     """删除后 /runs 不再列出该 run,GET /run/:id 也 404。"""
     c = connect(db_path); init_db(c)
