@@ -109,8 +109,9 @@ def test_analyze_real_nested_pools_run_concurrently():
 
 
 def test_analyze_emits_per_extraction_and_comparison():
-    """增量进度:每竞品 4 抽取 + 1 对比 = 5 次 on_progress(analyze ~174s 最长静默段 →
-    竞品·维度逐项亮起)。on_progress 在 worker 线程并发调,用锁汇聚不丢。"""
+    """增量进度:每竞品 4 抽取 + 每维度 1 对比 = 4 + len(dims) 次 on_progress(post-real-run-7
+    把对比阶段从 1 格细分到 N 格,避免对比期 UI 长时间静默)。on_progress 在 worker 线程
+    并发调,用锁汇聚不丢。build_comparison 对每个维度 finally 必 emit(无证据/失败也算一格)。"""
     class _PayloadClient:
         @property
         def chat(self):
@@ -134,10 +135,12 @@ def test_analyze_emits_per_extraction_and_comparison():
         with lock:
             calls.append(detail)
 
+    from rivalradar.schema.models import CONTROLLED_DIMENSIONS
     analyze([_ev("e1", "Notion", "core_workflows")], ["Notion"],
             on_progress=rec, client=_PayloadClient(), model="m")
-    assert len(calls) == 5  # 1 竞品 × 4 抽取 + 1 对比
-    assert any("对比" in c for c in calls)            # 对比那次报了
+    # 1 竞品 × 4 抽取 + 每维度 1 对比(默认 6 维)= 10
+    assert len(calls) == 4 + len(CONTROLLED_DIMENSIONS)
+    assert sum("对比" in c for c in calls) == len(CONTROLLED_DIMENSIONS)  # 每维报一次
     assert sum("Notion" in c for c in calls) == 4     # 4 项抽取都带竞品名
 
 
@@ -259,6 +262,30 @@ def test_build_comparison_returns_rows():
     assert rows[0].dimension == "pricing"
 
 
+def test_build_comparison_degrades_single_dimension_into_sink(monkeypatch):
+    """单维对比脆败隔离(post-real-run-6/7 核心卖点):某维 _compare_one_dimension 抛(非
+    RunAborted)→ 该维记入 degraded_sink('comparison.{dim}')且被丢弃,其余维照常产出,
+    绝不让一个脆维度杀整轮对比(降级必可见)。"""
+    import rivalradar.agents.analyst as an
+    from rivalradar.schema.models import ComparisonRow, ComparisonCell
+
+    def fake_compare(dimension, names, evidence, *, client, model):
+        if dimension == "pricing":
+            raise ValueError("该维对比炸了")  # 非 RunAborted → 走 except 降级分支
+        return ComparisonRow(dimension=dimension, cells=[
+            ComparisonCell(competitor="Notion", value_type="enum", value="ok", evidence_refs=[])])
+
+    monkeypatch.setattr(an, "_compare_one_dimension", fake_compare)
+    sink: list[str] = []
+    rows = build_comparison(
+        [CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())],
+        [_ev("e1", "Notion", "pricing"), _ev("e2", "Notion", "core_workflows")],
+        dimensions=("pricing", "core_workflows"),
+        degraded_sink=sink, client=None, model="m")
+    assert "comparison.pricing" in sink                       # 炸的维记入降级 sink(可见)
+    assert [r.dimension for r in rows] == ["core_workflows"]  # 其余维照常产出,炸维被隔离丢弃
+
+
 def test_analyze_end_to_end_with_fake_client():
     # 1 竞品:4 次抽取 + 1 次对比 = 5 次调用
     client = _FakeClient({**_profile_payload_map(), "ComparisonExtraction": json.dumps({"rows": []})})
@@ -273,7 +300,7 @@ def test_analyze_threads_requested_dimensions_into_comparison(monkeypatch):
     不再硬编码全 6 受控本体(否则分析员超范围产出 → 越界 hallucination + 质检覆盖死循环)。"""
     captured = {}
 
-    def spy(profiles, evidence, *, dimensions, on_progress=None, client, model):
+    def spy(profiles, evidence, *, dimensions, degraded_sink=None, on_progress=None, client, model):
         captured["dims"] = dimensions
         return []
 
@@ -285,12 +312,12 @@ def test_analyze_threads_requested_dimensions_into_comparison(monkeypatch):
 
 
 def test_analyze_two_competitors_aggregates_and_compares():
-    # 2 竞品:每个 4 次抽取 + 1 次对比 = 9 次调用;对比 rows 真流入结果
+    # 2 竞品:每个 4 次抽取 = 8 次;对比按维度拆分,证据只覆盖 pricing 一维 → 1 次对比调用 = 9 次。
     comparison = json.dumps({"rows": [{"dimension": "pricing", "cells": [
         {"competitor": "Notion", "value_type": "enum", "value": "freemium", "evidence_refs": []}]}]})
     # 2 竞品复用同一份 profile payload map(queue 长度 1 → 每次返回同份);对比一份。
     client = _FakeClient({**_profile_payload_map(), "ComparisonExtraction": comparison})
-    out = analyze([_ev("e1", "Notion", "core_workflows"), _ev("e2", "飞书", "pricing")],
+    out = analyze([_ev("e1", "Notion", "pricing"), _ev("e2", "飞书", "pricing")],
                   ["Notion", "飞书"], client=client, model="m")
     assert [c.name for c in out.competitors] == ["Notion", "飞书"]
     assert client.chat.completions.calls == 9

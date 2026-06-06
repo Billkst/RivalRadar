@@ -14,7 +14,8 @@ import pytest
 from fastapi.testclient import TestClient
 
 from rivalradar.api.app import create_app
-from rivalradar.api.sse import _ACTIVE_RUN_TASKS
+from rivalradar.api.sse import _ACTIVE_RUN_CONTROLS, _ACTIVE_RUN_TASKS
+from rivalradar.llm.runcontrol import RunControl
 from rivalradar.storage import repository as repo
 from rivalradar.storage.db import connect, init_db
 
@@ -31,10 +32,12 @@ def client(db_path):
 
 @pytest.fixture(autouse=True)
 def _clear_active_tasks():
-    """每个 test 前后清 _ACTIVE_RUN_TASKS 防测试间污染(module-level state)。"""
+    """每个 test 前后对称清两个注册表防测试间污染(module-level state)。"""
     _ACTIVE_RUN_TASKS.clear()
+    _ACTIVE_RUN_CONTROLS.clear()
     yield
     _ACTIVE_RUN_TASKS.clear()
+    _ACTIVE_RUN_CONTROLS.clear()
 
 
 def _seed_run(db_path: str, run_id: str, status: str = "running") -> None:
@@ -95,10 +98,14 @@ def test_cancel_already_done_run_idempotent(db_path, client):
 
 
 def test_cancel_running_run_marks_cancelled_and_calls_task_cancel(db_path, client):
-    """running run + active task → task.cancel() + DB CAS 成功切 cancelled。"""
+    """running run + active task + RunControl → 协作取消(control.cancel())+ task.cancel()
+    + DB CAS 成功切 cancelled。post-real-run-7:断言 RunControl 被置位 —— 这是"取消真能停掉
+    worker 线程在飞 LLM"的入口,不测则该胶水路径恒走 None 分支(对抗审查 confirmed)。"""
     _seed_run(db_path, "r_run", status="running")
     fake_task = FakeTask()
     _ACTIVE_RUN_TASKS["r_run"] = fake_task
+    control = RunControl()
+    _ACTIVE_RUN_CONTROLS["r_run"] = control
 
     r = client.post("/run/r_run/cancel")
     assert r.status_code == 200
@@ -106,11 +113,25 @@ def test_cancel_running_run_marks_cancelled_and_calls_task_cancel(db_path, clien
     assert body["cancelled"] is True  # task.cancel() 被调
     assert body["db_cancelled"] is True  # CAS 成功
     assert fake_task.cancel_called is True
+    assert control.cancelled is True  # 协作取消标志被置位 → 包装 client 下次 create() 即抛 RunAborted
 
     c = connect(db_path)
     run = repo.get_run(c, "r_run")
     assert run["status"] == "cancelled"
     c.close()
+
+
+def test_cancel_sets_control_even_without_active_task(db_path, client):
+    """run 已结束(无 active task)但 RunControl 仍在注册表(罕见时序)→ cancel 仍置位 control,
+    确保不漏停在飞工作。覆盖 `if ctl is not None` 的 not-None 分支。"""
+    _seed_run(db_path, "r_run2", status="running")
+    control = RunControl()
+    _ACTIVE_RUN_CONTROLS["r_run2"] = control  # 只有 control,无 task
+
+    r = client.post("/run/r_run2/cancel")
+    assert r.status_code == 200
+    assert r.json()["cancelled"] is False     # 无 active task
+    assert control.cancelled is True          # 但 control 仍被置位
 
 
 def test_mark_run_cancelled_CAS_only_when_running(db_path):

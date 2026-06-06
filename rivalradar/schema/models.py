@@ -2,7 +2,7 @@ from __future__ import annotations
 
 from typing import Literal, Optional
 
-from pydantic import BaseModel, Field, model_validator
+from pydantic import BaseModel, Field, field_validator, model_validator
 
 Language = Literal["zh", "en"]
 SupportVerdict = Literal["supported", "partial", "unsupported"]
@@ -63,6 +63,18 @@ class PricingTier(BaseModel):
     billing_cycle: str
     features_included: list[str] = Field(default_factory=list)
     limits: str = ""
+
+    @field_validator("features_included", mode="before")
+    @classmethod
+    def _coerce_features_to_list(cls, v):
+        """Doubao 常把单条 features_included 返成字符串(实测一次错 5-6 个 tier)→ 每次必
+        触发校验失败重试,拖慢 analyze。单个字符串视作一项,包成单元素列表(空串丢弃),
+        消掉这一类无谓重试;真列表与 None 原样放行。"""
+        if v is None:
+            return []
+        if isinstance(v, str):
+            return [v] if v.strip() else []
+        return v
 
 
 class PricingModel(BaseModel):

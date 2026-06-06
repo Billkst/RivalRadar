@@ -7,6 +7,7 @@ from typing import Callable, TypeVar
 from pydantic import BaseModel, Field
 
 from rivalradar.llm.structured import StructuredCallError, structured_call
+from rivalradar.llm.runcontrol import RunAborted
 from rivalradar.schema.models import (
     ComparisonRow, CompetitorAnalysis, CompetitorProfile, CONTROLLED_DIMENSIONS,
     Evidence, FeatureItem, PricingModel, SWOT, UserPersona,
@@ -25,6 +26,14 @@ _X = TypeVar("_X")
 # 会经典死锁(外层 worker 占槽等内层任务,内层抢不到槽)。
 _MAX_COMPETITOR_WORKERS = 4   # 竞品间并行度
 _MAX_EXTRACT_WORKERS = 4      # 单竞品 4 抽取并行度(features/pricing/personas/swot)
+_MAX_COMPARISON_WORKERS = 8   # 对比按维度拆分后的并行度;≥受控本体 6 维 → 一波跑完不分批
+                              # (4 会让 6 维分 2 波,最坏墙钟翻倍,post-real-run-7 诊断)
+
+# 维度 → 中文进度标签(执行流逐维点亮用;键对齐 CONTROLLED_DIMENSIONS)。
+_DIM_ZH = {
+    "pricing": "定价", "core_workflows": "核心功能", "deployment": "部署",
+    "integrations": "集成", "target_users": "目标用户", "review_sentiment": "口碑评价",
+}
 
 # 抽取项中文名(增量进度文案用):真跑 analyze ~174s 是最长静默段,每项抽取完成 emit
 # 一次 → 前端执行流"竞品·维度"逐项亮起,等待过程看得到中间步骤(不再 174s 干挂)。
@@ -53,6 +62,8 @@ def _safe_extract(
     (不 exc_info 全 traceback 给 server log;sink 只记 label,绝不把模型/异常文本带出)。"""
     try:
         return fn()
+    except RunAborted:
+        raise  # 取消/超时不是"该项失败"——必须穿透降级、停掉整轮,绝不当空默认咽下
     except Exception as e:  # noqa: BLE001 — 单项抽取任何失败都降级该项,绝不杀整 run(本函数唯一职责)
         logger.warning("analyze_competitor[%s] %s 抽取降级(%s,返空默认)",
                        competitor, label, type(e).__name__, exc_info=True)
@@ -189,30 +200,71 @@ def analyze_competitor(
     )
 
 
+def _compare_one_dimension(
+    dimension: str, names: str, evidence: list[Evidence], *, client, model
+) -> ComparisonRow | None:
+    """对单个维度做横向对比:只比所有竞品在这一维上,只喂该维证据。
+
+    返回该维的 ComparisonRow;模型未产出匹配该维度的行(空/维度对不上)→ 返 None。
+    **不 fallback 取错位行**(张冠李戴会把 A 维结论挂到 B 维,污染对比),宁可缺该维。
+    """
+    dim_ev = [e for e in evidence if e.dimension == dimension]
+    if not dim_ev:
+        return None  # 该维无证据 → 不产该行(下游显「—」+ 覆盖说明)
+    block = build_evidence_block(dim_ev)
+    msgs = [{"role": "user", "content":
+             f"{_REFS_RULE}\n\n对竞品 [{names}] **只在维度「{dimension}」上**做横向对比。"
+             f"为每个竞品产一个 cell,标 value_type(bool/enum/number/quote_text)与 value,挂 evidence_refs。"
+             f"\n\n证据:\n{block}"}]
+    rows = structured_call(ComparisonExtraction, msgs, client=client, model=model).rows
+    return next((r for r in rows if r.dimension == dimension), None)
+
+
 def build_comparison(
     profiles: list[CompetitorProfile], evidence: list[Evidence],
     *, dimensions: tuple[str, ...] = CONTROLLED_DIMENSIONS,
+    degraded_sink: list[str] | None = None,
     on_progress: Callable[[str], None] | None = None, client, model,
 ) -> list[ComparisonRow]:
     """收尾产出跨竞品对比(受控本体 + 类型化值 + evidence_refs,spec D5 / §6)。
 
-    **只在用户请求的 `dimensions` 上对比**(默认全受控本体,兼容直接调用)。原先硬编码
-    CONTROLLED_DIMENSIONS 让分析员对全 6 维 + 自创维度产出 → 越界 hallucination + 触发
-    质检覆盖未请求维度 → retry_collect 死循环 → insufficient_evidence(真 run 暴露)。
+    **只在用户请求的 `dimensions` 上对比**(默认全受控本体,兼容直接调用)。
+
+    **按维度拆分(post-real-run-6)**:原先一次产 N 竞品 × M 维的巨型矩阵,喂全量证据
+    (真 run 273 条 ≈ 247K char,逼近端点 256K 上下文)→ Doubao 偶发吐坏 JSON / 只产 2/6 维。
+    改成每维一次小调用(只喂该维证据 ≈ 30-54K、只产 N 个 cell),并行跑:输入骤减、输出简单、
+    维度齐全、**单维失败隔离**——某维(如评价类满是嵌套引号的 quote_text)即使重试封顶仍败,
+    也只丢该维并记入 degraded_sink(降级必可见),其余维照常产出,绝不让一个脆维度杀整个对比。
     """
     names = ", ".join(p.name for p in profiles)
-    dims = ", ".join(dimensions)
-    block = build_evidence_block(evidence)
-    msgs = [{"role": "user", "content":
-             f"{_REFS_RULE}\n\n对竞品 [{names}] **只在这些维度**做横向对比:{dims}。"
-             f"**不要新增其它维度**(超出上述维度的对比一律不要输出)。"
-             f"每个 cell 标 value_type(bool/enum/number/quote_text)与 value,并挂 evidence_refs。"
-             f"\n\n证据:\n{block}"}]
-    # 对比是 analyze 最后一步、单次大调用(~35-70s)。**调用前** emit 一次进度,让执行流在这段
-    # 显"正在生成对比矩阵"(否则前 N 项抽取报完后这段又静默几十秒)。
-    if on_progress is not None:
-        on_progress("生成跨竞品对比矩阵")
-    return structured_call(ComparisonExtraction, msgs, client=client, model=model).rows
+    results: dict[str, ComparisonRow] = {}
+
+    def work(dimension: str) -> None:
+        # 每维 finally 必 emit 一次进度(成功/无证据/失败都算一格)→ 执行流逐维点亮
+        # 1/N→N/N,不再是整阶段一格静默几十秒(post-real-run-7 UX 修;ticker total 由
+        # analyze_node 设为 competitors*4 + len(dimensions))。
+        try:
+            row = _compare_one_dimension(dimension, names, evidence, client=client, model=model)
+            if row is not None:
+                results[dimension] = row  # 不同 key 并发写,CPython 原子,无需锁
+        except RunAborted:
+            raise  # 取消/超时穿透降级,停掉整轮对比(剩余维度也会快速抛 RunAborted)
+        except Exception as e:  # noqa: BLE001 — 单维任何失败都降级该维,绝不杀整轮对比
+            logger.warning("build_comparison[%s] 维度对比降级(%s,跳过该维)",
+                           dimension, type(e).__name__)
+            if degraded_sink is not None:
+                degraded_sink.append(f"comparison.{dimension}")
+        finally:
+            if on_progress is not None:
+                on_progress(f"对比·{_DIM_ZH.get(dimension, dimension)}")
+
+    with cf.ThreadPoolExecutor(
+        max_workers=min(_MAX_COMPARISON_WORKERS, len(dimensions) or 1)
+    ) as ex:
+        list(ex.map(work, dimensions))
+
+    # 按请求维度顺序组装(并发写入后恢复确定顺序);缺的维度自然不在结果里。
+    return [results[d] for d in dimensions if d in results]
 
 
 def analyze(
@@ -241,6 +293,6 @@ def analyze(
         ]
         profiles = [f.result() for f in futures]
     comparison = build_comparison(
-        profiles, evidence, dimensions=dimensions, on_progress=on_progress,
-        client=client, model=model)
+        profiles, evidence, dimensions=dimensions, degraded_sink=degraded_sink,
+        on_progress=on_progress, client=client, model=model)
     return CompetitorAnalysis(competitors=profiles, comparison=comparison)

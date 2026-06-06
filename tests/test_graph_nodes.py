@@ -143,6 +143,125 @@ def test_analyze_node_sets_degraded_when_extraction_degrades(conn, monkeypatch):
     assert "降级" in analyze_trace["output_summary"]                # trace 含降级 marker(可见)
 
 
+def test_analyze_node_retry_reuses_profiles_only_recompares(conn, monkeypatch):
+    """post-real-run-7 坏维度精准重跑:retry_analyze(retry_count>0 + 有上轮 analysis)时,
+    复用竞品画像、只调 build_comparison,不再整轮重抽(不调 analyze)→ 省掉 N×4 抽取。"""
+    import rivalradar.graph.nodes as nodes_mod
+    from rivalradar.schema.models import (
+        CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
+    )
+    prior_profiles = [CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())]
+    prior = CompetitorAnalysis(competitors=prior_profiles, comparison=[]).model_dump()
+    calls = {"analyze": 0, "build_comparison": 0, "profiles_in": None}
+
+    def _no_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+        calls["analyze"] += 1
+        return CompetitorAnalysis(competitors=prior_profiles, comparison=[])
+
+    def _fake_build_comparison(profiles, evidence, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+        calls["build_comparison"] += 1
+        calls["profiles_in"] = [p.name for p in profiles]
+        return []
+
+    monkeypatch.setattr(nodes_mod, "analyze", _no_analyze)
+    monkeypatch.setattr(nodes_mod, "build_comparison", _fake_build_comparison)
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    node = make_analyze_node(conn=conn, client=None, model="m")
+    ev = [{"id": "e1", "competitor": "Notion", "dimension": "pricing", "content": "c",
+           "source_url": "u", "source_title": "t", "language": "en", "fetched_at": "t0"}]
+    out = node({"competitors": ["Notion"], "evidence": ev, "dimensions": ["pricing"],
+                "retry_count": 1, "analysis": prior,
+                "qc_result": {"verdict": "retry_analyze", "issues": []}}, _CFG)
+    assert calls["analyze"] == 0                # retry 不整轮重抽
+    assert calls["build_comparison"] == 1       # 只重做对比矩阵
+    assert calls["profiles_in"] == ["Notion"]   # 复用上轮竞品画像
+    assert out["analysis"]["competitors"][0]["name"] == "Notion"
+
+
+def test_analyze_node_first_pass_runs_full_analyze(conn, monkeypatch):
+    """首遍(retry_count=0 / 无上轮 analysis)走完整 analyze,不进精准重跑分支。"""
+    import rivalradar.graph.nodes as nodes_mod
+    from rivalradar.schema.models import (
+        CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
+    )
+    calls = {"analyze": 0, "build_comparison": 0}
+
+    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+        calls["analyze"] += 1
+        return CompetitorAnalysis(competitors=[CompetitorProfile(
+            name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
+
+    monkeypatch.setattr(nodes_mod, "analyze", _fake_analyze)
+    monkeypatch.setattr(nodes_mod, "build_comparison",
+                        lambda *a, **k: calls.__setitem__("build_comparison", calls["build_comparison"] + 1) or [])
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    node = make_analyze_node(conn=conn, client=None, model="m")
+    ev = [{"id": "e1", "competitor": "Notion", "dimension": "pricing", "content": "c",
+           "source_url": "u", "source_title": "t", "language": "en", "fetched_at": "t0"}]
+    node({"competitors": ["Notion"], "evidence": ev, "retry_count": 0}, _CFG)
+    assert calls["analyze"] == 1            # 首遍走完整 analyze
+    assert calls["build_comparison"] == 0   # 不直接调对比(由 analyze 内部调)
+
+
+def test_analyze_node_retry_collect_runs_full_analyze_not_reuse(conn, monkeypatch):
+    """retry_collect(补了新证据)即使 state 残留上轮 analysis,也必须走完整 analyze 重抽,
+    绝不复用旧画像 —— 防 reuse 条件被错误扩展到包含 retry_collect(对抗审查回归锚)。"""
+    import rivalradar.graph.nodes as nodes_mod
+    from rivalradar.schema.models import (
+        CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
+    )
+    prior = CompetitorAnalysis(competitors=[CompetitorProfile(
+        name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[]).model_dump()
+    calls = {"analyze": 0, "build_comparison": 0}
+
+    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+        calls["analyze"] += 1
+        return CompetitorAnalysis(competitors=[CompetitorProfile(
+            name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
+
+    monkeypatch.setattr(nodes_mod, "analyze", _fake_analyze)
+    monkeypatch.setattr(nodes_mod, "build_comparison",
+                        lambda *a, **k: calls.__setitem__("build_comparison", calls["build_comparison"] + 1) or [])
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    node = make_analyze_node(conn=conn, client=None, model="m")
+    ev = [{"id": "e1", "competitor": "Notion", "dimension": "pricing", "content": "c",
+           "source_url": "u", "source_title": "t", "language": "en", "fetched_at": "t0"}]
+    node({"competitors": ["Notion"], "evidence": ev, "retry_count": 1, "analysis": prior,
+          "qc_result": {"verdict": "retry_collect", "issues": []}}, _CFG)
+    assert calls["analyze"] == 1            # retry_collect 走完整 analyze(新证据重抽)
+    assert calls["build_comparison"] == 0   # 不走精准重跑复用路径
+
+
+def test_analyze_node_retry_analyze_bad_prior_falls_back_to_full_analyze(conn, monkeypatch):
+    """B2 精准重跑兜底:verdict=retry_analyze 但上轮 analysis shape 异常(CompetitorAnalysis(**prior)
+    反序列化抛)→ 不崩,回退完整 analyze 重抽(never crash the run)。覆盖 reuse_profiles=False
+    的异常回退分支。"""
+    import rivalradar.graph.nodes as nodes_mod
+    from rivalradar.schema.models import (
+        CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
+    )
+    bad_prior = {"competitors": "不是列表", "comparison": []}  # CompetitorAnalysis(**prior) 必抛
+    calls = {"analyze": 0, "build_comparison": 0}
+
+    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+        calls["analyze"] += 1
+        return CompetitorAnalysis(competitors=[CompetitorProfile(
+            name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
+
+    monkeypatch.setattr(nodes_mod, "analyze", _fake_analyze)
+    monkeypatch.setattr(nodes_mod, "build_comparison",
+                        lambda *a, **k: calls.__setitem__("build_comparison", calls["build_comparison"] + 1) or [])
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    node = make_analyze_node(conn=conn, client=None, model="m")
+    ev = [{"id": "e1", "competitor": "Notion", "dimension": "pricing", "content": "c",
+           "source_url": "u", "source_title": "t", "language": "en", "fetched_at": "t0"}]
+    out = node({"competitors": ["Notion"], "evidence": ev, "retry_count": 1, "analysis": bad_prior,
+                "qc_result": {"verdict": "retry_analyze", "issues": []}}, _CFG)
+    assert calls["analyze"] == 1            # 反序列化失败 → 回退完整 analyze
+    assert calls["build_comparison"] == 0   # 不走精准重跑复用路径(prior 不可用)
+    assert out["analysis"]["competitors"][0]["name"] == "Notion"
+
+
 def test_write_node_renders_and_persists(conn, monkeypatch):
     import rivalradar.graph.nodes as nodes_mod
     monkeypatch.setattr(

@@ -5,7 +5,7 @@ import threading
 import time
 from typing import Any, Callable
 
-from rivalradar.agents.analyst import analyze
+from rivalradar.agents.analyst import analyze, build_comparison
 from rivalradar.agents.collector import collect_evidence
 from rivalradar.agents.writer import (
     generate_decisions, generate_insight, render_body, stitch_report,
@@ -13,6 +13,7 @@ from rivalradar.agents.writer import (
 )
 from rivalradar.graph.router import extract_collect_targets
 from rivalradar.agents import qc
+from rivalradar.llm.runcontrol import wrap_client
 from rivalradar.schema.models import (
     CONTROLLED_DIMENSIONS, CompetitorAnalysis, DecisionSet, Evidence, QCResult,
     ReportInsight,
@@ -31,6 +32,12 @@ logger = logging.getLogger(__name__)
 def _get_emit(config: dict) -> Callable[[str, dict[str, Any]], None] | None:
     """从 langgraph config 取 emit callback;tests 不传 emit 时返 None。"""
     return config.get("configurable", {}).get("emit")
+
+
+def _run_client(client, config: dict):
+    """按 config 注入的 RunControl 包装 client(每次 LLM 调用前查取消/超时)。
+    无 control(单测/CLI)→ 原样返回 → 行为不变,backward compat。"""
+    return wrap_client(client, config.get("configurable", {}).get("run_control"))
 
 
 def _emit_progress(
@@ -142,18 +149,48 @@ def make_analyze_node(*, conn, client, model):
         emit = _get_emit(config)
         t0 = time.monotonic()
         evidence = [Evidence(**d) for d in state["evidence"]]
-        _emit_progress(
-            emit, "analyst", "thinking",
-            f"正在分析 {len(evidence)} 条证据,提取 {len(state['competitors'])} 个竞品的特征",
-        )
+        dims = tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS)
         # 收集本轮 profile 抽取降级(单项 LLM 截断/失败优雅降级,见 analyst._safe_extract)。
         # 非空 → 置 run 级 degraded,保证「降级必可见」(否则整竞品 profile 半瘫却 done)。
         degraded_sink: list[str] = []
-        # 增量进度:每竞品 4 抽取 + 1 对比 = 总单元数,逐项 emit(~174s 最长静默段 → 竞品·维度逐项亮起)。
-        tick = _make_ticker(emit, "analyst", "thinking", len(state["competitors"]) * 4 + 1)
-        analysis = analyze(evidence, state["competitors"],
-                           dimensions=tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS),
-                           degraded_sink=degraded_sink, on_progress=tick, client=client, model=model)
+        rc_client = _run_client(client, config)
+
+        # post-real-run-7「坏维度精准重跑」:**仅 retry_analyze** 时复用上轮竞品画像,只重做对比矩阵。
+        # 依据:qc 只对【对比矩阵 cell】做 entailment(comparison_only=True),retry_analyze 的
+        # 触发因永远在对比层,且证据未变 → 竞品画像(features/pricing/personas/swot)无需重抽,
+        # 省掉 N×4 次抽取调用(整轮重跑 → 只重对比,~省一半)。画像在 qc 策展中不被改(只丢对比 cell)。
+        # **retry_collect 不走此路**:它补了新证据,画像必须用新证据重抽 → 仍走完整 analyze。
+        prior = state.get("analysis")
+        reuse_profiles = (prior is not None
+                          and state.get("qc_result", {}).get("verdict") == "retry_analyze")
+        profiles = None
+        if reuse_profiles:
+            # 兜底:上轮 analysis shape 异常(理论上不会——同进程 model_dump,无 checkpointer)→
+            # 不崩,回退完整 analyze(与本节点「never crash the run」一致,见 _safe_extract)。
+            try:
+                profiles = CompetitorAnalysis(**prior).competitors
+            except Exception:  # noqa: BLE001
+                logger.warning("精准重跑:上轮 analysis 反序列化失败,回退完整 analyze")
+                reuse_profiles = False
+        if reuse_profiles:
+            _emit_progress(emit, "analyst", "thinking",
+                           f"重跑:复用 {len(profiles)} 个竞品画像,只重做对比矩阵(精准重跑)")
+            tick = _make_ticker(emit, "analyst", "thinking", len(dims))  # 只剩对比阶段进度
+            comparison = build_comparison(profiles, evidence, dimensions=dims,
+                                          degraded_sink=degraded_sink, on_progress=tick,
+                                          client=rc_client, model=model)
+            analysis = CompetitorAnalysis(competitors=profiles, comparison=comparison)
+        else:
+            _emit_progress(
+                emit, "analyst", "thinking",
+                f"正在分析 {len(evidence)} 条证据,提取 {len(state['competitors'])} 个竞品的特征",
+            )
+            # 增量进度:每竞品 4 抽取 + 每维度 1 对比 = 总单元数,逐项 emit(最长静默段被打散成
+            # 「竞品·抽取项」与「对比·维度」逐项亮起,post-real-run-7 把对比阶段从 1 格细分到 N 格)。
+            tick = _make_ticker(emit, "analyst", "thinking", len(state["competitors"]) * 4 + len(dims))
+            analysis = analyze(evidence, state["competitors"], dimensions=dims,
+                               degraded_sink=degraded_sink, on_progress=tick,
+                               client=rc_client, model=model)
         save_analysis(conn, run_id, analysis)
         _emit_progress(
             emit, "analyst", "done",
@@ -187,7 +224,7 @@ def make_write_node(*, conn, client, model, as_of):
             f"正在撰写 {len(analysis.competitors)} 个竞品的对比报告",
         )
         report, insight = write_report_with_insight(
-            analysis, evidence, as_of=as_of, client=client, model=model)
+            analysis, evidence, as_of=as_of, client=_run_client(client, config), model=model)
         save_report(conn, run_id, report)
         save_insight(conn, run_id, insight)  # Epic 2.4:结构化洞察持久化(/insight 端点)
         _emit_progress(
@@ -235,7 +272,7 @@ def make_qc_node(*, conn, client, model, as_of):
         try:
             curated, dropped = qc.curate_analysis(
                 analysis, evidence, dimensions=requested_dims, on_progress=tick,
-                client=client, model=model)
+                client=_run_client(client, config), model=model)
         except Exception as e:  # noqa: BLE001 — 蕴含是尽力而为辅助闸,任何失败都降级,绝不崩整图(必办项①/spec §5)
             local_degraded = True
             # 只记 type(e).__name__,**绝不**写 str(e) 入 trace(GET /trace/:run 公开暴露,
@@ -268,7 +305,7 @@ def make_qc_node(*, conn, client, model, as_of):
             curated_body = render_body(curated, evidence, as_of=as_of)
             if dropped:  # 策展真丢了 cell → headline 须用 curated body 重生成(否则引用已丢结论)
                 try:
-                    insight_obj = generate_insight(curated_body, client=client, model=model)
+                    insight_obj = generate_insight(curated_body, client=_run_client(client, config), model=model)
                     save_insight(conn, run_id, insight_obj)
                 except Exception as e:  # noqa: BLE001 — 重生成尽力而为,失败保原 insight + 降级,绝不崩图
                     logger.exception("qc insight regenerate failed for run %s", run_id)
@@ -340,7 +377,8 @@ def make_decide_node(*, conn, client, model, as_of):
         decision_degraded = False
         dropped: list[str] = []  # 被策展掉的 ungrounded 决策 action(可见性,非降级)
         try:
-            decision_set = generate_decisions(body, decision_context, client=client, model=model)
+            decision_set = generate_decisions(body, decision_context,
+                                              client=_run_client(client, config), model=model)
         except Exception as e:  # noqa: BLE001 — 生成失败降级,绝不崩图
             logger.exception("decide generate failed for run %s", run_id)
             append_trace(conn, run_id, "decide",
@@ -351,7 +389,7 @@ def make_decide_node(*, conn, client, model, as_of):
             # 策展:丢弃 ungrounded 决策(机械悬空免 LLM + 蕴含不支撑),只留站得住的。
             try:
                 kept, dropped = qc.curate_decisions(
-                    decision_set.decisions, evidence, client=client, model=model)
+                    decision_set.decisions, evidence, client=_run_client(client, config), model=model)
                 decision_set = DecisionSet(decisions=kept)
             except Exception as e:  # noqa: BLE001 — 蕴含失败:机械门 fallback(只丢悬空)+ 降级,绝不崩图
                 logger.exception("decide curate failed for run %s", run_id)

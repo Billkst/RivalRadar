@@ -12,7 +12,9 @@ from rivalradar.api.deps import (
     get_db_conn, get_doubao_client, get_provider, get_as_of, get_max_retries,
 )
 from rivalradar.api.schemas import DiscoverRequest, RunDetail, RunRequest, RunSummary
-from rivalradar.api.sse import _ACTIVE_RUN_TASKS, _replay_from_trace, graph_event_stream
+from rivalradar.api.sse import (
+    _ACTIVE_RUN_CONTROLS, _ACTIVE_RUN_TASKS, _replay_from_trace, graph_event_stream,
+)
 from rivalradar.config import doubao_model
 from rivalradar.llm.structured import StructuredCallError
 from rivalradar.graph.build import build_research_graph
@@ -103,7 +105,7 @@ def get_run(run_id: str,
 
 
 @router.delete("/run/{run_id}")
-def delete_run(
+async def delete_run(
     run_id: str,
     conn: sqlite3.Connection = Depends(get_db_conn),
 ) -> dict:
@@ -113,6 +115,9 @@ def delete_run(
     run 不存在 → 404。删除前若该 run 仍在跑(_ACTIVE_RUN_TASKS),先 cancel in-flight task,
     避免删除后 SSE 流仍往已删 run 写表(留下孤儿行)。
     """
+    ctl = _ACTIVE_RUN_CONTROLS.get(run_id)
+    if ctl is not None:
+        ctl.cancel()  # 协作式:停掉 worker 线程里在飞的 LLM 重试环(task.cancel 穿不透同步阻塞)
     task = _ACTIVE_RUN_TASKS.get(run_id)
     if task is not None and not task.done():
         task.cancel()
@@ -122,7 +127,7 @@ def delete_run(
 
 
 @router.post("/run/{run_id}/cancel")
-def cancel_run(
+async def cancel_run(
     run_id: str,
     conn: sqlite3.Connection = Depends(get_db_conn),
 ) -> dict:
@@ -139,6 +144,12 @@ def cancel_run(
 
     无需 404:已结束的 run cancel 是 no-op,语义清晰返 cancelled=False / db_cancelled=False。
     """
+    # post-real-run-7:协作式取消才能真停在飞 LLM。置 RunControl → 包装后的 client 在下一次
+    # create() 前抛 RunAborted('cancelled'),最多再等 1 个在飞的 90s 调用(而非旧版整轮 5×90s
+    # 空磨)。task.cancel() 保留作 between-node await 边界的兜底(穿不透同步 LLM 阻塞,见 runcontrol)。
+    ctl = _ACTIVE_RUN_CONTROLS.get(run_id)
+    if ctl is not None:
+        ctl.cancel()
     task = _ACTIVE_RUN_TASKS.get(run_id)
     cancelled = False
     if task is not None and not task.done():
