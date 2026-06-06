@@ -13,12 +13,32 @@ export interface Sample {
   date: string
   competitors: string[]
   kind: 'md' | 'pdf'
+  type?: 'report' | 'methodology' // 默认 report;methodology = 范文库方法论(库章)
+  structure?: string // 范例结构徽章:双雄对决 / 全矩阵横评 / 批判视角 / 战略评论
   file: string // /samples/ref-0X.(md|pdf)
   sourceUrl?: string // 原文链接(PDF 报告无公开直链)
+  sourceUrls?: string[] // 方法论多来源(3 篇参考)
   note: string // 一句话:为什么值得参照
 }
 
 export const SAMPLES: Sample[] = [
+  {
+    id: 'methodology',
+    title: '竞品分析报告怎么写',
+    publisher: 'RivalRadar',
+    author: 'RivalRadar 原创',
+    date: '2026-06-07',
+    competitors: [],
+    kind: 'md',
+    type: 'methodology',
+    file: '/samples/methodology.md',
+    sourceUrls: [
+      'https://www.woshipm.com/evaluating/5672064.html',
+      'https://www.feishu.cn/template/competitive-product-analysis-report-key-aspects',
+      'https://zhuanlan.zhihu.com/p/668621286',
+    ],
+    note: '8 步框架 + 对齐 RivalRadar 10 条评分标尺,综合 woshipm / 飞书 / 知乎三篇权威方法论。范文库的"怎么读"。',
+  },
   {
     id: 'ref-01',
     title: '竞品分析报告:飞书 VS 钉钉 VS 企业微信,移动办公哪家强?',
