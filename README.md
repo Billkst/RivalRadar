@@ -63,6 +63,7 @@ EXA_API_KEY=           # 可选,Tavily 主 / Exa 兜底
 RIVALRADAR_DB=         # 可选,默认 rivalradar.db
 RIVALRADAR_PORT=       # 可选,默认 8000
 RIVALRADAR_HOST=       # 可选,默认 127.0.0.1(跨主机访问设 0.0.0.0)
+RIVALRADAR_RUN_BUDGET_S=  # 可选,默认 900,单 run 墙钟预算(秒);超时中止防卡死
 ```
 
 > **KEY 纪律**:`.env` 已加入 `.gitignore`,绝不提交到仓库。泄露 API key 违反比赛规则且会被即刻取消资格。`/healthz` 端点只返回 `{"ok": true}`,绝不暴露 key 值。
@@ -131,7 +132,7 @@ RIVALRADAR_HOST=       # 可选,默认 127.0.0.1(跨主机访问设 0.0.0.0)
 .venv/bin/python -m pytest
 ```
 
-198 个测试,约 7 秒。测试覆盖率 94%(58/62 路径)。
+350 个测试,约 10 秒通过。
 
 ---
 
