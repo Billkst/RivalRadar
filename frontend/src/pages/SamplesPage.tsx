@@ -18,7 +18,7 @@ export function SamplesPage() {
           <BookOpen className="h-5 w-5 text-accent" /> 竞品分析范文库
         </h1>
         <p className="mt-1 text-[13px] leading-relaxed text-text-muted">
-          以下是公开渠道下载的**他人**专业竞品分析报告,供参照「理想输出长什么样」——
+          以下是公开渠道下载的<span className="text-text-primary">他人</span>专业竞品分析报告,供参照「理想输出长什么样」——
           <span className="text-text-primary">非 RivalRadar 生成,均标明出处</span>。版权归原作者 / 媒体所有。
         </p>
       </div>
@@ -44,18 +44,17 @@ export function SamplesPage() {
             </div>
             <p className="mt-2 flex-1 text-[12px] leading-relaxed text-text-muted">{s.note}</p>
             <div className="mt-3 flex items-center gap-3 text-xs">
-              {s.kind === 'md' ? (
-                <Link
-                  to={`/samples/${s.id}`}
-                  className="inline-flex items-center gap-1 rounded-md border border-accent bg-accent-soft px-2.5 py-1 font-medium text-accent hover:shadow-panel"
-                >
-                  <BookOpen className="h-3.5 w-3.5" /> 阅读范文
-                </Link>
-              ) : (
+              <Link
+                to={`/samples/${s.id}`}
+                className="inline-flex items-center gap-1 rounded-md border border-accent bg-accent-soft px-2.5 py-1 font-medium text-accent hover:shadow-panel"
+              >
+                <BookOpen className="h-3.5 w-3.5" /> {s.kind === 'md' ? '阅读范文' : '在线阅览'}
+              </Link>
+              {s.kind === 'pdf' && (
                 <a
                   href={s.file}
                   download
-                  className="inline-flex items-center gap-1 rounded-md border border-accent bg-accent-soft px-2.5 py-1 font-medium text-accent hover:shadow-panel"
+                  className="inline-flex items-center gap-1 text-text-muted hover:text-accent"
                 >
                   <Download className="h-3.5 w-3.5" /> 下载 PDF
                 </a>

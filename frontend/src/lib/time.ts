@@ -16,3 +16,27 @@ export function formatBeijing(iso: string): string {
     minute: '2-digit',
   }).format(d)
 }
+
+/** 北京时间「时:分:秒」—— 执行流 / 自审轨迹的逐步时间戳。解析失败回退原 UTC 切片。 */
+export function formatBeijingTime(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso.slice(11, 19)
+  return new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Shanghai',
+    hour: '2-digit',
+    minute: '2-digit',
+    second: '2-digit',
+  }).format(d)
+}
+
+/** 北京时间「年-月-日」—— 证据采集日期 / 状态栏。解析失败回退原 UTC 切片。 */
+export function formatBeijingDate(iso: string): string {
+  const d = new Date(iso)
+  if (Number.isNaN(d.getTime())) return iso.slice(0, 10)
+  return new Intl.DateTimeFormat('sv-SE', {
+    timeZone: 'Asia/Shanghai',
+    year: 'numeric',
+    month: '2-digit',
+    day: '2-digit',
+  }).format(d)
+}

@@ -5,6 +5,7 @@
  * "shows its work" paradigm signal:每步技术轨迹诚实可查,默认折叠不抢决策流首屏。
  */
 import { SectionTitle, PanelSkeleton, EmptyNote } from '@/components/cockpit/parts'
+import { formatBeijingTime } from '@/lib/time'
 import type { LoadState } from '@/stores/cockpitStore'
 import type { TraceEntry } from '@/types/api'
 
@@ -48,7 +49,7 @@ export function SelfAuditTrace({ trace, state }: { trace: TraceEntry[] | null; s
         <ol className="mt-3 space-y-1.5 border-l border-border pl-3">
           {trace.map((t) => (
             <li key={t.id} className="text-[12px]">
-              <span className="font-mono text-text-muted">{t.ts.slice(11, 19)}</span>{' '}
+              <span className="font-mono text-text-muted">{formatBeijingTime(t.ts)}</span>{' '}
               <span className="font-medium text-text-primary">{NODE_LABEL[t.node] ?? t.node}</span>{' '}
               <span className="text-text-muted">{t.output_summary}</span>
               {t.latency_ms > 0 ? (

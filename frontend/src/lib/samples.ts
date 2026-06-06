@@ -64,7 +64,7 @@ export const SAMPLES: Sample[] = [
     competitors: ['赛道全景'],
     kind: 'pdf',
     file: '/samples/ref-04.pdf',
-    note: '厂商权威 38 页赛道全景报告(PDF,点开下载查看)。',
+    note: '厂商权威 38 页赛道全景报告,含完整图表(PDF,可在线阅览 / 下载)。',
   },
 ]
 

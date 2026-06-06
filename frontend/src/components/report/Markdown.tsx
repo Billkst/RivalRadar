@@ -8,6 +8,7 @@
  * 行内 `[ev_xxx]` / `[ev_a, ev_b]` 渲成弱化「收据」徽章,呼应「点结论看收据」的信任范式。
  */
 import * as React from 'react'
+import { HEADING_RE, headingId } from './markdownHeadings'
 
 const CITE_SPLIT = /(\[ev_[^\]]*\])/g
 
@@ -49,6 +50,7 @@ export function Markdown({ source }: { source: string }) {
   const lines = source.replace(/\r\n/g, '\n').split('\n')
   const blocks: React.ReactNode[] = []
   let items: { level: number; text: string; marker: string }[] = []
+  let headingSeq = 0
 
   const flushList = () => {
     if (items.length === 0) return
@@ -74,7 +76,7 @@ export function Markdown({ source }: { source: string }) {
 
   for (const raw of lines) {
     const line = raw.trimEnd()
-    const bulletMatch = /^(\s*)-\s+(.*)$/.exec(line)
+    const bulletMatch = /^(\s*)[-*+]\s+(.*)$/.exec(line)
     if (bulletMatch) {
       const level = Math.floor(bulletMatch[1].length / 2)
       items.push({ level, text: bulletMatch[2], marker: level === 0 ? '•' : '◦' })
@@ -88,28 +90,81 @@ export function Markdown({ source }: { source: string }) {
     }
     flushList()
     if (line.trim() === '') continue
-    if (line.startsWith('### ')) {
+    const imgMatch = /^!\[([^\]]*)\]\(([^)]+)\)$/.exec(line)
+    if (imgMatch) {
+      const [, alt, src] = imgMatch
       blocks.push(
-        <h3 key={blocks.length} className="mb-1.5 mt-5 text-[16px] font-semibold text-text-primary">
-          {renderInline(line.slice(4))}
-        </h3>,
+        <figure key={blocks.length} className="my-4">
+          <img
+            src={src}
+            alt={alt}
+            loading="lazy"
+            className="mx-auto max-w-full rounded-md border border-border"
+          />
+        </figure>,
       )
-    } else if (line.startsWith('## ')) {
-      blocks.push(
-        <h2
-          key={blocks.length}
-          className="mb-2 mt-7 border-b border-border pb-1 text-[20px] font-semibold text-text-primary"
-        >
-          {renderInline(line.slice(3))}
-        </h2>,
-      )
-    } else if (line.startsWith('# ')) {
-      blocks.push(
-        <h1 key={blocks.length} className="mb-4 text-[26px] font-bold text-text-primary">
-          {renderInline(line.slice(2))}
-        </h1>,
-      )
-    } else if (line.startsWith('> ')) {
+      continue
+    }
+    // 水平分隔线:--- / *** / ___(独立成行,≥3 个)。修复正文 `---` 渲成字面文本的 bug。
+    if (/^(-{3,}|\*{3,}|_{3,})$/.test(line.trim())) {
+      blocks.push(<hr key={blocks.length} className="my-6 border-0 border-t border-border" />)
+      continue
+    }
+    const headingMatch = HEADING_RE.exec(line)
+    if (headingMatch) {
+      const level = headingMatch[1].length
+      const text = headingMatch[2]
+      const id = headingId(headingSeq++)
+      if (level === 1) {
+        blocks.push(
+          <h1 id={id} key={blocks.length} className="mb-4 text-[26px] font-bold text-text-primary">
+            {renderInline(text)}
+          </h1>,
+        )
+      } else if (level === 2) {
+        blocks.push(
+          <h2
+            id={id}
+            key={blocks.length}
+            className="mb-2 mt-7 scroll-mt-20 border-b border-border pb-1 text-[20px] font-semibold text-text-primary"
+          >
+            {renderInline(text)}
+          </h2>,
+        )
+      } else if (level === 3) {
+        blocks.push(
+          <h3
+            id={id}
+            key={blocks.length}
+            className="mb-1.5 mt-5 scroll-mt-20 text-[16px] font-semibold text-text-primary"
+          >
+            {renderInline(text)}
+          </h3>,
+        )
+      } else if (level === 4) {
+        blocks.push(
+          <h4
+            id={id}
+            key={blocks.length}
+            className="mb-1 mt-4 scroll-mt-20 text-[15px] font-semibold text-text-primary"
+          >
+            {renderInline(text)}
+          </h4>,
+        )
+      } else {
+        blocks.push(
+          <h5
+            id={id}
+            key={blocks.length}
+            className="mb-1 mt-3 scroll-mt-20 text-[12px] font-semibold uppercase tracking-wide text-text-muted"
+          >
+            {renderInline(text)}
+          </h5>,
+        )
+      }
+      continue
+    }
+    if (line.startsWith('> ')) {
       blocks.push(
         <blockquote
           key={blocks.length}

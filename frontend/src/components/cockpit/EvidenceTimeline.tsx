@@ -6,6 +6,7 @@
  */
 import { useEvidenceViewer } from '@/stores/evidenceViewerStore'
 import { ageDays, isStale } from '@/lib/freshness'
+import { formatBeijingDate } from '@/lib/time'
 import { SectionTitle, PanelSkeleton, EmptyNote } from '@/components/cockpit/parts'
 import type { LoadState } from '@/stores/cockpitStore'
 import type { Evidence } from '@/types/api'
@@ -50,7 +51,7 @@ export function EvidenceTimeline({ evidence, state }: { evidence: Evidence[] | n
                   onClick={() => open(ev.id)}
                   className="flex w-full items-baseline gap-2 rounded px-1 py-1 text-left hover:bg-surface-subtle"
                 >
-                  <span className="font-mono text-[11px] text-text-muted">{ev.fetched_at.slice(0, 10)}</span>
+                  <span className="font-mono text-[11px] text-text-muted">{formatBeijingDate(ev.fetched_at)}</span>
                   <span className="rounded bg-surface-subtle px-1 text-[10px] text-text-muted">{ev.competitor}</span>
                   <span className="flex-1 truncate text-[12px] text-text-primary">{ev.source_title}</span>
                   {stale ? (
