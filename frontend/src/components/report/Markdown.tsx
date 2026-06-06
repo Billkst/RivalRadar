@@ -54,7 +54,8 @@ function renderCitations(text: string, keyPrefix: string): React.ReactNode[] {
 // 行内 markdown 链接 [label](href):站内 /samples/:id 走 react-router(SPA 不刷新),
 // http(s) 外链走新标签页 + noopener;其余 scheme(javascript: 等)退为字面文本防注入。
 // [ev_xxx] 无 `(`,不会被本正则吃到,仍由 renderCitations 处理。
-const LINK_RE = /\[([^\]]+)\]\(([^)]+)\)/g
+// href 允许一层嵌套括号(如 wikipedia ..._(programming_language)),避免静默截断。
+const LINK_RE = /\[([^\]]+)\]\(([^()]+(?:\([^()]*\)[^()]*)*)\)/g
 function renderLinksAndCites(text: string, keyPrefix: string): React.ReactNode[] {
   const out: React.ReactNode[] = []
   let last = 0
