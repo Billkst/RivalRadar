@@ -132,7 +132,9 @@ export function SampleView() {
               </>
             )}
           </div>
-          <div className="mt-3 h-px w-full bg-gradient-to-r from-accent/50 to-transparent" />
+          <div
+            className={`mt-3 h-px w-full ${isMethodology ? 'bg-accent/40' : 'bg-gradient-to-r from-accent/50 to-transparent'}`}
+          />
           <p className="mt-3 text-[12px] leading-relaxed text-text-muted">
             {isMethodology
               ? '本文为 RivalRadar 原创方法论,综合公开资料编写,来源见文末。'
