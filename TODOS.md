@@ -119,6 +119,14 @@
 **Priority:** P4
 **详情:** `reads.py` 的 `get_evidence / get_analysis / get_report / get_trace` 函数无 docstring。FastAPI 会把 docstring 渲染为 OpenAPI 端点描述,Swagger UI 当前为空。
 
+### 协作取消:断连/超时分支与 worker 线程共享 conn 的写写竞态
+**Priority:** P3
+**详情:** ship-time 对抗审查(post-real-run-7,Claude F2,confidence 5)揪到:`sse.py` 的 `except CancelledError`(断连)/ `except RunAborted` 分支在事件循环线程调 `repo.mark_run_cancelled/mark_run_failed(conn)`,而此时 `graph_task` 已 cancel 但未 await,worker 线程上的节点可能仍在同一 `check_same_thread=False` 共享 conn 上 `execute`。sqlite3 连接级锁多数情况兜得住,但交错 BEGIN/commit 理论上可触发 `OperationalError`。窗口窄(取消多在 await 边界;RunAborted 传到 except 时抛它的 worker 已结束),低概率。修法:断连/超时分支先 await 任务收尾(workers 全停)再写 DB,或给 `mark_*` 加 `busy_timeout` 重试(可与上面 P1 `busy_timeout` TODO 合并)。
+
+### emit 在事件循环关闭后从 worker 线程抛 RuntimeError
+**Priority:** P4
+**详情:** ship-time 对抗审查(post-real-run-7,Claude F3,confidence 4)揪到:`sse.py` 的 `emit` 闭包从 worker 线程调 `loop.call_soon_threadsafe`,若事件循环已关闭(仅服务器 shutdown 期间仍有在飞 worker)会抛 `RuntimeError: Event loop is closed`,冒泡杀该节点(被 except 降级接住)。生产单 loop 长生命周期 → run 结束 loop 不关,实际是调度进无人 drain 的 loop = 无害泄漏;仅 shutdown 窗口真抛。修法:emit 内 `try/except RuntimeError: pass`(进度事件非关键,shutdown 期丢弃可接受)。本程未做以免掩盖意外的 loop-closed。
+
 ---
 
 ## 测试

@@ -4,6 +4,33 @@ All notable changes to RivalRadar are documented here per [Keep a Changelog](htt
 
 Versioning follows 4-digit semver `MAJOR.MINOR.PATCH.MICRO`(< 1.0 表 API 未稳定,迭代期允许 breaking changes)。
 
+## [0.5.0.0] - 2026-06-06
+
+**post-real-run-7 硬化 + 范文库 + analyze 卡死根治**。真 run 暴露 analyze 卡死无法完成,实证定位并根治时延 / 取消 / 墙钟 / 精准重跑;新增他人专业竞品分析范文库(原文配图 + 杂志排版 + PDF 在线阅览 + 北京时间全量);ship-time 跨模型(Claude + Codex)对抗评审收口 3 个 finding。350 pytest 绿 + `tsc -b` 绿。
+
+### Added
+
+- **竞品分析范文库**(`frontend/` + `public/samples/`)— 收录他人专业竞品分析报告(标明出处),含去原文(woshipm/36kr)抓回的配图、杂志式阅读排版 + 左侧粘性 TOC(scroll-spy)、PDF 在线 iframe 阅览(不止下载)。
+- **协作式取消 + 全局墙钟**(`rivalradar/llm/runcontrol.py`)— `RunControl`(threading.Event + deadline)+ 包装 client 每次 LLM 调用前 `check()`:取消真能停掉 worker 线程在飞的 LLM(不再空磨整轮);每 run 默认 900s 墙钟预算(env `RIVALRADAR_RUN_BUDGET_S`)兜底卡死。
+- **markdown 表格渲染**(`frontend/.../Markdown.tsx`)— `/report` 跨竞品对比表(核心交付物)正常渲染(此前散成段落,Codex 评审揪出)。
+- **dev 启停脚本**(`scripts/`)— `dev-backend` / `dev-frontend` / `stop-dev`,内置 WSL2 Clash 代理兜底,改后端代码后一键重启。
+
+### Changed
+
+- **实时进度桥**(`rivalradar/api/sse.py`)— `emit` 改 `loop.call_soon_threadsafe`,worker 线程进度事件实时送达(此前憋到节点结束才到;实测延迟 101s→0s,等待不再像死机)。
+- **对比阶段并发**(`rivalradar/agents/analyst.py`)— 对比池 4→8(6 维一波跑完不再分 2 波翻倍)+ per-dimension 进度逐维点亮;实测 analyze 161s→59s(小 run)。
+- **坏维度精准重跑**(`rivalradar/graph/nodes.py`)— `retry_analyze` 时复用上轮竞品画像、只重对比矩阵(省 N×4 抽取),上轮 analysis 反序列化失败回退完整 analyze。
+- **北京时间全量**(`frontend/`)— 时间显示统一 `Asia/Shanghai`(此前 7 处裸切 UTC)。
+- **cockpit UX 打磨**(`frontend/`)— 报告导出/删除、StatusBar 绿点重设计、设计哲学、双滚动条。
+- **取消 / 删除 API 改 async**(`rivalradar/api/runs.py`)— cancel/delete 异步化以线程安全地 `task.cancel`。
+
+### Fixed
+
+- **analyze 卡死无法完成**(`rivalradar/agents/analyst.py` + `graph/nodes.py` + `llm/structured.py`)— 真 run 根治:`max_retries` 5→3 缩短最坏墙钟、`PricingTier.features_included` str→list 兜底(消 Doubao 误返字符串导致的每次必重试)。
+- **删除运行中 run 留孤儿**(`rivalradar/api/runs.py`)— 运行中拒删返 409(对抗审查 P1,Claude + Codex 跨模型一致):协作式取消挡不住正在写库的 worker 线程,删后会留无父 `runs` 行的孤儿数据;改为先取消再删。
+- **报告 img src 信标向量**(`frontend/.../Markdown.tsx`)— `![](src)` 收紧为仅相对路径 + `data:image`,堵死 LLM 注入的外链/内网图被浏览器自动加载(referrer 泄漏 / SSRF 向量)。
+- **删除失败吞整列表**(`frontend/`)— 独立 `deleteError` 行内提示,删除失败不再毁列表。
+
 ## [0.4.0.0] - 2026-05-30
 
 **Evidence Cockpit — 从"报告生成器"跳到"决策基础设施"**。v0.4 把 RivalRadar 的输出范式从一份 markdown 报告,换成 Manus 式分屏驾驶舱:左决策面(有据决策流 + 对比矩阵 + 证据支持度三色)/ 右镜湖执行流(4 角色时间线 + 诚实自纠重试环)。配套把决策做成 LLM 产出 + QC 校验的一等公民(full-C),并把 QC 信任模型从"一票否决的法官"翻成"策展人"。真打真 run 双重验证 + ship-time 跨模型对抗评审。
