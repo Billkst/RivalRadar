@@ -8,8 +8,7 @@ import { DEMO_RUN_DETAIL, isDemoRun } from '@/lib/demoFixture'
 import { useSSE } from '@/hooks/useSSE'
 import { useRunStore } from '@/stores/runStore'
 import { useCockpitStore } from '@/stores/cockpitStore'
-import { aggregateVerdicts } from '@/lib/verdict'
-import type { EvidenceRef, RunDetail } from '@/types/api'
+import type { RunDetail } from '@/types/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { CancelButton } from '@/components/office/CancelButton'
@@ -88,10 +87,12 @@ export function RunPage() {
     })
   }, [run_id, storeRunId, storeStatus, sse])
 
-  // StatusBar 决策派生指标(Epic 5):从 cockpitStore 读,防串 run(runId 不匹配显 "—")。
+  // StatusBar 用户价值计数(Epic 5):从 cockpitStore 读,防串 run(runId 不匹配显 "—")。
+  // 三色汇总已不在此聚合 —— 旧 aggregateVerdicts 基于 ref 级 support_verdict(LLM 自报、
+  // 不可信,codex P1#9)已删除;StatusBar 直接读 runStore.verdictSummary(cell 级真算,
+  // verdict_recheck 实时)+ curation-drops 兜底。
   const cockpitRunId = useCockpitStore((s) => s.runId)
   const decisions = useCockpitStore((s) => s.decisions)
-  const analysis = useCockpitStore((s) => s.analysis)
   const cockpitLive = !!run_id && cockpitRunId === run_id
   const decisionCount = cockpitLive && decisions ? decisions.decisions.length : undefined
   const riskCount =
@@ -100,14 +101,6 @@ export function RunPage() {
           (d) => d.stance === '需要警惕' || d.risk_reversibility === '不可逆',
         ).length
       : undefined
-  const verdictSummary = React.useMemo(() => {
-    if (!cockpitLive) return undefined
-    const refs: EvidenceRef[] = []
-    if (analysis) for (const row of analysis.comparison) for (const cell of row.cells) refs.push(...cell.evidence_refs)
-    if (decisions) for (const d of decisions.decisions) refs.push(...d.evidence_refs)
-    if (refs.length === 0) return undefined
-    return aggregateVerdicts(refs)
-  }, [cockpitLive, analysis, decisions])
 
   return (
     <div className="space-y-4">
@@ -181,9 +174,9 @@ export function RunPage() {
       {/* 证据驾驶舱:StatusBar + 左决策面(Epic 4 实装)/ 右实时分析流程(重试环) */}
       {run_id && (
         <CockpitLayout
+          runId={run_id}
           decisionCount={decisionCount}
           riskCount={riskCount}
-          verdictSummary={verdictSummary}
         >
           <DecisionSurface
             runId={run_id}

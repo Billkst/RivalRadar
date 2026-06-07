@@ -9,7 +9,7 @@
  * 左决策面经 children slot 注入 —— Epic 3 传骨架占位,Epic 4 传 DecisionBoard/对比矩阵/证据。
  */
 import * as React from 'react'
-import { StatusBar, type VerdictSummary } from '@/components/cockpit/StatusBar'
+import { StatusBar } from '@/components/cockpit/StatusBar'
 import { ResearcherWorkbench } from '@/components/workbench/ResearcherWorkbench'
 import { Drawer } from '@/components/drawer/Drawer'
 import { useRunStore } from '@/stores/runStore'
@@ -18,14 +18,15 @@ import { useSkillsStore } from '@/stores/skillsStore'
 interface CockpitLayoutProps {
   /** 左决策面内容(Epic 4: DecisionBoard 等;Epic 3: 骨架占位)。 */
   children: React.ReactNode
+  /** 当前 run_id(StatusBar done 后拉 curation-drops 兜底剔除计数)。 */
+  runId: string
   /** StatusBar 决策派生指标(Epic 4/5 喂入;未就绪显 "—")。 */
   decisionCount?: number
   riskCount?: number
-  verdictSummary?: VerdictSummary
 }
 
 export function CockpitLayout({
-  children, decisionCount, riskCount, verdictSummary,
+  children, runId, decisionCount, riskCount,
 }: CockpitLayoutProps) {
   const status = useRunStore((s) => s.status)
 
@@ -45,9 +46,9 @@ export function CockpitLayout({
   return (
     <div className="flex h-[100dvh] flex-col">
       <StatusBar
+        runId={runId}
         decisionCount={decisionCount}
         riskCount={riskCount}
-        verdictSummary={verdictSummary}
       />
       <div
         className={
