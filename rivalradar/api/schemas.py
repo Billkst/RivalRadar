@@ -138,3 +138,44 @@ class SSEChunkData(BaseModel):
     step: str                        # thinking / drafting / reasoning
     delta: str                       # LLM 增量 token(几个字符)
     ts: str                          # ISO8601
+
+
+class SSEQueryData(BaseModel):
+    """query event — 采集员发起的真实查询词(spec §5.1,检索台逐字)。"""
+    competitor: str
+    dimension: str
+    query_text: str
+    language: str
+    round: int = 0
+    ts: str
+
+
+class SSEQueryHitData(BaseModel):
+    """query_hit event — 某查询词命中的证据条数(spec §5.1)。"""
+    query_text: str
+    hit_count: int
+    round: int = 0
+    ts: str
+
+
+class SSESourceData(BaseModel):
+    """source event — 新落库证据的来源卡明细(spec §5.2,不含正文,点开走 REST)。
+    无 provider / confidence(反幻觉,spec §1.5)。fetched_at 供前端算 stale(后端不算)。"""
+    evidence_id: str
+    competitor: str
+    dimension: str
+    source_title: str
+    source_url: str
+    fetched_at: str
+    language: str
+    round: int = 0
+    ts: str
+
+
+class SSEEvidenceDeltaData(BaseModel):
+    """evidence_delta event — retry 轮证据增量汇总(spec §5.4,重试环 X→Y)。"""
+    round: int
+    added_count: int
+    total_count: int
+    new_evidence_ids: list[str] = Field(default_factory=list)
+    ts: str
