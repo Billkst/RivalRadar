@@ -79,8 +79,10 @@ def create_app(
     from rivalradar.api.reads import router as reads_router
     from rivalradar.api.runs import router as runs_router
     from rivalradar.api.annotations import router as annotations_router
+    from rivalradar.api.agent_skills import router as agent_skills_router
     app.include_router(reads_router)
     app.include_router(runs_router)
     app.include_router(annotations_router)
+    app.include_router(agent_skills_router)
 
     return app
