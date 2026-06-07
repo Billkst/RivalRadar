@@ -300,7 +300,7 @@ def test_analyze_threads_requested_dimensions_into_comparison(monkeypatch):
     不再硬编码全 6 受控本体(否则分析员超范围产出 → 越界 hallucination + 质检覆盖死循环)。"""
     captured = {}
 
-    def spy(profiles, evidence, *, dimensions, degraded_sink=None, on_progress=None, client, model):
+    def spy(profiles, evidence, *, dimensions, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         captured["dims"] = dimensions
         return []
 
@@ -322,3 +322,31 @@ def test_analyze_two_competitors_aggregates_and_compares():
     assert [c.name for c in out.competitors] == ["Notion", "飞书"]
     assert client.chat.completions.calls == 9
     assert out.comparison[0].dimension == "pricing"
+
+
+def test_build_comparison_calls_on_cell_row_per_dimension(monkeypatch):
+    import threading
+    from rivalradar.agents import analyst as amod
+    from rivalradar.schema.models import ComparisonRow, ComparisonCell, CompetitorProfile, PricingModel, SWOT
+
+    seen = []
+    lock = threading.Lock()
+    def on_cell_row(dimension, row, status):
+        with lock:
+            seen.append((dimension, status, None if row is None else len(row.cells)))
+
+    def fake_one(dimension, names, evidence, *, client, model):
+        if dimension == "pricing":
+            return ComparisonRow(dimension="pricing", cells=[
+                ComparisonCell(competitor="Notion", value_type="enum", value="v")])
+        raise ValueError("boom")     # core_workflows 维失败
+
+    monkeypatch.setattr(amod, "_compare_one_dimension", fake_one)
+    profiles = [CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())]
+    sink = []
+    amod.build_comparison(profiles, [_ev("e1", "Notion", "pricing")],
+                          dimensions=("pricing", "core_workflows"),
+                          degraded_sink=sink, on_cell_row=on_cell_row, client=None, model="m")
+    by_dim = {d: (s, n) for d, s, n in seen}
+    assert by_dim["pricing"] == ("ok", 1)            # 成功维带 cells
+    assert by_dim["core_workflows"][0] == "failed"   # 失败维标 failed(乱序到达,按 dim 落位)

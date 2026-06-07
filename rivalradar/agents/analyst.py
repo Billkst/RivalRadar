@@ -224,18 +224,13 @@ def build_comparison(
     profiles: list[CompetitorProfile], evidence: list[Evidence],
     *, dimensions: tuple[str, ...] = CONTROLLED_DIMENSIONS,
     degraded_sink: list[str] | None = None,
-    on_progress: Callable[[str], None] | None = None, client, model,
+    on_progress: Callable[[str], None] | None = None,
+    on_cell_row: "Callable[[str, ComparisonRow | None, str], None] | None" = None,
+    client, model,
 ) -> list[ComparisonRow]:
-    """收尾产出跨竞品对比(受控本体 + 类型化值 + evidence_refs,spec D5 / §6)。
-
-    **只在用户请求的 `dimensions` 上对比**(默认全受控本体,兼容直接调用)。
-
-    **按维度拆分(post-real-run-6)**:原先一次产 N 竞品 × M 维的巨型矩阵,喂全量证据
-    (真 run 273 条 ≈ 247K char,逼近端点 256K 上下文)→ Doubao 偶发吐坏 JSON / 只产 2/6 维。
-    改成每维一次小调用(只喂该维证据 ≈ 30-54K、只产 N 个 cell),并行跑:输入骤减、输出简单、
-    维度齐全、**单维失败隔离**——某维(如评价类满是嵌套引号的 quote_text)即使重试封顶仍败,
-    也只丢该维并记入 degraded_sink(降级必可见),其余维照常产出,绝不让一个脆维度杀整个对比。
-    """
+    """并行逐维对比。on_cell_row(dimension, row, status):每维算完报一次(worker 线程,乱序到达)。
+    成功有 cells → status="ok";单维抛错 → status="failed";无证据(row None,无异常)→ status="empty"
+    (前端据此区分 pending / 已知空 / 失败,不会把无证据维误当还在跑)。"""
     names = ", ".join(p.name for p in profiles)
     results: dict[str, ComparisonRow] = {}
 
@@ -247,6 +242,10 @@ def build_comparison(
             row = _compare_one_dimension(dimension, names, evidence, client=client, model=model)
             if row is not None:
                 results[dimension] = row  # 不同 key 并发写,CPython 原子,无需锁
+                if on_cell_row is not None:
+                    on_cell_row(dimension, row, "ok")
+            elif on_cell_row is not None:
+                on_cell_row(dimension, None, "empty")   # 无证据维:已知空,非 pending
         except RunAborted:
             raise  # 取消/超时穿透降级,停掉整轮对比(剩余维度也会快速抛 RunAborted)
         except Exception as e:  # noqa: BLE001 — 单维任何失败都降级该维,绝不杀整轮对比
@@ -254,6 +253,8 @@ def build_comparison(
                            dimension, type(e).__name__)
             if degraded_sink is not None:
                 degraded_sink.append(f"comparison.{dimension}")
+            if on_cell_row is not None:
+                on_cell_row(dimension, None, "failed")
         finally:
             if on_progress is not None:
                 on_progress(f"对比·{_DIM_ZH.get(dimension, dimension)}")
@@ -271,7 +272,9 @@ def analyze(
     evidence: list[Evidence], competitors: list[str],
     *, dimensions: tuple[str, ...] = CONTROLLED_DIMENSIONS,
     degraded_sink: list[str] | None = None,
-    on_progress: Callable[[str], None] | None = None, client, model,
+    on_progress: Callable[[str], None] | None = None,
+    on_cell_row: "Callable[[str, ComparisonRow | None, str], None] | None" = None,
+    client, model,
 ) -> CompetitorAnalysis:
     """分析 Agent 入口:证据 → 结构化分析(逐竞品 profile + 跨竞品对比)。
 
@@ -294,5 +297,5 @@ def analyze(
         profiles = [f.result() for f in futures]
     comparison = build_comparison(
         profiles, evidence, dimensions=dimensions, degraded_sink=degraded_sink,
-        on_progress=on_progress, client=client, model=model)
+        on_progress=on_progress, on_cell_row=on_cell_row, client=client, model=model)
     return CompetitorAnalysis(competitors=profiles, comparison=comparison)
