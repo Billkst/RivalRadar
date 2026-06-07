@@ -47,6 +47,33 @@
   --seat-3: #2f6f9f; /* writer    撰写员 (info 墨蓝)   */
   --seat-4: #237a4b; /* qc        质检员 (success 松绿) */
 
+  /* Plan C: agent 身份色(低饱和,DESIGN.md v5)。
+     ≠ --seat-*(seat 复用 accent/warning/info/success 状态色);身份色是独立低饱和值,
+     用于工牌 / 研究员工作台 agent 标识,运行时按 agent 动态切换。 */
+  --id-collector: #2c6e63;
+  --id-collector-line: #a9ccc5;
+  --id-collector-soft: #e5efec;
+  --id-analyst: #9a6312;
+  --id-analyst-line: #dcc79a;
+  --id-analyst-soft: #f4ebd7;
+  --id-writer: #3a6489;
+  --id-writer-line: #a9c0d6;
+  --id-writer-soft: #e5edf4;
+  --id-qc: #7a5c8a;
+  --id-qc-line: #c5b2d0;
+  --id-qc-soft: #eee7f2;
+
+  /* Plan C: 2e 缺口 token(无现有等价值)。 */
+  --surface-sink: #eceae3;
+  --border-strong: #c4c0b5;
+  --ink: #141817;
+  --text-faint: #9aa29c;
+  --accent-deep: #0b574d;
+  --accent-line: #bcd9d2;
+  --v-sup-soft: #e2efe7;
+  --v-par-soft: #f6eedb;
+  --v-uns-soft: #f4e1e0;
+
   /* Layout */
   --rail-width: 208px;
   --evidence-panel-min: 420px;
@@ -91,6 +118,31 @@
   --seat-2: #d7a33d;
   --seat-3: #78aeda;
   --seat-4: #62ba80;
+
+  /* Plan C: agent 身份色 — dark variant(调亮,跟随 dark 色板风格) */
+  --id-collector: #4fb0a0;
+  --id-collector-line: #2e5b53;
+  --id-collector-soft: #16322d;
+  --id-analyst: #d7a33d;
+  --id-analyst-line: #5a4b22;
+  --id-analyst-soft: #352b14;
+  --id-writer: #78aeda;
+  --id-writer-line: #2c4660;
+  --id-writer-soft: #16263a;
+  --id-qc: #b79bd0;
+  --id-qc-line: #4a3c57;
+  --id-qc-soft: #2a2233;
+
+  /* Plan C: 2e 缺口 token — dark variant */
+  --surface-sink: #1a201d;
+  --border-strong: #48524d;
+  --ink: #ecebe4;
+  --text-faint: #7b847f;
+  --accent-deep: #7fd4c5;
+  --accent-line: #2a574e;
+  --v-sup-soft: #173b2a;
+  --v-par-soft: #3a2e12;
+  --v-uns-soft: #3a1e1d;
 }
 
 /* -----------------------------------------------------------------------------
