@@ -6,6 +6,7 @@
  * this file only owns one-shot JSON requests.
  */
 import type {
+  AgentSkillRow,
   AnnotationCreate,
   AnnotationOut,
   CompetitorAnalysis,
@@ -90,6 +91,14 @@ export const fetchRunEvidence = (runId: string) => jsonFetch<Evidence[]>(`/runs/
 export const fetchQueries = (runId: string) => jsonFetch<QueryRecord[]>(`/runs/${runId}/queries`)
 export const fetchCurationDrops = (runId: string) =>
   jsonFetch<CurationDrop[]>(`/runs/${runId}/curation-drops`)
+
+// ─── Plan C agent 技能(GET/PUT/DELETE /agent-skills,run 无关)──────────────
+// codex P1#4:jsonFetch 已前缀 /api → 勿写 /api。
+export const fetchAgentSkills = () => jsonFetch<AgentSkillRow[]>('/agent-skills')
+export const putAgentSkill = (body: { agent_id: string; skill_id: string; version: string; enabled: boolean }) =>
+  jsonFetch<{ ok: boolean }>('/agent-skills', { method: 'PUT', body: JSON.stringify(body) })
+export const deleteAgentSkill = (agentId: string, skillId: string) =>
+  jsonFetch<{ ok: boolean }>(`/agent-skills/${agentId}/${skillId}`, { method: 'DELETE' })
 
 // ─── Discover competitors (Epic 1.1 引导式 setup)──────────────────────────
 // LLM 不通 → 后端 503;调用方 catch 提示手动输入(非静默)。
