@@ -65,6 +65,18 @@ CREATE TABLE IF NOT EXISTS queries (
     hit_count   INTEGER NOT NULL DEFAULT 0,
     created_at  TEXT NOT NULL
 );
+-- 策展剔除清单(Plan B:support_verdict 真算后被丢弃的 cell/decision)。结构化列(codex #5,
+-- 不拼接 label)供 replay/刷新还原矩阵「—」与 StatusBar 红○计数(spec §7.3);scope=cell|decision。
+-- 写入用 REPLACE per (run_id, scope) 语义(codex #2:qc 多轮重试每轮覆盖,绝不留幽灵剔除)。
+CREATE TABLE IF NOT EXISTS curation_drops (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      TEXT NOT NULL,
+    scope       TEXT NOT NULL,
+    competitor  TEXT NOT NULL DEFAULT '',
+    dimension   TEXT NOT NULL DEFAULT '',
+    detail      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS trace (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id         TEXT NOT NULL,
@@ -78,6 +90,7 @@ CREATE TABLE IF NOT EXISTS trace (
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_run ON evidence(run_id);
 CREATE INDEX IF NOT EXISTS idx_queries_run ON queries(run_id);
+CREATE INDEX IF NOT EXISTS idx_curation_drops_run ON curation_drops(run_id);
 CREATE INDEX IF NOT EXISTS idx_trace_run ON trace(run_id);
 CREATE TABLE IF NOT EXISTS annotations (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

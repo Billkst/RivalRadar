@@ -294,6 +294,31 @@ def list_queries(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# ---- curation_drops(Plan B:策展剔除清单,REPLACE per scope)----
+def replace_curation_drops(conn: sqlite3.Connection, run_id: str, scope: str,
+                           items: list[dict]) -> None:
+    """替换某 run+scope 的策展剔除清单(codex #2:qc/decide 每轮调,先删后插,绝不 append →
+    多轮重试后被补回的 cell/decision 不留幽灵)。items:cell → {"competitor","dimension"};
+    decision → {"detail"}。空列表 = 清空该 scope。在 qc_node(cell)/decide_node(decision)主线程调。"""
+    now = _now()
+    conn.execute("DELETE FROM curation_drops WHERE run_id=? AND scope=?", (run_id, scope))
+    if items:
+        conn.executemany(
+            "INSERT INTO curation_drops (run_id, scope, competitor, dimension, detail, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [(run_id, scope, it.get("competitor", ""), it.get("dimension", ""),
+              it.get("detail", ""), now) for it in items],
+        )
+    conn.commit()
+
+
+def list_curation_drops(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT scope, competitor, dimension, detail, created_at FROM curation_drops "
+        "WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ---- runs list ----
 def list_runs(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
     rows = conn.execute(
