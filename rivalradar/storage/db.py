@@ -77,6 +77,16 @@ CREATE TABLE IF NOT EXISTS curation_drops (
     detail      TEXT NOT NULL DEFAULT '',
     created_at  TEXT NOT NULL
 );
+-- agent 技能持久化(Plan C:run 无关的 agent 配置,spec §6.3/§7.3)。
+-- CREATE IF NOT EXISTS 自动在 init_db 建;PK (agent_id, skill_id) 让 upsert 幂等覆盖。
+CREATE TABLE IF NOT EXISTS agent_skills (
+    agent_id     TEXT NOT NULL,
+    skill_id     TEXT NOT NULL,
+    version      TEXT NOT NULL DEFAULT 'v1',
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    installed_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, skill_id)
+);
 CREATE TABLE IF NOT EXISTS trace (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id         TEXT NOT NULL,
