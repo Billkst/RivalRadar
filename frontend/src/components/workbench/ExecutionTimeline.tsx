@@ -28,13 +28,25 @@ const QC_VERDICT_ZH: Record<string, string> = {
   insufficient_evidence: '证据耗尽 · 标降级',
 }
 
-type Cls = 'normal' | 'reject' | 'pass'
+type Cls = 'normal' | 'reject' | 'pass' | 'failed'
 interface TimelineRow {
   time: string
   role: AgentId | null // null = 系统/决策步
   msg: string
   effect?: string
   cls: Cls
+}
+
+/** 把后端 error 串脱敏成可读原因(绝不外泄 raw exception / stack;DESIGN.md §状态覆盖)。
+ *  仅按关键字归类成罐装中文文案,未命中走通用兜底。 */
+function sanitizeError(raw: string): string {
+  const s = (raw || '').toLowerCase()
+  if (s.includes('timeout') || s.includes('timed out')) return '调研超时,已中断本轮运行'
+  if (s.includes('network') || s.includes('connection') || s.includes('proxy'))
+    return '网络连接异常,已中断本轮运行'
+  if (s.includes('rate') || s.includes('quota') || s.includes('429'))
+    return '上游服务限流,已中断本轮运行'
+  return '运行遇到异常,已中断本轮运行'
 }
 
 /** 从有序 SSE event 派生时间轴行(完成节点 + replay trace;progress 不单独成行,
@@ -45,6 +57,16 @@ function deriveTimeline(events: SSEEvent[]): TimelineRow[] {
   let round = 1
 
   for (const ev of events) {
+    if (ev.type === 'error') {
+      rows.push({
+        time: formatBeijingTime(ev.data.ts),
+        role: null,
+        msg: sanitizeError(ev.data.error),
+        effect: '运行中断',
+        cls: 'failed',
+      })
+      continue
+    }
     if (ev.type === 'node') {
       const node = ev.data.node
       const s = ev.data.summary
@@ -134,7 +156,7 @@ function deriveTimeline(events: SSEEvent[]): TimelineRow[] {
 }
 
 function dotColor(cls: Cls, role: AgentId | null): string {
-  if (cls === 'reject') return 'var(--v-uns)'
+  if (cls === 'reject' || cls === 'failed') return 'var(--v-uns)'
   if (cls === 'pass') return 'var(--v-sup)'
   return (role && roleOf(role)?.col) || 'var(--accent)'
 }
@@ -161,7 +183,7 @@ export function ExecutionTimeline() {
                 className="text-[11px] font-semibold"
                 style={{
                   color:
-                    r.cls === 'reject'
+                    r.cls === 'reject' || r.cls === 'failed'
                       ? 'var(--v-uns)'
                       : r.cls === 'pass'
                         ? 'var(--v-sup)'
@@ -175,7 +197,7 @@ export function ExecutionTimeline() {
             {r.effect && (
               <div
                 className="text-[10.5px] font-mono mt-0.5 flex items-center gap-[5px]"
-                style={{ color: r.cls === 'reject' ? 'var(--v-uns)' : 'var(--accent)' }}
+                style={{ color: r.cls === 'reject' || r.cls === 'failed' ? 'var(--v-uns)' : 'var(--accent)' }}
               >
                 <span>→</span>
                 {r.effect}

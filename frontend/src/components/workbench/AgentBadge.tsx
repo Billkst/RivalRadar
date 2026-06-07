@@ -25,10 +25,21 @@ export function AgentBadge({ id, currentTask }: { id: AgentId; currentTask?: str
   const r = ROLES[id]
   const nodeState = useRunStore((s) => s.nodes[NODE_OF_ROLE[id]]) // idle|running|done|failed|retrying
   const retryCount = useRunStore((s) => s.retryCount)
+  const status = useRunStore((s) => s.status)
   const openAgent = useDrawerStore((s) => s.openAgent)
   const active = nodeState === 'running' || nodeState === 'retrying'
   const done = nodeState === 'done'
-  const stateText = active ? '执行中' : done ? '已完成' : nodeState === 'failed' ? '失败' : '待命'
+  // cancelled 终态:已完成节点保留「已完成」,未跑(idle)节点灰显「已停止」(Task 27)。
+  const stopped = status === 'cancelled' && nodeState === 'idle'
+  const stateText = active
+    ? '执行中'
+    : done
+      ? '已完成'
+      : nodeState === 'failed'
+        ? '失败'
+        : stopped
+          ? '已停止'
+          : '待命'
   const lampColor = done ? 'var(--v-sup)' : active ? r.col : 'var(--text-faint)'
   return (
     <button
