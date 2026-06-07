@@ -18,7 +18,7 @@ export function SkillMarket({ role }: { role: AgentId }) {
       <button
         onClick={() => setOpen((v) => !v)}
         aria-expanded={open}
-        className="min-h-[36px] rounded-md border border-accent-line bg-accent-soft px-[11px] py-1.5 font-mono text-[11px] text-accent"
+        className="min-h-[44px] rounded-md border border-accent-line bg-accent-soft px-[11px] py-1.5 font-mono text-[11px] text-accent"
       >
         + 安装技能
       </button>
@@ -29,7 +29,7 @@ export function SkillMarket({ role }: { role: AgentId }) {
             <button
               onClick={() => setOpen(false)}
               aria-label="收起市场"
-              className="flex h-9 w-9 items-center justify-center text-text-muted"
+              className="flex h-11 w-11 items-center justify-center text-text-muted"
             >
               ✕
             </button>
@@ -50,7 +50,7 @@ export function SkillMarket({ role }: { role: AgentId }) {
                 <button
                   disabled={has}
                   onClick={() => install(role, it.id)}
-                  className={`min-h-[36px] flex-none rounded-md border px-[9px] py-1 font-mono text-[10.5px] ${
+                  className={`min-h-[44px] flex-none rounded-md border px-[9px] py-1 font-mono text-[10.5px] ${
                     has
                       ? 'border-border text-text-faint'
                       : 'border-accent-line text-accent hover:bg-accent-soft'

@@ -80,7 +80,7 @@ export function SkillCard({
           <button
             aria-label={`删除技能 ${def.name}`}
             onClick={onDelete}
-            className="min-h-[36px] rounded-md border border-border bg-surface px-[9px] py-1 font-mono text-[10.5px] text-text-muted hover:border-v-uns hover:text-v-uns"
+            className="min-h-[44px] rounded-md border border-border bg-surface px-[9px] py-1 font-mono text-[10.5px] text-text-muted hover:border-v-uns hover:text-v-uns"
           >
             删除
           </button>

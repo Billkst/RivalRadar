@@ -179,6 +179,21 @@ body {
   outline-offset: 2px;
 }
 
+/* DESIGN.md §a11y:prefers-reduced-motion 全局兜底。
+   各组件(SearchStation 打字 / RetryLoop 旋转 / Drawer 过渡)已在 JS 层守 REDUCE;
+   此处加 CSS safety net 兜住任何遗漏的 transition/animation(含第三方),把时长压到瞬时。
+   不归零 scroll-behavior 之外的功能,只去掉视觉运动。 */
+@media (prefers-reduced-motion: reduce) {
+  *,
+  *::before,
+  *::after {
+    animation-duration: 0.01ms !important;
+    animation-iteration-count: 1 !important;
+    transition-duration: 0.01ms !important;
+    scroll-behavior: auto !important;
+  }
+}
+
 /* ReportView 导出 PDF:浏览器打印时隐藏工具栏 + A4 页边距 + 强制白底黑字
    (零依赖出 PDF,中文字体/分页最稳;Tailwind print:hidden 双保险) */
 @media print {

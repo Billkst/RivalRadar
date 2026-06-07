@@ -19,7 +19,8 @@ export function Drawer() {
   const open = stack.length > 0
   const top = open ? stack[stack.length - 1] : null
   const hasBack = stack.length > 1
-  const trapRef = useFocusTrap(open, fullClose)
+  // depKey = 栈深度:push 新层(open 维持 true)时变化 → 初始聚焦重跑,焦点跟进新层。
+  const trapRef = useFocusTrap(open, fullClose, stack.length)
 
   return (
     <>
