@@ -34,6 +34,15 @@ def _build_provider():
 
 
 def main():
+    # WSL2 + Clash 兜底:启动即清代理 env,确保 Doubao(ark.cn-beijing.volces.com)/ Tavily 走直连,
+    # 不被 Clash fake-ip 路由海外卡死(60-120s);localhost 自调用也不过代理。无论 Clash 开/关、
+    # 无论走 scripts/dev-backend.sh 还是裸 `python main.py` 都成立(client 在下面 create_app 时才建,
+    # 此时 env 已清)。codex / DiceBear 那类需代理的是独立 CLI/一次性抓取,不在后端进程内。
+    for _k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
+        os.environ.pop(_k, None)
+    os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1,ark.cn-beijing.volces.com,api.tavily.com")
+    os.environ.setdefault("no_proxy", os.environ["NO_PROXY"])
+
     if not cfg.ark_api_key():
         raise RuntimeError("ARK_API_KEY 未设置(放进 .env)")
     app = create_app(
