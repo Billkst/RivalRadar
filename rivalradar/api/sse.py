@@ -319,10 +319,13 @@ async def _replay_from_trace(
 
     # ── Plan D 富 replay 重建:从持久化状态还原过程事件,刷新/深链进入不丢「看得见的活儿」。──
     # 不重建 evidence_delta(evidence 无 round 列)+ chunk(瞬态);RetryLoop 动画 replay 不显,
-    # 但 retryCount 从 queries.round 真值重建(见末尾合成 qc node)。详见 plan D-D2/D-D3。
+    # 但 retryCount 由 trace 的 qc 行数推真值(见末尾合成 qc node)。详见 plan D-D2/D-D3。
+    # 一次性取 traces/evidences 复用:traces → retryCount(qc 行数)+ 末尾 trace 回放;
+    # evidences → 来源卡 + 缺维 empty/failed 启发式判定。
+    traces = repo.list_trace(conn, run_id)
+    evidences = repo.list_evidence(conn, run_id)
 
     # (1) query + query_hit(检索台):queries 表带真 round / hit_count;0 命中也重建(标「无结果」)。
-    #     存局部变量 queries:末尾 retryCount = max(queries.round) 复用。
     queries = repo.list_queries(conn, run_id)
     for q in queries:
         yield {"event": "query", "data": json.dumps({
@@ -335,7 +338,7 @@ async def _replay_from_trace(
 
     # (2) source(来源卡):evidence 无 round 列 → round 默认 0;只发卡片字段,不发 content 全文;
     #     不含 provider/confidence(反幻觉 §1.5)。
-    for ev in repo.list_evidence(conn, run_id):
+    for ev in evidences:
         yield {"event": "source", "data": json.dumps({
             "evidence_id": ev.id, "competitor": ev.competitor, "dimension": ev.dimension,
             "source_title": ev.source_title, "source_url": ev.source_url,
@@ -369,13 +372,19 @@ async def _replay_from_trace(
                     n_supported += 1
                 elif cell.support_verdict == "partial":
                     n_partial += 1
-        # 请求维度但 analysis 无 row(无证据/失败)→ 发 status="empty",让 PlanRail 刷新后显
-        # 「已知空」而非永远 todo。不可区分 empty/failed → 统一 empty(不伪造 failed)。
+        # 请求维度但 analysis 无 row → 发 cell_row 让 PlanRail 刷新后显「已解析」而非永远 todo。
+        # ship-review honesty(codex/workflow P2):不可一律标 empty —— empty 前端文案「未找到公开
+        # 数据」是对世界的肯定断言;若该维其实是「分析失败」或「整维被策展剔除」,会把"我们没产出"
+        # 谎报成"市场无数据"。启发式区分(用已有 evidence,零新持久化):有该维证据 → 分析过但无
+        # 可对比产出(failed,前端显「分析失败」);无证据 → 确实没搜到(empty,前端显「未找到公开
+        # 数据」)。每维精确 failed/empty 的根治需 per-dim status 持久化,留作后续。
+        ev_dims = {ev.dimension for ev in evidences}
         run = repo.get_run(conn, run_id)
         for dim in (run["dimensions"] if run else []):
             if dim not in present_dims:
+                status = "failed" if dim in ev_dims else "empty"
                 yield {"event": "cell_row", "data": json.dumps({
-                    "dimension": dim, "status": "empty", "cells": [], "ts": _now()})}
+                    "dimension": dim, "status": status, "cells": [], "ts": _now()})}
         dropped = [{"dimension": d["dimension"], "competitor": d["competitor"],
                     "detail": d["detail"]}
                    for d in repo.list_curation_drops(conn, run_id)
@@ -390,21 +399,32 @@ async def _replay_from_trace(
                         "dropped": len(dropped)},
             "ts": _now()})}
 
-    # (5) 合成终态 qc node 注入真 retryCount(让「自我纠错 N 次 / N 轮」replay 显真值而非恒 0)。
-    #     仅当 qc_result 存在才发(空 / 早失败 run 不发,保既有空-run 测试)。
+    # (5) 合成终态 qc node 注入真 retryCount + issue_types(让「自我纠错 N 次 / N 轮」+ 问题类型
+    #     分布 replay 显真值)。仅当 qc_result 存在才发(空 / 早失败 run 不发,保既有空-run 测试)。
     qc_res = repo.get_qc_result(conn, run_id)
     if qc_res is not None:
-        max_round = max((q["round"] for q in queries), default=0)
+        # ship-review(codex/workflow P2):retryCount 不能用 max(queries.round) —— retry_analyze
+        # 路径(重分析不重采集)不新增 query round,会少算自纠。改由 trace 的 qc 行数推:qc 每轮恰
+        # append_trace 一次(nodes.py 三分支各一),故 retry_count = qc 行数 - 1(collect/analyze 两
+        # 类 retry 都成立)。
+        qc_rounds = sum(1 for t in traces if t["node"] == "qc")
+        retry_count = max(0, qc_rounds - 1)
+        # ship-review(codex/workflow P2):issue_types 不能硬编码 {} —— 前端 QCIssuePanel 在
+        # issues>0 时渲染类型分布,空 dict 会显「问题类型(N 项)」却列表空白。从终态 issues 聚合
+        # problem_type,与 live _summarize_delta 同逻辑。
+        issue_types: dict[str, int] = {}
+        for it in qc_res.issues:
+            issue_types[it.problem_type] = issue_types.get(it.problem_type, 0) + 1
         run_row = repo.get_run(conn, run_id)
         yield {"event": "node", "data": json.dumps({
             "node": "qc",
             "summary": {"node": "qc", "verdict": qc_res.verdict,
-                        "issues": len(qc_res.issues), "issue_types": {},
-                        "retry_count": max_round,
+                        "issues": len(qc_res.issues), "issue_types": issue_types,
+                        "retry_count": retry_count,
                         "degraded": bool(run_row["degraded"]) if run_row else False},
             "ts": _now()})}
 
-    for t in repo.list_trace(conn, run_id):
+    for t in traces:
         # 与 live 流 'node' event 同形状 `{node, summary:{...}, ts}`,前端可用同一
         # 解析路径处理 live + replay(context7 调研:sse-starlette 不强 opinion event
         # shape,application 级决策由 Lane F 消费便利度决定 → 统一更简)

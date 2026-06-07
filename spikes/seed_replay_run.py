@@ -43,13 +43,13 @@ for ev in [
     Evidence(id="ev_2", competitor="钉钉", dimension="pricing", content="专业版年付含审批考勤",
              source_url="https://www.dingtalk.com/pricing", source_title="钉钉专业版对比 - 帮助中心",
              language="zh", fetched_at="2026-05-28T10:00:05Z"),
-    Evidence(id="ev_3", competitor="企业微信", dimension="review_sentiment", content="生态打通好评",
-             source_url="https://zhuanlan.zhihu.com/wecom", source_title="企业微信使用体验 - 知乎",
+    Evidence(id="ev_3", competitor="飞书", dimension="review_sentiment", content="协作体验口碑佳",
+             source_url="https://36kr.com/feishu-review", source_title="飞书口碑实测 - 36氪",
              language="zh", fetched_at="2026-05-28T10:00:30Z"),
 ]:
     repo.insert_evidence(c, run_id, ev)
 
-# curated analysis（curate 后只含 supported/partial；review_sentiment 维被整剔除→不在 comparison）
+# curated analysis（curate 后只含 supported/partial 保留格;企业微信·review_sentiment 被剔除→不在内）
 repo.save_analysis(c, run_id, CompetitorAnalysis(comparison=[
     ComparisonRow(dimension="pricing", cells=[
         ComparisonCell(competitor="飞书", value_type="quote_text", value="商业版按人/月计费",
@@ -65,6 +65,11 @@ repo.save_analysis(c, run_id, CompetitorAnalysis(comparison=[
         ComparisonCell(competitor="企业微信", value_type="quote_text", value="工作台+客户联系打通",
                        support_verdict="supported"),
     ]),
+    ComparisonRow(dimension="review_sentiment", cells=[
+        ComparisonCell(competitor="飞书", value_type="quote_text", value="协作体验口碑佳",
+                       support_verdict="supported",
+                       evidence_refs=[EvidenceRef(evidence_id="ev_3", quote="协作体验领先")]),
+    ]),
 ]))
 
 # 策展剔除清单（scope=cell）→ replay 还原 StatusBar 已剔除 1 + 矩阵「—」
@@ -76,10 +81,13 @@ repo.replace_curation_drops(c, run_id, "cell", [
 # qc_result（让 replay 合成 qc node 注入 retryCount = max(queries.round) = 1）
 repo.save_qc_result(c, run_id, QCResult(verdict="pass", issues=[]))
 
-# trace（§11.4 Play）
+# trace（§11.4 Play + retry_count 推导)。2 个 qc 行 = 2 轮质检 = 自我纠错 1 次
+# (retry_count 由 qc trace 行数推:qc_rounds - 1;与 round-1 queries 自洽)。
 repo.append_trace(c, run_id, "collect", output_summary="+12", latency_ms=8000)
 repo.append_trace(c, run_id, "analyze", output_summary="3 competitors", latency_ms=170000)
+repo.append_trace(c, run_id, "qc", output_summary="verdict=retry_collect", latency_ms=18000)
 repo.append_trace(c, run_id, "collect", output_summary="+2 broaden", latency_ms=5000)
+repo.append_trace(c, run_id, "analyze", output_summary="3 competitors recheck", latency_ms=40000)
 repo.append_trace(c, run_id, "qc", output_summary="verdict=pass", latency_ms=20000)
 
 repo.update_run_status(c, run_id, "done")

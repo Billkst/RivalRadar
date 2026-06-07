@@ -142,27 +142,116 @@ def test_replay_reconstructs_verdict_recheck(tmp_path):
     assert "decision_verdicts" not in v
 
 
-def test_replay_reconstructs_retry_count_from_query_rounds(tmp_path):
+def test_replay_reconstructs_retry_count_from_qc_trace_rows(tmp_path):
+    """ship-review P2:retryCount 由 trace 的 qc 行数推(qc_rounds - 1),不用 queries.round。
+    关键 retry_analyze 场景:queries 全 round 0(重分析不重采集,无新 query 轮),但 qc 跑了 2 轮
+    (2 个 qc trace 行)→ retry_count 必须是 1。旧 max(queries.round) 在此会错算成 0。"""
     from rivalradar.schema.models import QCResult
     c = connect(str(tmp_path / "rp.db"))
     init_db(c)
     repo.create_run(c, "r1", ["飞书"], ["pricing"])
+    # 全 round 0:模拟 retry_analyze(没有 broaden 采集,故无 round>0 query)
     repo.insert_queries(c, "r1", [
         {"competitor": "飞书", "dimension": "pricing", "language": "zh",
          "query_text": "q0", "round": 0, "hit_count": 1},
-        {"competitor": "飞书", "dimension": "pricing", "language": "zh",
-         "query_text": "q1 broaden", "round": 1, "hit_count": 2},
     ])
     _seed_analysis(c, "r1")
     repo.save_qc_result(c, "r1", QCResult(verdict="pass", issues=[]))
+    # 2 个 qc trace 行 = 2 轮质检 = 自我纠错 1 次
+    repo.append_trace(c, "r1", "qc", output_summary="verdict=retry_analyze", latency_ms=10)
+    repo.append_trace(c, "r1", "qc", output_summary="verdict=pass", latency_ms=10)
     repo.update_run_status(c, "r1", "done")
 
     events = _replay(c, "r1")
     qc_nodes = [json.loads(e["data"]) for e in events
                 if e["event"] == "node" and json.loads(e["data"]).get("node") == "qc"]
     assert len(qc_nodes) == 1
-    assert qc_nodes[0]["summary"]["retry_count"] == 1
+    assert qc_nodes[0]["summary"]["retry_count"] == 1  # trace qc 行数 2 - 1(queries.round 全 0)
     assert qc_nodes[0]["summary"]["verdict"] == "pass"
+
+
+def test_replay_single_qc_round_retry_count_zero(tmp_path):
+    """一次性通过(1 个 qc trace 行)→ retry_count 0;无 qc trace 也安全 max(0, -1)=0。"""
+    from rivalradar.schema.models import QCResult
+    c = connect(str(tmp_path / "rp.db"))
+    init_db(c)
+    repo.create_run(c, "r1", ["飞书"], ["pricing"])
+    _seed_analysis(c, "r1")
+    repo.save_qc_result(c, "r1", QCResult(verdict="pass", issues=[]))
+    repo.append_trace(c, "r1", "qc", output_summary="verdict=pass", latency_ms=10)
+    repo.update_run_status(c, "r1", "done")
+
+    events = _replay(c, "r1")
+    qc = next(json.loads(e["data"]) for e in events
+              if e["event"] == "node" and json.loads(e["data"]).get("node") == "qc")
+    assert qc["summary"]["retry_count"] == 0
+
+
+def test_replay_qc_node_aggregates_issue_types(tmp_path):
+    """ship-review P2:合成 qc node 的 issue_types 从终态 issues 聚合 problem_type,不硬编码 {}
+    (否则前端「问题类型(N 项)」列表空白)。"""
+    from rivalradar.schema.models import QCResult, QCIssue
+    c = connect(str(tmp_path / "rp.db"))
+    init_db(c)
+    repo.create_run(c, "r1", ["飞书"], ["pricing"])
+    _seed_analysis(c, "r1")
+    repo.save_qc_result(c, "r1", QCResult(verdict="insufficient_evidence", issues=[
+        QCIssue(competitor="飞书", dimension="pricing", problem_type="low_coverage", detail="x"),
+        QCIssue(competitor="钉钉", dimension="pricing", problem_type="low_coverage", detail="y"),
+        QCIssue(competitor="飞书", dimension="core_workflows", problem_type="missing_evidence", detail="z"),
+    ]))
+    repo.append_trace(c, "r1", "qc", output_summary="verdict=insufficient_evidence", latency_ms=10)
+    repo.update_run_status(c, "r1", "insufficient_evidence")
+
+    events = _replay(c, "r1")
+    qc = next(json.loads(e["data"]) for e in events
+              if e["event"] == "node" and json.loads(e["data"]).get("node") == "qc")
+    assert qc["summary"]["issues"] == 3
+    assert qc["summary"]["issue_types"] == {"low_coverage": 2, "missing_evidence": 1}
+
+
+def test_replay_qc_node_carries_degraded(tmp_path):
+    """ship-review P2(workflow test-adequacy):降级 run replay 时合成 qc node summary.degraded=True,
+    前端据此显降级横幅。原测试只覆盖 degraded=False 路。"""
+    from rivalradar.schema.models import QCResult
+    c = connect(str(tmp_path / "rp.db"))
+    init_db(c)
+    repo.create_run(c, "r1", ["飞书"], ["pricing"])
+    _seed_analysis(c, "r1")
+    repo.save_qc_result(c, "r1", QCResult(verdict="pass", issues=[]))
+    repo.append_trace(c, "r1", "qc", output_summary="verdict=pass", latency_ms=10)
+    repo.update_run_degraded(c, "r1", True)
+    repo.update_run_status(c, "r1", "done")
+
+    events = _replay(c, "r1")
+    qc = next(json.loads(e["data"]) for e in events
+              if e["event"] == "node" and json.loads(e["data"]).get("node") == "qc")
+    assert qc["summary"]["degraded"] is True
+
+
+def test_replay_absent_dim_with_evidence_marks_failed_not_empty(tmp_path):
+    """ship-review honesty P2:缺维若有该维证据 → 标 failed(分析过无产出),不标 empty(否则前端
+    「未找到公开数据」把"我们没产出"谎报成"市场无数据")。无证据维仍 empty。"""
+    from rivalradar.schema.models import Evidence
+    c = connect(str(tmp_path / "rp.db"))
+    init_db(c)
+    # 请求 3 维;analysis 只有 pricing+core_workflows;integrations 有证据但无 row(分析失败);
+    # review_sentiment 无证据无 row(确实空)。
+    repo.create_run(c, "r1", ["飞书", "钉钉"],
+                    ["pricing", "core_workflows", "integrations", "review_sentiment"])
+    _seed_analysis(c, "r1")
+    repo.insert_evidence(c, "r1", Evidence(
+        id="ev_integ", competitor="飞书", dimension="integrations", content="开放平台",
+        source_url="https://open.feishu.cn", source_title="开放平台", language="zh",
+        fetched_at="2026-05-28T10:00:03Z"))
+    repo.update_run_status(c, "r1", "done")
+
+    events = _replay(c, "r1")
+    by_dim = {r["dimension"]: r for r in
+              (json.loads(e["data"]) for e in events if e["event"] == "cell_row")}
+    assert by_dim["integrations"]["status"] == "failed"   # 有证据 → 分析失败,非"无数据"
+    assert by_dim["review_sentiment"]["status"] == "empty"  # 无证据 → 确实空
+    assert by_dim["pricing"]["status"] == "ok"
 
 
 def test_replay_no_analysis_emits_no_cell_or_verdict(tmp_path):
