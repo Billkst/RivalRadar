@@ -4,7 +4,7 @@
  * 从 evidence-list 按 fetched_at 倒序;点条目 → 证据原文 slide-over。默认折叠不抢首屏。
  * stale(>90 天)灰角标。
  */
-import { useEvidenceViewer } from '@/stores/evidenceViewerStore'
+import { useDrawerStore } from '@/stores/drawerStore'
 import { ageDays, isStale } from '@/lib/freshness'
 import { formatBeijingDate } from '@/lib/time'
 import { SectionTitle, PanelSkeleton, EmptyNote } from '@/components/cockpit/parts'
@@ -12,7 +12,7 @@ import type { LoadState } from '@/stores/cockpitStore'
 import type { Evidence } from '@/types/api'
 
 export function EvidenceTimeline({ evidence, state }: { evidence: Evidence[] | null; state: LoadState }) {
-  const open = useEvidenceViewer((s) => s.open)
+  const open = useDrawerStore((s) => s.openEvidence)
 
   if (state === 'loading' || state === 'idle') {
     return (

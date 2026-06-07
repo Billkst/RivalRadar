@@ -9,7 +9,8 @@
  *   - **因果桥**:选中决策 → 其证据 id 集合传给对比矩阵高亮。
  *   - 运行级状态(§12.4):insufficient_evidence → 处境卡片;failed/cancelled →
  *     已填充面板保留、未解锁面板标"运行已中断未生成"。
- *   - 挂载 EvidenceSlideOver(全局单例,pill / 时间线点开)。
+ *   - 证据原文抽屉:统一由 CockpitLayout 的全局 <Drawer/>(navStack)提供,
+ *     pill / 时间线点击经 drawerStore.openEvidence 驱动(不再在此挂单例)。
  *
  * 防串 run:cockpitStore.runId !== 本页 runId 时,数据视为未就绪(idle),避免
  * 切 run 首帧闪上一个 run 的内容。
@@ -24,7 +25,6 @@ import { CompetitorComparison } from '@/components/cockpit/CompetitorComparison'
 import { ContradictionPanel } from '@/components/cockpit/ContradictionPanel'
 import { SelfAuditTrace } from '@/components/cockpit/SelfAuditTrace'
 import { EvidenceTimeline } from '@/components/cockpit/EvidenceTimeline'
-import { EvidenceSlideOver } from '@/components/cockpit/EvidenceSlideOver'
 import type { LoadState } from '@/stores/cockpitStore'
 import type { RunStatus } from '@/stores/runStore'
 
@@ -183,8 +183,7 @@ export function DecisionSurface({
       {/* 证据时间线(最低优先,折叠;evidence 在 done/中断都取) */}
       <EvidenceTimeline evidence={live ? evidenceList : null} state={s(evidenceState)} />
 
-      {/* 证据原文 slide-over(全局单例) */}
-      <EvidenceSlideOver />
+      {/* 证据原文抽屉由 CockpitLayout 的全局 <Drawer/> 提供(navStack 驱动),此处不再挂单例 */}
     </div>
   )
 }

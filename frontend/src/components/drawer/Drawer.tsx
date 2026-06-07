@@ -10,6 +10,7 @@ import { useDrawerStore } from '@/stores/drawerStore'
 import { useFocusTrap } from '@/hooks/useFocusTrap'
 import { AgentDrawer } from '@/components/drawer/AgentDrawer'
 import { StepDrawer } from '@/components/drawer/StepDrawer'
+import { EvidenceView } from '@/components/cockpit/EvidenceSlideOver'
 
 export function Drawer() {
   const stack = useDrawerStore((s) => s.stack)
@@ -42,8 +43,7 @@ export function Drawer() {
           <AgentDrawer role={top.role} hasBack={hasBack} onBack={goBack} onClose={fullClose} />
         )}
         {top?.type === 'evidence' && (
-          // Task 22 替换为 <EvidenceView id={top.id} .../>(从 EvidenceSlideOver 导出)
-          <div className="p-5 text-[13px] text-text-muted">证据视图(Task 22 填实)</div>
+          <EvidenceView id={top.id} hasBack={hasBack} onBack={goBack} onClose={fullClose} />
         )}
         {top?.type === 'step' && (
           <StepDrawer id={top.id} hasBack={hasBack} onBack={goBack} onClose={fullClose} />
