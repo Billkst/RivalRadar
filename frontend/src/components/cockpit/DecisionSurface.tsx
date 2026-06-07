@@ -82,6 +82,7 @@ export function DecisionSurface({
 
   const sync = useCockpitStore((s) => s.sync)
   const cockpitRunId = useCockpitStore((s) => s.runId)
+  const analysis = useCockpitStore((s) => s.analysis)
   const decisions = useCockpitStore((s) => s.decisions)
   const insight = useCockpitStore((s) => s.insight)
   const qc = useCockpitStore((s) => s.qc)
@@ -152,6 +153,7 @@ export function DecisionSurface({
           ) : null}
           <DecisionBoard
             decisions={decisionList}
+            analysis={live ? analysis : null}
             state={s(decisionsState)}
             degraded={degraded || insufficient}
             genericContext={genericContext}
