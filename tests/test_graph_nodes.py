@@ -11,7 +11,7 @@ from rivalradar.graph.nodes import (
 from rivalradar.llm.structured import StructuredCallError
 from rivalradar.schema.models import (
     CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
-    ComparisonRow, ComparisonCell, EvidenceRef, ReportInsight, QCIssue,
+    ComparisonRow, ComparisonCell, EvidenceRef, ReportInsight,
 )
 from rivalradar.search.base import SearchResult
 from rivalradar.storage import repository as repo
@@ -301,10 +301,10 @@ def _evidence_all_dims(eid="g1"):
 
 
 def test_qc_node_degrades_on_entailment_failure(conn, monkeypatch):
-    # check_entailment 上抛 → 节点捕获降级为仅确定性闸(必办项①)
+    # curate 蕴含判定上抛 → 节点捕获降级为仅确定性闸(必办项①)
     def _boom(*a, **k):
         raise StructuredCallError("entailment boom")
-    monkeypatch.setattr(qc, "check_entailment", _boom)
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", _boom)
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
     node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     state = {"analysis": _full_clean_analysis().model_dump(),
@@ -317,7 +317,7 @@ def test_qc_node_degrades_on_entailment_failure(conn, monkeypatch):
 
 
 def test_qc_node_retry_count_bumps_only_with_prior_result(conn, monkeypatch):
-    monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", lambda *a, **k: {})  # curate 不丢、不降级
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
     node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     base = {"analysis": _full_clean_analysis().model_dump(), "evidence": _evidence_all_dims()}
@@ -328,7 +328,7 @@ def test_qc_node_retry_count_bumps_only_with_prior_result(conn, monkeypatch):
 
 
 def test_qc_node_low_coverage_triggers_retry_collect(conn, monkeypatch):
-    monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", lambda *a, **k: {})  # curate 不丢、不降级
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
     node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     # 只覆盖 pricing 的分析 → coverage 缺 5 维 → retry_collect
@@ -348,7 +348,7 @@ def test_qc_node_degrades_on_non_structured_error(conn, monkeypatch):
     # 网络/限流类原生异常(非 StructuredCallError)也必须降级,不崩整图(必办项①,opus 评审 C1)
     def _boom(*a, **k):
         raise RuntimeError("rate limit / network blip")
-    monkeypatch.setattr(qc, "check_entailment", _boom)
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", _boom)
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
     node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     state = {"analysis": _full_clean_analysis().model_dump(),
@@ -373,11 +373,11 @@ def test_qc_node_rerenders_report_from_curated_analysis(conn, monkeypatch):
     # nodes.generate_insight(import 绑定不同名字)→ 两侧都桩掉免 LLM
     monkeypatch.setattr(writer_mod, "generate_insight", _stub_insight)
     monkeypatch.setattr(nodes_mod, "generate_insight", _stub_insight)
-    # check_entailment 判 pricing 的 cell 不支撑 → 被策展丢;deployment 的 cell 留下
+    # curate 路径走 _judge_comparison_verdicts(Plan B Task 5):pricing 判 unsupported →
+    # 被策展丢;deployment 无判定 → 默认 supported → 留下
     monkeypatch.setattr(
-        qc, "check_entailment",
-        lambda *a, **k: [QCIssue(competitor="Notion", dimension="pricing",
-                                 problem_type="hallucination", detail="证据不支撑")])
+        qc, "_judge_comparison_verdicts",
+        lambda *a, **k: {("Notion", "pricing"): qc.EntailmentVerdict(verdict="unsupported")})
     ref = [EvidenceRef(evidence_id="g1", quote="q")]
     analysis = CompetitorAnalysis(
         competitors=[CompetitorProfile(name="Notion",
@@ -440,10 +440,9 @@ def test_qc_node_regenerates_insight_when_cells_dropped(conn, monkeypatch):
         return ReportInsight(market_context="REGEN_FROM_CURATED",
                              differentiation_thesis="d", actionable_takeaway="a")
     monkeypatch.setattr(nodes_mod, "generate_insight", _spy_insight)  # qc 调的是 nodes 绑定
-    monkeypatch.setattr(
-        qc, "check_entailment",
-        lambda *a, **k: [QCIssue(competitor="Notion", dimension="pricing",
-                                 problem_type="hallucination", detail="x")])
+    monkeypatch.setattr(  # curate 路径走 _judge_comparison_verdicts(Plan B Task 5),pricing 判 unsupported → 丢
+        qc, "_judge_comparison_verdicts",
+        lambda *a, **k: {("Notion", "pricing"): qc.EntailmentVerdict(verdict="unsupported")})
     analysis, evidence = _two_dim_analysis_with_drop()
     pre = ReportInsight(market_context="PRECURATION_HEADLINE",
                         differentiation_thesis="x", actionable_takeaway="y").model_dump()
@@ -467,7 +466,8 @@ def test_qc_node_does_not_regenerate_insight_when_nothing_dropped(conn, monkeypa
         nodes_mod, "generate_insight",
         lambda body, *, client, model: calls.append(body) or ReportInsight(
             market_context="SHOULD_NOT_APPEAR", differentiation_thesis="d", actionable_takeaway="a"))
-    monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])  # 不丢任何 cell
+    # curate 路径走 _judge_comparison_verdicts(Plan B Task 5):空 map → 不丢任何 cell、不降级
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", lambda *a, **k: {})
     pre = ReportInsight(market_context="ORIG_HEADLINE",
                         differentiation_thesis="x", actionable_takeaway="y").model_dump()
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
@@ -480,14 +480,14 @@ def test_qc_node_does_not_regenerate_insight_when_nothing_dropped(conn, monkeypa
 
 
 def test_qc_node_rerenders_report_on_entailment_failure_path(conn, monkeypatch):
-    """降级路径回归(ship 对抗验证 nit):check_entailment 抛 → curate 降级走机械门 fallback,
+    """降级路径回归(ship 对抗验证 nit):curate 蕴含判定抛 → curate 降级走机械门 fallback,
     但 insight 仍在 state → 重渲染必须仍发生(用 curated body)且不崩图。悬空引用 cell 被机械门
     丢掉,不残留在报告里;degraded 置位。"""
     import rivalradar.graph.nodes as nodes_mod
 
     def _boom(*a, **k):
         raise RuntimeError("entailment network blip")
-    monkeypatch.setattr(qc, "check_entailment", _boom)
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", _boom)  # curate 蕴含判定抛 → 降级走机械门
     monkeypatch.setattr(  # 机械门丢了悬空 cell → dropped 非空 → 重生成 insight(桩掉免 LLM)
         nodes_mod, "generate_insight",
         lambda body, *, client, model: ReportInsight(
@@ -626,10 +626,10 @@ def test_qc_node_degraded_sticky_across_rounds(conn, monkeypatch):
     """ship 修复 — degraded 必须 sticky OR 累积:round 1 entailment 降级,
     round 2 entailment 成功,终态 state.degraded 必须仍为 True(不能被 round 2 overwrite)。
     否则 finalize 把 db.degraded 写 False,前端 §11.5 警示横幅消失、对用户隐瞒降级事实。"""
-    # round 1: entailment boom → local degraded=True
+    # round 1: curate 蕴含判定 boom → local degraded=True
     def _boom(*a, **k):
         raise RuntimeError("round 1 rate limit")
-    monkeypatch.setattr(qc, "check_entailment", _boom)
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", _boom)
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
     node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     base = {"analysis": _full_clean_analysis().model_dump(),
@@ -637,8 +637,8 @@ def test_qc_node_degraded_sticky_across_rounds(conn, monkeypatch):
     r1 = node(base, _CFG)
     assert r1["degraded"] is True  # round 1 降级 ✓
 
-    # round 2: entailment 成功 — 但 prior state.degraded=True 必须 sticky
-    monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
+    # round 2: curate 蕴含判定成功 — 但 prior state.degraded=True 必须 sticky
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", lambda *a, **k: {})
     r2 = node({**base, "degraded": True, "qc_result": r1["qc_result"]}, _CFG)
     assert r2["degraded"] is True, \
         "BUG: degraded 被 round 2 成功 overwrite 为 False → 前端横幅消失"

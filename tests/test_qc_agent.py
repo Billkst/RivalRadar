@@ -464,7 +464,7 @@ def test_curate_drops_unsupported_cell(monkeypatch):
     a = _analysis_with_cell(dim="pricing")
     curated, dropped = curate_analysis(a, [_ev()], dimensions=("pricing",),
                                        client=object(), model="m")
-    assert dropped  # 记录了丢弃
+    assert {"competitor": "Notion", "dimension": "pricing"} in dropped  # 结构化记录(codex #5)
     assert curated.comparison == []  # 唯一 cell 站不住 → row 清空
 
 
@@ -493,7 +493,7 @@ def test_curate_drops_dangling_ref_cell_without_llm(monkeypatch):
                                               support_verdict="supported")])
     curated, dropped = curate_analysis(a, [_ev()], dimensions=("pricing",),
                                        client=object(), model="m")
-    assert dropped
+    assert {"competitor": "Notion", "dimension": "pricing"} in dropped  # 结构化记录(codex #5)
     assert curated.comparison == []
     assert calls["n"] == 0  # 悬空引用直接机械丢弃,不送 LLM
 
@@ -556,3 +556,39 @@ def test_judge_comparison_verdicts_returns_per_cell_three_level():
         analysis, [_ev("e1", "pricing")], dimensions=("pricing",),
         client=client, model="m")
     assert verdicts[("Notion", "pricing")].verdict == "partial"
+
+
+# ── Task 5: curate_analysis 回写 cell 级 verdict + 丢 unsupported(病因不变量)──
+def test_curate_writes_back_partial_and_keeps_cell(monkeypatch):
+    """病因不变量:partial cell 被保留且 cell.support_verdict 被回写 'partial'(不是丢)。"""
+    import rivalradar.agents.qc as qcmod
+    analysis = _analysis_with_cell(dim="pricing")
+    monkeypatch.setattr(qcmod, "_judge_comparison_verdicts",
+                        lambda *a, **k: {("Notion", "pricing"): qcmod.EntailmentVerdict(verdict="partial")})
+    curated, dropped = qcmod.curate_analysis(
+        analysis, [_ev("e1", "pricing")], dimensions=("pricing",), client=None, model="m")
+    cell = curated.comparison[0].cells[0]
+    assert cell.support_verdict == "partial"     # 回写发生(测病因:回写,不是断言某颜色)
+    assert dropped == []                          # partial 不丢
+
+
+def test_curate_drops_unsupported_and_records(monkeypatch):
+    import rivalradar.agents.qc as qcmod
+    analysis = _analysis_with_cell(dim="pricing")
+    monkeypatch.setattr(qcmod, "_judge_comparison_verdicts",
+                        lambda *a, **k: {("Notion", "pricing"): qcmod.EntailmentVerdict(verdict="unsupported")})
+    curated, dropped = qcmod.curate_analysis(
+        analysis, [_ev("e1", "pricing")], dimensions=("pricing",), client=None, model="m")
+    assert curated.comparison == [] or curated.comparison[0].cells == []   # unsupported 被剔
+    assert {"competitor": "Notion", "dimension": "pricing"} in dropped     # 剔除清单结构化记录(codex #5)
+
+
+def test_curate_returns_two_tuple_unchanged_signature(monkeypatch):
+    """病因不变量:curate_analysis 仍返二元组(verdict 骑在 cell 上,不改签名 → nodes.py 解包不破)。"""
+    import rivalradar.agents.qc as qcmod
+    monkeypatch.setattr(qcmod, "_judge_comparison_verdicts",
+                        lambda *a, **k: {("Notion", "pricing"): qcmod.EntailmentVerdict(verdict="supported")})
+    res = qcmod.curate_analysis(_analysis_with_cell(dim="pricing"), [_ev("e1", "pricing")],
+                                dimensions=("pricing",), client=None, model="m")
+    curated, dropped = res                        # 二元解包不抛
+    assert isinstance(dropped, list)

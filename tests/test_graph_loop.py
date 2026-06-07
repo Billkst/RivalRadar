@@ -6,7 +6,7 @@ from rivalradar.agents import qc
 from rivalradar.graph.build import run_research
 from rivalradar.schema.models import (
     CONTROLLED_DIMENSIONS, CompetitorAnalysis, CompetitorProfile, PricingModel,
-    SWOT, ComparisonRow, ComparisonCell, EvidenceRef, QCIssue, ReportInsight,
+    SWOT, ComparisonRow, ComparisonCell, EvidenceRef, ReportInsight,
 )
 from rivalradar.search.base import SearchResult
 from rivalradar.storage import repository as repo
@@ -99,6 +99,9 @@ def _stub_agents(monkeypatch):
                          ReportInsight(market_context="m", differentiation_thesis="d",
                                        actionable_takeaway="a")))
     monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
+    # curate 路径走 _judge_comparison_verdicts(策展人模型,Plan B Task 5):空 verdict map →
+    # 无 cell 判 unsupported → 不丢任何 cell(等价于旧 check_entailment 返 [])。
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", lambda *a, **k: {})
 
 
 def test_real_feedback_loop_improves_to_pass(conn):
@@ -161,10 +164,11 @@ def test_curated_out_dim_with_evidence_does_not_retry(conn, monkeypatch):
     旧逻辑会因缺 cell 报 low_coverage → retry_collect 耗尽(2 次重采、3 轮空转,~2 轮真 run
     wall-clock 纯亏)。本测试在旧代码上必失败(collects==3 / retry_count==2),钉死修复。"""
     # 蕴含判定丢掉 Notion/core_workflows 这个 cell(模拟"采到了但结论站不住"):
+    # curate 路径走 _judge_comparison_verdicts(Plan B Task 5),core_workflows 判 unsupported
+    # → 被策展丢;pricing 无判定 → 默认 supported → 保留。
     def _drop_core(analysis, evidence, **kwargs):
-        return [QCIssue(competitor="Notion", dimension="core_workflows",
-                        problem_type="hallucination", detail="证据不支撑")]
-    monkeypatch.setattr(qc, "check_entailment", _drop_core)
+        return {("Notion", "core_workflows"): qc.EntailmentVerdict(verdict="unsupported")}
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", _drop_core)
 
     run_id, final = run_research(
         ["Notion"], ["pricing", "core_workflows"],
