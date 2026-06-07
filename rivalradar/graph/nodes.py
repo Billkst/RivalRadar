@@ -19,8 +19,9 @@ from rivalradar.schema.models import (
     ReportInsight,
 )
 from rivalradar.storage.repository import (
-    append_trace, insert_evidence, insert_queries, mark_run_finalized, save_analysis,
-    save_decisions, save_insight, save_qc_result, save_report, update_run_degraded,
+    append_trace, insert_evidence, insert_queries, mark_run_finalized,
+    replace_curation_drops, save_analysis, save_decisions, save_insight,
+    save_qc_result, save_report, update_run_degraded,
 )
 
 logger = logging.getLogger(__name__)
@@ -339,6 +340,26 @@ def make_qc_node(*, conn, client, model, as_of):
         # (decide 用 curated body 生成决策,不会基于已丢弃的 cell)。
         save_analysis(conn, run_id, curated)
 
+        # 三级真算结果:回写在 curated 的 cell.support_verdict 上(已随 save_analysis 落库);
+        # 这里派生 verdict_recheck 事件 + 结构化持久化剔除清单(replay 平价,§7.3)。
+        cell_verdicts = [
+            {"dimension": row.dimension, "competitor": cell.competitor,
+             "support_verdict": cell.support_verdict}
+            for row in curated.comparison for cell in row.cells]
+        downgraded = [cv for cv in cell_verdicts if cv["support_verdict"] == "partial"]
+        supported_n = sum(1 for cv in cell_verdicts if cv["support_verdict"] == "supported")
+        # dropped 已是 list[dict{competitor,dimension}](Task 5),直接作 replace items;
+        # REPLACE per (run_id,"cell") → qc 多轮重试每轮覆盖,无幽灵剔除(codex #2)。
+        replace_curation_drops(conn, run_id, "cell", dropped)
+        if emit is not None:
+            emit("verdict_recheck", {
+                "cell_verdicts": cell_verdicts,
+                "dropped": dropped,
+                "downgraded": downgraded,
+                "summary": {"supported": supported_n, "partial": len(downgraded),
+                            "dropped": len(dropped)},
+            })
+
         # 反幻觉收口(TODOS P2 + ship-time 对抗验证 MAJOR):report markdown 与 cockpit
         # 顶部 insight headline 都在 write 节点用**未策展** analysis 生成,被策展丢的 cell
         # 可能残留其中(check_traceability comparison_only 只校验对比矩阵 cell,管不到 report
@@ -429,7 +450,7 @@ def make_decide_node(*, conn, client, model, as_of):
         _emit_progress(emit, "decide", "deciding", "正在基于证据生成决策建议")
 
         decision_degraded = False
-        dropped: list[str] = []  # 被策展掉的 ungrounded 决策 action(可见性,非降级)
+        dropped: list[dict] = []  # 被策展掉的 ungrounded 决策(结构化 {"action"},可见性,非降级)
         try:
             decision_set = generate_decisions(body, decision_context,
                                               client=_run_client(client, config), model=model)
@@ -452,11 +473,15 @@ def make_decide_node(*, conn, client, model, as_of):
                 valid = {ev.id for ev in evidence}
                 kept = [d for d in decision_set.decisions
                         if d.evidence_refs and all(r.evidence_id in valid for r in d.evidence_refs)]
-                dropped = [d.action for d in decision_set.decisions if d not in kept]
+                dropped = [{"action": d.action} for d in decision_set.decisions if d not in kept]
                 decision_set = DecisionSet(decisions=kept)
                 decision_degraded = True
 
         save_decisions(conn, run_id, decision_set)
+        # decision 剔除结构化持久化(replay 平价,§7.3);REPLACE per (run_id,"decision") 防多轮幽灵。
+        # dropped 现统一 list[dict{"action"}](curate_decisions 正常路径 + 上方 fallback 均结构化)。
+        replace_curation_drops(conn, run_id, "decision",
+                               [{"detail": d["action"]} for d in dropped])
         # 策展丢弃 ungrounded 决策是**健康的策展路径,不是降级**(丢≠degrade,与 qc_node 同模型),
         # 但仍须**可见**(ship outside-voice C1:_dropped 静默吞掉违反「降级必可见」精神)——
         # 故把丢弃数记入 trace + emit,但**不**置 decision_degraded(那会回退到一票否决的病)。

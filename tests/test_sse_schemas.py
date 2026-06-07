@@ -26,3 +26,13 @@ def test_sse_cell_row_schema():
         {"competitor": "Notion", "value_type": "enum", "value": "v",
          "evidence_refs": [{"evidence_id": "ev_1", "quote": "q"}]}], ts="t")
     assert d.dimension == "pricing" and d.status == "ok" and d.cells[0].competitor == "Notion"
+
+
+def test_sse_verdict_recheck_schema():
+    from rivalradar.api.schemas import SSEVerdictRecheckData
+    d = SSEVerdictRecheckData(
+        cell_verdicts=[{"dimension": "pricing", "competitor": "Notion", "support_verdict": "partial"}],
+        dropped=[{"competitor": "Notion", "dimension": "deployment"}],
+        downgraded=[{"dimension": "pricing", "competitor": "Notion"}],
+        summary={"supported": 2, "partial": 1, "dropped": 1}, ts="t")
+    assert d.summary["dropped"] == 1 and d.cell_verdicts[0].support_verdict == "partial"

@@ -202,3 +202,20 @@ class SSECellRowData(BaseModel):
     status: str          # ok | empty | failed
     cells: list[SSECellRowCell] = Field(default_factory=list)
     ts: str
+
+
+class SSEVerdictRecheckCell(BaseModel):
+    dimension: str
+    competitor: str
+    support_verdict: str   # supported | partial | unsupported
+
+
+class SSEVerdictRecheckData(BaseModel):
+    """verdict_recheck event — qc 三级真算后回写矩阵三色 + StatusBar(spec §5.5)。
+    cell_verdicts=保留 cell 的三级;dropped=被剔除 cell 的结构化 {competitor,dimension}(codex #5);
+    downgraded=partial 子集;summary=计数。decision verdict 不在此(见 Task 10 Step 5 偏差说明)。"""
+    cell_verdicts: list[SSEVerdictRecheckCell] = Field(default_factory=list)
+    dropped: list[dict] = Field(default_factory=list)
+    downgraded: list[dict] = Field(default_factory=list)
+    summary: dict[str, int] = Field(default_factory=dict)
+    ts: str

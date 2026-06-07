@@ -411,6 +411,42 @@ def test_qc_node_rerenders_report_from_curated_analysis(conn, monkeypatch):
     assert repo.get_report(conn, "r1") == qout["report"]  # 落库也是策展后报告
 
 
+def test_qc_node_emits_verdict_recheck_and_persists_drops(conn, monkeypatch):
+    import rivalradar.graph.nodes as nodes_mod
+    from rivalradar.agents import qc as qcmod
+    from rivalradar.schema.models import CompetitorAnalysis, ComparisonRow, ComparisonCell
+    from rivalradar.storage.repository import create_run, list_curation_drops
+
+    curated = CompetitorAnalysis(competitors=[], comparison=[
+        ComparisonRow(dimension="pricing", cells=[
+            ComparisonCell(competitor="Notion", value_type="enum", value="v", support_verdict="partial")])])
+    monkeypatch.setattr(qcmod, "curate_analysis",
+                        lambda *a, **k: (curated, [{"competitor": "Notion", "dimension": "deployment"}]))
+    # 防真打:其余确定性门返空 issue
+    monkeypatch.setattr(qcmod, "check_traceability", lambda *a, **k: [])
+    monkeypatch.setattr(qcmod, "check_ontology", lambda *a, **k: [])
+    monkeypatch.setattr(qcmod, "check_coverage", lambda *a, **k: [])
+
+    create_run(conn, "rq1", ["Notion"], ["pricing"])
+    node = nodes_mod.make_qc_node(conn=conn, client=None, model="m", as_of="2026-06-07")
+    events = []
+    state = {"analysis": {"competitors": [], "comparison": [
+        {"dimension": "pricing", "cells": [
+            {"competitor": "Notion", "value_type": "enum", "value": "v", "evidence_refs": []}]}]},
+        "evidence": [], "competitors": ["Notion"], "dimensions": ["pricing"], "retry_count": 0}
+    out = node(state, {"configurable": {"thread_id": "rq1", "emit": lambda t, d: events.append((t, d))}})
+
+    vr = [d for t, d in events if t == "verdict_recheck"]
+    assert len(vr) == 1
+    assert vr[0]["summary"]["partial"] == 1 and vr[0]["summary"]["dropped"] == 1
+    assert vr[0]["dropped"] == [{"competitor": "Notion", "dimension": "deployment"}]
+    # 病因不变量(codex #1):curated 含 partial cell,但 verdict 不路由 → 不是 retry_analyze
+    assert out["qc_result"]["verdict"] != "retry_analyze"
+    # cell 剔除结构化落库(replay 平价,codex #2/#5)
+    rows = list_curation_drops(conn, "rq1")
+    assert [(r["scope"], r["competitor"], r["dimension"]) for r in rows] == [("cell", "Notion", "deployment")]
+
+
 def _two_dim_analysis_with_drop():
     """pricing cell(将被策展丢)+ deployment cell(留下),均挂合法引用。"""
     ref = [EvidenceRef(evidence_id="g1", quote="q")]
