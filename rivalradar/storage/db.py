@@ -52,6 +52,19 @@ CREATE TABLE IF NOT EXISTS insight (
     payload    TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+-- 真实查询词(Plan A:研究员检索台「看得见的活儿」)。CREATE IF NOT EXISTS 自动
+-- 在 init_db 建(老 db 也建,老 run 无行 → 天然空态);round=retry 轮次(0=首轮)。
+CREATE TABLE IF NOT EXISTS queries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      TEXT NOT NULL,
+    competitor  TEXT NOT NULL,
+    dimension   TEXT NOT NULL,
+    language    TEXT NOT NULL,
+    query_text  TEXT NOT NULL,
+    round       INTEGER NOT NULL DEFAULT 0,
+    hit_count   INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL
+);
 CREATE TABLE IF NOT EXISTS trace (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id         TEXT NOT NULL,
@@ -64,6 +77,7 @@ CREATE TABLE IF NOT EXISTS trace (
     ts             TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_run ON evidence(run_id);
+CREATE INDEX IF NOT EXISTS idx_queries_run ON queries(run_id);
 CREATE INDEX IF NOT EXISTS idx_trace_run ON trace(run_id);
 CREATE TABLE IF NOT EXISTS annotations (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,
