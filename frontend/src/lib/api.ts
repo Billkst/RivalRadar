@@ -9,9 +9,11 @@ import type {
   AnnotationCreate,
   AnnotationOut,
   CompetitorAnalysis,
+  CurationDrop,
   DecisionSet,
   DiscoverySet,
   Evidence,
+  QueryRecord,
   ReportInsight,
   RunDetail,
   RunSummary,
@@ -82,6 +84,12 @@ export const fetchInsight = (runId: string) => jsonFetch<ReportInsight>(`/insigh
 export const fetchQc = (runId: string) => jsonFetch<SanitizedQCResult>(`/qc/${runId}`)
 // 批量证据(GET /runs/:id/evidence)— evidenceStore 一次性 seed 防 per-pill N+1。
 export const fetchRunEvidence = (runId: string) => jsonFetch<Evidence[]>(`/runs/${runId}/evidence`)
+
+// ─── Plan C 检索台 / 策展剔除清单(GET /runs/:id/queries|curation-drops)──────
+// codex P1#4:jsonFetch 已自动前缀 /api → 路径不要再写 /api,否则 /api/api/...
+export const fetchQueries = (runId: string) => jsonFetch<QueryRecord[]>(`/runs/${runId}/queries`)
+export const fetchCurationDrops = (runId: string) =>
+  jsonFetch<CurationDrop[]>(`/runs/${runId}/curation-drops`)
 
 // ─── Discover competitors (Epic 1.1 引导式 setup)──────────────────────────
 // LLM 不通 → 后端 503;调用方 catch 提示手动输入(非静默)。
