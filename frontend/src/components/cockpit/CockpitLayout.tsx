@@ -13,6 +13,7 @@ import { StatusBar, type VerdictSummary } from '@/components/cockpit/StatusBar'
 import { ResearcherWorkbench } from '@/components/workbench/ResearcherWorkbench'
 import { Drawer } from '@/components/drawer/Drawer'
 import { useRunStore } from '@/stores/runStore'
+import { useSkillsStore } from '@/stores/skillsStore'
 
 interface CockpitLayoutProps {
   /** 左决策面内容(Epic 4: DecisionBoard 等;Epic 3: 骨架占位)。 */
@@ -27,6 +28,14 @@ export function CockpitLayout({
   children, decisionCount, riskCount, verdictSummary,
 }: CockpitLayoutProps) {
   const status = useRunStore((s) => s.status)
+
+  // 技能子系统:首次挂载加载一次(GET /agent-skills,空表 seed);loaded 守卫防重复。
+  React.useEffect(() => {
+    if (!useSkillsStore.getState().loaded) {
+      void useSkillsStore.getState().load()
+    }
+  }, [])
+
   const terminal =
     status === 'done' ||
     status === 'degraded' ||
