@@ -270,11 +270,14 @@ def generate_decisions(
 def write_report_with_insight(
     analysis: CompetitorAnalysis, evidence: list[Evidence], *,
     as_of: str, client, model,
+    emit: Callable[[str, dict], None] | None = None,
 ) -> tuple[str, ReportInsight]:
     """撰写 Agent 入口(混合):LLM 3 段执行洞察 + 确定性正文 → (markdown, ReportInsight)。
 
     Epic 2.4:同时返回结构化 insight 供持久化(GET /insight/:run → cockpit 顶部语境),
     避免 insight 拍平进 markdown 后丢弃(旧 write_report 的行为)。
+
+    emit 提供时 insight 走两步化流式(§5.6);emit=None 时一次性,行为与改造前完全一致。
 
     报告结构(post-rubric-v1 重构):
       # 竞品分析报告
@@ -284,7 +287,7 @@ def write_report_with_insight(
       ## 跨竞品对比 (deterministic table) / ## 来源 (URLs with as_of)
     """
     body = render_body(analysis, evidence, as_of=as_of)
-    insight = generate_insight(body, client=client, model=model)
+    insight = generate_insight_streamed(body, client=client, model=model, emit=emit)
     return stitch_report(insight, body), insight
 
 

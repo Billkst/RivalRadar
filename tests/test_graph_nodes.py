@@ -266,7 +266,7 @@ def test_write_node_renders_and_persists(conn, monkeypatch):
     import rivalradar.graph.nodes as nodes_mod
     monkeypatch.setattr(
         nodes_mod, "write_report_with_insight",
-        lambda analysis, evidence, *, as_of, client, model: (
+        lambda analysis, evidence, *, as_of, client, model, emit=None: (
             "# 竞品分析报告\nX",
             ReportInsight(market_context="m", differentiation_thesis="d",
                           actionable_takeaway="a")))
@@ -822,3 +822,33 @@ def test_decide_node_degrades_on_entailment_failure(conn):
     assert out["decision_degraded"] is True               # 蕴含失败 → 降级
     assert completions.calls == 2                          # gen + 1 次 entail(抛即 break,不 storm)
     assert repo.get_decisions(conn, "r1").decisions[0].action == "本周评估接入"  # 机械门通过的决策仍落库
+
+
+# ── Task 2: write_node 透传 emit → insight 两步流式 ─────────────────────────
+
+def test_write_node_streams_insight_chunks(conn):
+    import json
+    from types import SimpleNamespace
+    from rivalradar.graph.nodes import make_write_node
+
+    class _STS:
+        def create(self, **kw):
+            if kw.get("stream"):
+                return (SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=c))])
+                        for c in ["草", "稿"])
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=json.dumps(
+                    {"market_context": "m", "differentiation_thesis": "d", "actionable_takeaway": "a"})))]))],
+                usage=SimpleNamespace(total_tokens=10))
+    client = SimpleNamespace(chat=SimpleNamespace(completions=_STS()))
+
+    repo.create_run(conn, "rw1", ["Notion"], ["pricing"])
+    node = make_write_node(conn=conn, client=client, model="m", as_of="2026-06-07")
+    chunks = []
+    def emit(ev_type, data):
+        if ev_type == "chunk":
+            chunks.append(data["delta"])
+    cfg = {"configurable": {"thread_id": "rw1", "emit": emit}}
+    out = node({"analysis": {"competitors": [], "comparison": []}, "evidence": []}, cfg)
+    assert chunks == ["草", "稿"]                          # write_node 真 run 路径走两步流式
+    assert out["insight"]["market_context"] == "m"        # 结构化产物落库契约不破

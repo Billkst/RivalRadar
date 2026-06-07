@@ -267,7 +267,8 @@ def make_write_node(*, conn, client, model, as_of):
             f"正在撰写 {len(analysis.competitors)} 个竞品的对比报告",
         )
         report, insight = write_report_with_insight(
-            analysis, evidence, as_of=as_of, client=_run_client(client, config), model=model)
+            analysis, evidence, as_of=as_of, client=_run_client(client, config), model=model,
+            emit=emit)
         save_report(conn, run_id, report)
         save_insight(conn, run_id, insight)  # Epic 2.4:结构化洞察持久化(/insight 端点)
         _emit_progress(
