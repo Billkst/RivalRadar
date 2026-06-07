@@ -115,6 +115,7 @@ export interface ComparisonCell {
   value_type: ValueType
   value: string // 一律字符串,由 value_type 决定解读
   evidence_refs: EvidenceRef[]
+  support_verdict: SupportVerdict // cell 级真三色;信任信号读此,不读 ref 级
 }
 
 export interface ComparisonRow {
@@ -155,6 +156,7 @@ export interface Decision {
   risk_cost: RiskCost
   why: string
   evidence_refs: EvidenceRef[]
+  support_verdict: SupportVerdict // decision 级真三色;读此(C-D6)
   watch?: Watch | null // 持续观察 REQUIRED,其余 null
 }
 
@@ -314,6 +316,31 @@ export interface SSEChunkData {
   ts: string
 }
 
+// --- Plan A/B 新事件(后端已 emit;此处镜像)---
+export interface SSEQueryData { competitor: string; dimension: string; query_text: string; language: string; round: number; ts: string }
+export interface SSEQueryHitData { query_text: string; hit_count: number; round: number; ts: string }
+export interface SSESourceData {
+  evidence_id: string; competitor: string; dimension: string;
+  source_title: string; source_url: string; fetched_at: string;
+  language: string; round: number; ts: string;
+}
+export interface SSEEvidenceDeltaData {
+  round: number; added_count: number; total_count: number;
+  new_evidence_ids: string[]; ts: string;
+}
+export interface SSECellRowRef { evidence_id: string; quote: string }
+export interface SSECellRowCell { competitor: string; value_type: ValueType; value: string; evidence_refs: SSECellRowRef[] }
+export type CellRowStatus = 'ok' | 'empty' | 'failed';
+export interface SSECellRowData { dimension: string; status: CellRowStatus; cells: SSECellRowCell[]; ts: string }
+export interface SSEVerdictRecheckCell { dimension: string; competitor: string; support_verdict: SupportVerdict }
+export interface SSEVerdictRecheckData {
+  cell_verdicts: SSEVerdictRecheckCell[];
+  dropped: Array<Record<string, string>>;
+  downgraded: Array<Record<string, string>>;
+  summary: { supported?: number; partial?: number; dropped?: number };
+  ts: string;
+}
+
 export type SSEEvent =
   | { type: 'start'; data: SSEStartData }
   | { type: 'node'; data: SSENodeData }
@@ -322,3 +349,22 @@ export type SSEEvent =
   | { type: 'chunk'; data: SSEChunkData }
   | { type: 'error'; data: SSEErrorData }
   | { type: 'done'; data: SSEDoneData }
+  | { type: 'query'; data: SSEQueryData }
+  | { type: 'query_hit'; data: SSEQueryHitData }
+  | { type: 'source'; data: SSESourceData }
+  | { type: 'evidence_delta'; data: SSEEvidenceDeltaData }
+  | { type: 'cell_row'; data: SSECellRowData }
+  | { type: 'verdict_recheck'; data: SSEVerdictRecheckData }
+
+// ─── Plan C REST 响应类型(queries / curation-drops / agent-skills)─────────
+export interface QueryRecord {
+  competitor: string; dimension: string; language: string;
+  query_text: string; round: number; hit_count: number; created_at: string;
+}
+export type CurationScope = 'cell' | 'decision';
+export interface CurationDrop {
+  scope: CurationScope; competitor: string; dimension: string; detail: string; created_at: string;
+}
+export interface AgentSkillRow {
+  agent_id: string; skill_id: string; version: string; enabled: boolean; installed_at: string;
+}
