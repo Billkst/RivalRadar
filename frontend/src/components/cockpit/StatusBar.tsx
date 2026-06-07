@@ -113,6 +113,8 @@ export function StatusBar({ runId, decisionCount, riskCount }: StatusBarProps) {
   const snapshots = useRunStore((s) => s.evidenceCountSnapshots)
   // cell 级真三色汇总(verdict_recheck 实时刷;running 期由 SSE 填,done 后保留最后一次)。
   const verdictSummary = useRunStore((s) => s.verdictSummary)
+  // SSE 剔除格 keys(`${dimension}|${competitor}`)—— REST /curation-drops 不可达(demo 无后端)时清单回落它。
+  const droppedCells = useRunStore((s) => s.droppedCells)
 
   // 剔除清单:done 后拉 curation-drops(scope=cell)兜底计数 + 点开清单。
   const [drops, setDrops] = React.useState<CurationDrop[]>(EMPTY_DROPS)
@@ -138,8 +140,17 @@ export function StatusBar({ runId, decisionCount, riskCount }: StatusBarProps) {
   }, [terminal, runId])
 
   const cellDrops = React.useMemo(() => drops.filter((d) => d.scope === 'cell'), [drops])
-  // 剔除计数:live verdictSummary.dropped 优先(running 实时),回落 curation-drops cell 计数(done 兜底)。
-  const droppedCount = verdictSummary?.dropped ?? (cellDrops.length || undefined)
+  // 剔除清单:REST(scope=cell)优先;为空(demo 无后端 / 未拉到)时回落 SSE droppedCells,
+  // 让「已剔除计数」与「清单」一致(verdict_recheck.summary.dropped 与 droppedCells 同源)。
+  const dropList = React.useMemo<CurationDrop[]>(() => {
+    if (cellDrops.length) return cellDrops
+    return droppedCells.map((k) => {
+      const [dimension, competitor] = k.split('|')
+      return { scope: 'cell', competitor, dimension, detail: '', created_at: '' }
+    })
+  }, [cellDrops, droppedCells])
+  // 剔除计数:live verdictSummary.dropped 优先(running 实时),回落清单长度(done 兜底)。
+  const droppedCount = verdictSummary?.dropped ?? (dropList.length || undefined)
 
   const latest = snapshots.at(-1)
   const latestDate = latest ? formatBeijingDate(latest.ts) : '—'
@@ -171,9 +182,10 @@ export function StatusBar({ runId, decisionCount, riskCount }: StatusBarProps) {
         </span>
         <button
           type="button"
-          onClick={() => setShowDrops(true)}
+          onClick={() => setShowDrops((v) => !v)}
+          aria-expanded={showDrops}
           className="flex items-center gap-1 tabular-nums hover:underline"
-          title="点击查看被策展剔除的格(矩阵显「—」)"
+          title="点击查看/收起被策展剔除的格(矩阵显「—」)"
         >
           <VerdictDot verdict="unsupported" />已剔除 {dash(droppedCount)}
         </button>
@@ -192,7 +204,7 @@ export function StatusBar({ runId, decisionCount, riskCount }: StatusBarProps) {
         )}
       </span>
 
-      {showDrops ? <DropsPanel drops={cellDrops} onClose={() => setShowDrops(false)} /> : null}
+      {showDrops ? <DropsPanel drops={dropList} onClose={() => setShowDrops(false)} /> : null}
     </header>
   )
 }
