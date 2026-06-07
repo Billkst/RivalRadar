@@ -22,6 +22,7 @@ import { isDemoRun } from '@/lib/demoFixture'
 import { EmptyNote } from '@/components/cockpit/parts'
 import { DecisionBoard } from '@/components/cockpit/DecisionBoard'
 import { CompetitorComparison } from '@/components/cockpit/CompetitorComparison'
+import { PlanRail } from '@/components/workbench/PlanRail'
 import { ContradictionPanel } from '@/components/cockpit/ContradictionPanel'
 import { SelfAuditTrace } from '@/components/cockpit/SelfAuditTrace'
 import { EvidenceTimeline } from '@/components/cockpit/EvidenceTimeline'
@@ -118,6 +119,9 @@ export function DecisionSurface({
 
   return (
     <div className="space-y-4">
+      {/* 研究计划 rail(左决策面顶,C-D8):SSE 驱动 doing→done/reopen,点步开 step 抽屉 */}
+      <PlanRail dimensions={dimensions} />
+
       {/* 运行中断横幅(failed/cancelled):诚实展示已得中间结果 */}
       {interrupted ? (
         <div className="rounded-lg border border-warning/50 bg-warning/10 px-4 py-2 text-[13px] text-warning">
