@@ -268,6 +268,32 @@ def list_trace(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# ---- queries(Plan A:真实查询词检索台)----
+def insert_queries(conn: sqlite3.Connection, run_id: str,
+                   records: list[dict]) -> None:
+    """批量插入真实查询词记录。records 每项:
+    {competitor, dimension, language, query_text, round, hit_count}。
+    在 collect_node 主线程一次性写(worker 线程只 emit + 收集,不并发写 sqlite)。"""
+    if not records:
+        return
+    now = _now()
+    conn.executemany(
+        "INSERT INTO queries (run_id, competitor, dimension, language, "
+        "query_text, round, hit_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [(run_id, r["competitor"], r["dimension"], r["language"],
+          r["query_text"], int(r.get("round", 0)), int(r.get("hit_count", 0)), now)
+         for r in records],
+    )
+    conn.commit()
+
+
+def list_queries(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT competitor, dimension, language, query_text, round, hit_count, created_at "
+        "FROM queries WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
 # ---- runs list ----
 def list_runs(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
     rows = conn.execute(
