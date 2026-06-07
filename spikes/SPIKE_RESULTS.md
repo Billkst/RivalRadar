@@ -165,3 +165,21 @@ Step2 `generate_insight` 把草稿抽成结构化 `ReportInsight`(契约不破)�
    反不如一次性。建议 Step1 流式前先 emit `step="drafting"` 的「灵犀正在起草洞察…」,首块到达切逐字 typing。
 3. **Step2 抽取额外 ~7-8s**。整条两步链 626-char body 端到端 ~53-59s,生产更久。若在意总时长:Step1 流完
    即把草稿呈现,Step2 抽取异步补结构化字段(不阻塞用户阅读)。
+
+## Spike I — Plan B 三级真算 + insight 两步真 run 校准 ✅ GO(2026-06-07,Plan B · Task 12)
+
+运行:`spikes/spike_planB_verdict_insight.py`(真 Doubao + Tavily,Notion × pricing,integrations,max_retries=1)
+
+**目的:** 真打验 Plan B 三件后端改造端到端:① insight 两步化真流 chunk;② cell_row 逐维;
+③ verdict_recheck 三级真算(校准:不全 supported=没真判、不全 dropped=误伤);④ cell 回写真实 support_verdict。
+
+**实测:**
+- SSE 142,975 bytes;事件齐全:query/query_hit/source/evidence_delta/cell_row/**chunk**/**verdict_recheck**/node/progress/start/done。
+- **chunk = 901 块** → insight 两步化真流字符(打字感成立)。
+- cell_row = 2 维(status ok/ok)。
+- **verdict_recheck summary = {supported: 5, partial: 1, dropped: 0}** → 三级真在工作:partial 自然出现(非伪造),
+  0 误剔(干净 run 不假降级)。analysis cell support_verdict 回写 `[supported×5, partial]`。
+- curation-drops 0 条(本 run 无 unsupported,符合);终态 status=done 无降级。
+
+**结论:GO —— 反幻觉收口真实兑现**:support_verdict 不再恒 supported 假数据,三级真算 + 不误伤(spec §5.5 验收达成)。
+门槛在本 run 上未见误伤;后续多竞品/对抗 case 若见全 supported 或全 dropped 再 few-shot 收紧 `_ENTAIL_PROMPT`。
