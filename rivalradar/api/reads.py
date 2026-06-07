@@ -96,3 +96,12 @@ def list_run_queries(run_id: str,
     if repo.get_run(conn, run_id) is None:
         raise HTTPException(404, "run not found")
     return repo.list_queries(conn, run_id)
+
+
+@router.get("/runs/{run_id}/curation-drops")
+def list_run_curation_drops(run_id: str,
+                             conn: sqlite3.Connection = Depends(get_db_conn)) -> list[dict]:
+    """策展剔除清单(Plan B:replay/事后还原矩阵「—」+ StatusBar 红○)。run 不存在 → 404;无剔除 → 空。"""
+    if repo.get_run(conn, run_id) is None:
+        raise HTTPException(404, "run not found")
+    return repo.list_curation_drops(conn, run_id)

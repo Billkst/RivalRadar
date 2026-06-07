@@ -178,3 +178,23 @@ def test_get_run_queries_404_when_run_missing(db_path, seeded):
     client = TestClient(create_app(db_path=db_path))
     r = client.get("/runs/nope/queries")
     assert r.status_code == 404
+
+
+# ── Plan B: GET /runs/:id/curation-drops (Task 11) ───────────────────────────
+def test_get_curation_drops(db_path, seeded):
+    from rivalradar.storage.db import connect
+    c = connect(db_path)
+    repo.create_run(c, "rd1", ["Notion"], ["pricing"])
+    repo.replace_curation_drops(c, "rd1", "cell", [{"competitor": "Notion", "dimension": "pricing"}])
+    c.close()
+    client = TestClient(create_app(db_path=db_path))
+    r = client.get("/runs/rd1/curation-drops")
+    assert r.status_code == 200
+    body = r.json()
+    assert len(body) == 1 and body[0]["scope"] == "cell"
+    assert body[0]["competitor"] == "Notion" and body[0]["dimension"] == "pricing"
+
+
+def test_get_curation_drops_404_when_run_missing(db_path, seeded):
+    client = TestClient(create_app(db_path=db_path))
+    assert client.get("/runs/nope/curation-drops").status_code == 404
