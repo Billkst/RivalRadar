@@ -14,6 +14,11 @@
  * SAMPLE_EVENTS 模拟 4 agent 协作 cycle(collector 搜索 → analyst 分析 → writer 撰写
  * → qc 质检),包含 progress / chunk(typing 效果)/ node / done events,与 backend
  * Epic 2 实际 emit 行为一致。
+ *
+ * 维度集与 demoFixture 的 DEMO_RUN_DETAIL / DEMO_ANALYSIS 1:1 对齐(4 维:
+ * pricing / core_workflows / integrations / target_users),且 cell 真值镜像
+ * DEMO_ANALYSIS。integrations·企业微信 是唯一被策展剔除的格(证据 >90 天 stale +
+ * 不支撑结论),qc 第 1 轮 retry_collect 因它低覆盖,第 2 轮补证后仍不足 → 剔除。
  */
 import type { SSEEvent } from '@/types/api'
 import { useRunStore } from '@/stores/runStore'
@@ -28,20 +33,45 @@ export const SAMPLE_EVENTS: SSEEvent[] = [
   { type: 'query', data: { competitor: '飞书', dimension: 'pricing',
       query_text: '飞书 定价 套餐 价格', language: 'zh', round: 0, ts: '2026-05-28T10:00:02Z' } },
   { type: 'query_hit', data: { query_text: '飞书 定价 套餐 价格', hit_count: 4, round: 0, ts: '2026-05-28T10:00:03Z' } },
-  { type: 'source', data: { evidence_id: 'ev_fake_001', competitor: '飞书', dimension: 'pricing',
-      source_title: '飞书定价 - 飞书官网', source_url: 'https://www.feishu.cn/price',
+  { type: 'source', data: { evidence_id: 'ev_fake_fs_pricing', competitor: '飞书', dimension: 'pricing',
+      source_title: '飞书官网 · 价格', source_url: 'https://www.feishu.cn/price',
       fetched_at: '2026-05-28T10:00:03Z', language: 'zh', round: 0, ts: '2026-05-28T10:00:03Z' } },
   { type: 'query', data: { competitor: '钉钉', dimension: 'pricing',
       query_text: '钉钉 专业版 价格 对比', language: 'zh', round: 0, ts: '2026-05-28T10:00:04Z' } },
   { type: 'query_hit', data: { query_text: '钉钉 专业版 价格 对比', hit_count: 3, round: 0, ts: '2026-05-28T10:00:05Z' } },
-  { type: 'source', data: { evidence_id: 'ev_fake_002', competitor: '钉钉', dimension: 'pricing',
-      source_title: '钉钉专业版与专属版对比 - 钉钉帮助中心', source_url: 'https://www.dingtalk.com/pricing',
+  { type: 'source', data: { evidence_id: 'ev_fake_dt_pricing', competitor: '钉钉', dimension: 'pricing',
+      source_title: '钉钉官网 · 商业化版本', source_url: 'https://www.dingtalk.com/price',
       fetched_at: '2026-05-28T10:00:05Z', language: 'zh', round: 0, ts: '2026-05-28T10:00:05Z' } },
-  { type: 'query', data: { competitor: '企业微信', dimension: 'review_sentiment',
-      query_text: 'WeCom enterprise review english', language: 'en', round: 0, ts: '2026-05-28T10:00:06Z' } },
-  { type: 'query_hit', data: { query_text: 'WeCom enterprise review english', hit_count: 0, round: 0, ts: '2026-05-28T10:00:07Z' } },
-  { type: 'source', data: { evidence_id: 'ev_fake_003', competitor: '企业微信', dimension: 'core_workflows',
-      source_title: '企业微信工作台与审批流 - 官方文档', source_url: 'https://work.weixin.qq.com/help',
+  { type: 'source', data: { evidence_id: 'ev_fake_wx_pricing', competitor: '企业微信', dimension: 'pricing',
+      source_title: '企业微信官网 · 价格', source_url: 'https://work.weixin.qq.com/price',
+      fetched_at: '2026-05-28T10:00:05Z', language: 'zh', round: 0, ts: '2026-05-28T10:00:05Z' } },
+  { type: 'source', data: { evidence_id: 'ev_fake_fs_flow', competitor: '飞书', dimension: 'core_workflows',
+      source_title: '飞书官网 · 产品能力', source_url: 'https://www.feishu.cn/product',
+      fetched_at: '2026-05-28T10:00:05Z', language: 'zh', round: 0, ts: '2026-05-28T10:00:05Z' } },
+  { type: 'source', data: { evidence_id: 'ev_fake_dt_flow', competitor: '钉钉', dimension: 'core_workflows',
+      source_title: '钉钉官网 · 功能', source_url: 'https://www.dingtalk.com/product',
+      fetched_at: '2026-05-28T10:00:06Z', language: 'zh', round: 0, ts: '2026-05-28T10:00:06Z' } },
+  { type: 'source', data: { evidence_id: 'ev_fake_wx_flow', competitor: '企业微信', dimension: 'core_workflows',
+      source_title: '企业微信官网 · 功能', source_url: 'https://work.weixin.qq.com/product',
+      fetched_at: '2026-05-28T10:00:06Z', language: 'zh', round: 0, ts: '2026-05-28T10:00:06Z' } },
+  { type: 'source', data: { evidence_id: 'ev_fake_fs_integ', competitor: '飞书', dimension: 'integrations',
+      source_title: '飞书开放平台', source_url: 'https://open.feishu.cn',
+      fetched_at: '2026-05-28T10:00:06Z', language: 'zh', round: 0, ts: '2026-05-28T10:00:06Z' } },
+  { type: 'source', data: { evidence_id: 'ev_fake_dt_integ', competitor: '钉钉', dimension: 'integrations',
+      source_title: '钉钉开放平台', source_url: 'https://open.dingtalk.com',
+      fetched_at: '2026-05-28T10:00:06Z', language: 'zh', round: 0, ts: '2026-05-28T10:00:06Z' } },
+  // integrations·企业微信:英文检索 0 命中(覆盖不足),qc 第 1 轮 retry_collect 的原因。
+  { type: 'query', data: { competitor: '企业微信', dimension: 'integrations',
+      query_text: 'WeCom open API third-party integration', language: 'en', round: 0, ts: '2026-05-28T10:00:06Z' } },
+  { type: 'query_hit', data: { query_text: 'WeCom open API third-party integration', hit_count: 0, round: 0, ts: '2026-05-28T10:00:07Z' } },
+  { type: 'source', data: { evidence_id: 'ev_fake_fs_users', competitor: '飞书', dimension: 'target_users',
+      source_title: '飞书客户案例', source_url: 'https://www.feishu.cn/case',
+      fetched_at: '2026-05-28T10:00:07Z', language: 'zh', round: 0, ts: '2026-05-28T10:00:07Z' } },
+  { type: 'source', data: { evidence_id: 'ev_fake_dt_users', competitor: '钉钉', dimension: 'target_users',
+      source_title: '钉钉客户案例', source_url: 'https://www.dingtalk.com/case',
+      fetched_at: '2026-05-28T10:00:07Z', language: 'zh', round: 0, ts: '2026-05-28T10:00:07Z' } },
+  { type: 'source', data: { evidence_id: 'ev_fake_wx_users', competitor: '企业微信', dimension: 'target_users',
+      source_title: '企业微信客户案例', source_url: 'https://work.weixin.qq.com/case',
       fetched_at: '2026-05-28T10:00:07Z', language: 'zh', round: 0, ts: '2026-05-28T10:00:07Z' } },
   { type: 'progress', data: { agent_id: 'collector', step: 'done',
       summary: '找到 12 条新证据,累计 12 条',
@@ -56,34 +86,51 @@ export const SAMPLE_EVENTS: SSEEvent[] = [
   // 逐竞品·逐抽取增量进度(真 backend analyze 内 _make_ticker emit;在 cockpit 折成一条
   // 会动的进度条「分析 X·Y (n/13)」,而非每事件一行 —— 真跑 ~174s 长节点等待不静默)。
   { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
-      summary: '分析 飞书·功能', metric: { current: 2, total: 13 }, ts: '2026-05-28T10:00:10Z' } },
+      summary: '分析 飞书·定价', metric: { current: 2, total: 13 }, ts: '2026-05-28T10:00:10Z' } },
   { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
-      summary: '分析 钉钉·定价', metric: { current: 5, total: 13 }, ts: '2026-05-28T10:00:12Z' } },
+      summary: '分析 钉钉·核心工作流', metric: { current: 5, total: 13 }, ts: '2026-05-28T10:00:12Z' } },
   { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
-      summary: '分析 企业微信·用户画像', metric: { current: 9, total: 13 }, ts: '2026-05-28T10:00:13Z' } },
+      summary: '分析 企业微信·目标用户', metric: { current: 9, total: 13 }, ts: '2026-05-28T10:00:13Z' } },
   { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
       summary: '生成跨竞品对比矩阵', metric: { current: 13, total: 13 }, ts: '2026-05-28T10:00:14Z' } },
   // Plan C 逐维 cell_row(乱序安全,按 dimension 落位 → 矩阵逐维生长 + 计划 rail 勾选)。
+  // 值镜像 demoFixture.DEMO_ANALYSIS;cell_row 本身不带 support_verdict(只在
+  // verdict_recheck cell_verdicts 里给三色)。
   { type: 'cell_row', data: { dimension: 'pricing', status: 'ok', ts: '2026-05-28T10:00:14Z',
       cells: [
-        { competitor: '飞书', value_type: 'quote_text', value: '基础版免费,商业版按人/月计费',
-          evidence_refs: [{ evidence_id: 'ev_fake_001', quote: '商业版 ¥? /人/月' }] },
-        { competitor: '钉钉', value_type: 'quote_text', value: '专业版年付,含审批与考勤',
-          evidence_refs: [{ evidence_id: 'ev_fake_002', quote: '专业版 9800/年起' }] },
-        { competitor: '企业微信', value_type: 'quote_text', value: '基础功能免费,增值按需',
-          evidence_refs: [] },
+        { competitor: '飞书', value_type: 'enum', value: '免费起 + 企业版按人/月',
+          evidence_refs: [{ evidence_id: 'ev_fake_fs_pricing', quote: '企业版按人/月计费' }] },
+        { competitor: '钉钉', value_type: 'enum', value: '免费起 + 阶梯收费',
+          evidence_refs: [{ evidence_id: 'ev_fake_dt_pricing', quote: '按规模阶梯收费,部分能力需单独采购' }] },
+        { competitor: '企业微信', value_type: 'enum', value: '免费 + 增值来自微信生态',
+          evidence_refs: [{ evidence_id: 'ev_fake_wx_pricing', quote: '增值来自与微信生态打通的客户联系能力' }] },
       ] } },
   { type: 'cell_row', data: { dimension: 'core_workflows', status: 'ok', ts: '2026-05-28T10:00:14Z',
       cells: [
-        { competitor: '飞书', value_type: 'quote_text', value: '文档/多维表格/IM 一体化',
-          evidence_refs: [] },
-        { competitor: '钉钉', value_type: 'quote_text', value: '审批/考勤/OA 流程见长',
-          evidence_refs: [] },
-        { competitor: '企业微信', value_type: 'quote_text', value: '工作台 + 客户联系打通',
-          evidence_refs: [{ evidence_id: 'ev_fake_003', quote: '工作台审批流' }] },
+        { competitor: '飞书', value_type: 'quote_text', value: '文档+IM+会议+审批一体化',
+          evidence_refs: [{ evidence_id: 'ev_fake_fs_flow', quote: '审批流可直接嵌入文档与群' }] },
+        { competitor: '钉钉', value_type: 'quote_text', value: '行政 OA 流程成熟',
+          evidence_refs: [{ evidence_id: 'ev_fake_dt_flow', quote: '考勤、审批、汇报等行政办公流程见长' }] },
+        { competitor: '企业微信', value_type: 'quote_text', value: '外部触达强,内部协作偏弱',
+          evidence_refs: [{ evidence_id: 'ev_fake_wx_flow', quote: '内部协作相对依赖第三方补齐' }] },
       ] } },
-  // review_sentiment:英文检索 0 命中(空维),status=empty 体现「无证据维」状态覆盖。
-  { type: 'cell_row', data: { dimension: 'review_sentiment', status: 'empty', cells: [], ts: '2026-05-28T10:00:14Z' } },
+  { type: 'cell_row', data: { dimension: 'target_users', status: 'ok', ts: '2026-05-28T10:00:14Z',
+      cells: [
+        { competitor: '飞书', value_type: 'quote_text', value: '互联网/新经济中大型团队',
+          evidence_refs: [{ evidence_id: 'ev_fake_fs_users', quote: '互联网与新经济中大型团队渗透较深' }] },
+        { competitor: '钉钉', value_type: 'quote_text', value: '传统行业/政企/连锁',
+          evidence_refs: [{ evidence_id: 'ev_fake_dt_users', quote: '传统行业、政企与连锁门店覆盖广' }] },
+        { competitor: '企业微信', value_type: 'quote_text', value: '需连接 C 端客户的行业',
+          evidence_refs: [{ evidence_id: 'ev_fake_wx_users', quote: '与微信用户无缝触达是核心卖点' }] },
+      ] } },
+  // integrations:round 0 只含 飞书 + 钉钉 两格(企业微信集成证据不足,本轮不出格)。
+  { type: 'cell_row', data: { dimension: 'integrations', status: 'ok', ts: '2026-05-28T10:00:14Z',
+      cells: [
+        { competitor: '飞书', value_type: 'quote_text', value: '开放平台 + 应用市场完整',
+          evidence_refs: [{ evidence_id: 'ev_fake_fs_integ', quote: '提供完整 OpenAPI 与应用市场' }] },
+        { competitor: '钉钉', value_type: 'quote_text', value: '宜搭低代码 + 行业应用',
+          evidence_refs: [{ evidence_id: 'ev_fake_dt_integ', quote: '宜搭低代码 + 开放平台支持业务系统对接' }] },
+      ] } },
   // 5 段 chunk 模拟 LLM typing(每段几字符,backend stream_chat 产出的 delta 形态)
   { type: 'chunk', data: { agent_id: 'analyst', step: 'reasoning', delta: '正在', ts: '2026-05-28T10:00:10Z' } },
   { type: 'chunk', data: { agent_id: 'analyst', step: 'reasoning', delta: '比较 ', ts: '2026-05-28T10:00:10Z' } },
@@ -111,6 +158,7 @@ export const SAMPLE_EVENTS: SSEEvent[] = [
       summary: { node: 'write', report_chars: 1842 }, ts: '2026-05-28T10:00:22Z' } },
 
   // ── qc 质检员(第 1 轮):证据不足,打回采集(招牌时刻 #2 — 重试环触发) ──────
+  // 低覆盖问题对准 integrations·企业微信(本轮 0 命中 → 该格缺位)。
   { type: 'progress', data: { agent_id: 'qc', step: 'validate',
       summary: '开始质检 3 个竞品 profile', ts: '2026-05-28T10:00:23Z' } },
   { type: 'progress', data: { agent_id: 'qc', step: 'done',
@@ -121,36 +169,37 @@ export const SAMPLE_EVENTS: SSEEvent[] = [
       ts: '2026-05-28T10:00:26Z' } },
 
   // ── 第 2 轮:采集员按反馈广搜补缺口 → 重试环显示「证据 12→19」 ─────────────────
+  // 补 integrations·企业微信(资料偏旧),即便补了也仍不足以支撑 → 终态被策展剔除。
   { type: 'progress', data: { agent_id: 'collector', step: 'broaden',
       summary: '按质检反馈广搜 2 个证据缺口', ts: '2026-05-28T10:00:27Z' } },
   // Plan C retry 轮:补 source(round 1)+ evidence_delta(round 1)驱动重试环 + 计划 rail reopen。
-  { type: 'query', data: { competitor: '企业微信', dimension: 'review_sentiment',
-      query_text: '企业微信 用户评价 优缺点', language: 'zh', round: 1, ts: '2026-05-28T10:00:28Z' } },
-  { type: 'query_hit', data: { query_text: '企业微信 用户评价 优缺点', hit_count: 2, round: 1, ts: '2026-05-28T10:00:29Z' } },
-  { type: 'source', data: { evidence_id: 'ev_fake_011', competitor: '企业微信', dimension: 'review_sentiment',
-      source_title: '企业微信使用体验 - 知乎专栏', source_url: 'https://zhuanlan.zhihu.com/wecom',
+  { type: 'query', data: { competitor: '企业微信', dimension: 'integrations',
+      query_text: '企业微信 开放接口 业务系统 集成', language: 'zh', round: 1, ts: '2026-05-28T10:00:28Z' } },
+  { type: 'query_hit', data: { query_text: '企业微信 开放接口 业务系统 集成', hit_count: 2, round: 1, ts: '2026-05-28T10:00:29Z' } },
+  { type: 'source', data: { evidence_id: 'ev_fake_wx_integ', competitor: '企业微信', dimension: 'integrations',
+      source_title: '企业微信开发者文档', source_url: 'https://developer.work.weixin.qq.com',
       fetched_at: '2026-05-28T10:00:30Z', language: 'zh', round: 1, ts: '2026-05-28T10:00:30Z' } },
-  { type: 'source', data: { evidence_id: 'ev_fake_012', competitor: '飞书', dimension: 'review_sentiment',
-      source_title: '飞书口碑实测 - 36氪', source_url: 'https://36kr.com/feishu-review',
+  { type: 'source', data: { evidence_id: 'ev_fake_wx_integ2', competitor: '企业微信', dimension: 'integrations',
+      source_title: '企业微信集成实践 - 知乎专栏', source_url: 'https://zhuanlan.zhihu.com/wecom-integ',
       fetched_at: '2026-05-28T10:00:31Z', language: 'zh', round: 1, ts: '2026-05-28T10:00:31Z' } },
   { type: 'evidence_delta', data: { round: 1, added_count: 7, total_count: 19,
-      new_evidence_ids: ['ev_fake_011', 'ev_fake_012'], ts: '2026-05-28T10:00:31Z' } },
+      new_evidence_ids: ['ev_fake_wx_integ', 'ev_fake_wx_integ2'], ts: '2026-05-28T10:00:31Z' } },
   { type: 'node', data: { node: 'collect',
       summary: { node: 'collect', evidence_added: 7 }, ts: '2026-05-28T10:00:32Z' } },
   { type: 'progress', data: { agent_id: 'analyst', step: 'thinking',
-      summary: '重新分析 19 条证据,补齐缺失维度', ts: '2026-05-28T10:00:33Z' } },
-  // 补证后该维 cell_row 重到(ts 晚于 reopen delta)→ 计划 rail reopen 回 done。
-  { type: 'cell_row', data: { dimension: 'review_sentiment', status: 'ok', ts: '2026-05-28T10:00:37Z',
+      summary: '重新分析 19 条证据,复核 integrations 缺口', ts: '2026-05-28T10:00:33Z' } },
+  // 补证后 integrations 复核完成 → 重发该维 cell_row(ts 晚于 round-1 reopen),计划 rail 该维
+  // 从「补证中」回落 done(招牌:reopen→done 闭环)。企业微信集成证据补了仍不足 → 终态被策展
+  // 剔除(见下 verdict_recheck.dropped),故该维仍只 飞书+钉钉 两格,不回填企业微信。
+  { type: 'cell_row', data: { dimension: 'integrations', status: 'ok', ts: '2026-05-28T10:00:37Z',
       cells: [
-        { competitor: '飞书', value_type: 'quote_text', value: '协作体验口碑佳,移动端略重',
-          evidence_refs: [{ evidence_id: 'ev_fake_012', quote: '协作体验领先' }] },
-        { competitor: '钉钉', value_type: 'quote_text', value: '管控强但被指打扰多',
-          evidence_refs: [] },
-        { competitor: '企业微信', value_type: 'quote_text', value: '微信生态打通好评,功能偏基础',
-          evidence_refs: [{ evidence_id: 'ev_fake_011', quote: '生态打通是亮点' }] },
+        { competitor: '飞书', value_type: 'quote_text', value: '开放平台 + 应用市场完整',
+          evidence_refs: [{ evidence_id: 'ev_fake_fs_integ', quote: '提供完整 OpenAPI 与应用市场' }] },
+        { competitor: '钉钉', value_type: 'quote_text', value: '宜搭低代码 + 行业应用',
+          evidence_refs: [{ evidence_id: 'ev_fake_dt_integ', quote: '宜搭低代码 + 开放平台支持业务系统对接' }] },
       ] } },
   { type: 'node', data: { node: 'analyze',
-      summary: { node: 'analyze', competitors: 3, comparison_rows: 6 }, ts: '2026-05-28T10:00:38Z' } },
+      summary: { node: 'analyze', competitors: 3, comparison_rows: 4 }, ts: '2026-05-28T10:00:38Z' } },
   { type: 'progress', data: { agent_id: 'writer', step: 'drafting',
       summary: '更新对比报告', ts: '2026-05-28T10:00:39Z' } },
   { type: 'node', data: { node: 'write',
@@ -162,21 +211,30 @@ export const SAMPLE_EVENTS: SSEEvent[] = [
                  retry_count: 1, degraded: false }, ts: '2026-05-28T10:00:46Z' } },
   // Plan C verdict_recheck:cell 级真三色刷新(supported/partial)+ dropped 剔除一格。
   // 体现 SourceCards/矩阵三色 + 「—」 + StatusBar「已剔除 Z」(droppedCells 另存,
-  // cell_verdicts 只含保留格;codex P2#12)。
+  // cell_verdicts 只含保留格;codex P2#12)。值镜像 demoFixture.DEMO_ANALYSIS:
+  // 11 保留格逐格三色 + integrations·企业微信 唯一被剔除。
   { type: 'verdict_recheck', data: {
       ts: '2026-05-28T10:00:46Z',
       cell_verdicts: [
         { dimension: 'pricing', competitor: '飞书', support_verdict: 'supported' },
-        { dimension: 'pricing', competitor: '钉钉', support_verdict: 'supported' },
-        { dimension: 'pricing', competitor: '企业微信', support_verdict: 'partial' },
-        { dimension: 'core_workflows', competitor: '企业微信', support_verdict: 'supported' },
-        { dimension: 'review_sentiment', competitor: '飞书', support_verdict: 'supported' },
-        { dimension: 'review_sentiment', competitor: '企业微信', support_verdict: 'partial' },
+        { dimension: 'pricing', competitor: '钉钉', support_verdict: 'partial' },
+        { dimension: 'pricing', competitor: '企业微信', support_verdict: 'supported' },
+        { dimension: 'core_workflows', competitor: '飞书', support_verdict: 'supported' },
+        { dimension: 'core_workflows', competitor: '钉钉', support_verdict: 'supported' },
+        { dimension: 'core_workflows', competitor: '企业微信', support_verdict: 'partial' },
+        { dimension: 'integrations', competitor: '飞书', support_verdict: 'supported' },
+        { dimension: 'integrations', competitor: '钉钉', support_verdict: 'supported' },
+        { dimension: 'target_users', competitor: '飞书', support_verdict: 'supported' },
+        { dimension: 'target_users', competitor: '钉钉', support_verdict: 'supported' },
+        { dimension: 'target_users', competitor: '企业微信', support_verdict: 'supported' },
       ],
-      dropped: [{ dimension: 'review_sentiment', competitor: '钉钉',
-        detail: '引用证据不支撑结论,策展剔除' }],
-      downgraded: [],
-      summary: { supported: 4, partial: 2, dropped: 1 },
+      dropped: [{ dimension: 'integrations', competitor: '企业微信',
+        detail: '集成生态证据 >90 天且不支撑结论,策展剔除' }],
+      downgraded: [
+        { dimension: 'pricing', competitor: '钉钉' },
+        { dimension: 'core_workflows', competitor: '企业微信' },
+      ],
+      summary: { supported: 9, partial: 2, dropped: 1 },
     } },
 
   // ── decide 决策(full-C / Epic 2)─────────────────────────────────────────

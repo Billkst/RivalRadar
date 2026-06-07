@@ -134,13 +134,13 @@ export const DEMO_ANALYSIS: CompetitorAnalysis = {
     },
     {
       dimension: 'integrations',
+      // 企业微信·集成生态被策展剔除(证据 ev-wx-integ-1 >90 天 stale + 不支撑结论),
+      // 矩阵呈现「—」,与 SAMPLE_EVENTS verdict_recheck.dropped 自洽。
       cells: [
         { competitor: '飞书', value_type: 'quote_text', value: '开放平台 + 应用市场完整', support_verdict: 'supported',
           evidence_refs: [{ evidence_id: 'ev-fs-integ-1', quote: '提供完整 OpenAPI 与应用市场', support_verdict: 'supported' }] },
         { competitor: '钉钉', value_type: 'quote_text', value: '宜搭低代码 + 行业应用', support_verdict: 'supported',
           evidence_refs: [{ evidence_id: 'ev-dt-integ-1', quote: '宜搭低代码 + 开放平台支持业务系统对接', support_verdict: 'supported' }] },
-        { competitor: '企业微信', value_type: 'quote_text', value: '集成集中在客户联系(资料较旧)', support_verdict: 'partial',
-          evidence_refs: [{ evidence_id: 'ev-wx-integ-1', quote: '通用业务系统集成深度弱于飞书/钉钉', support_verdict: 'unsupported' }] },
       ],
     },
     {
