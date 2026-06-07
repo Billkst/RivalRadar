@@ -87,3 +87,12 @@ def list_run_evidence(run_id: str,
     if repo.get_run(conn, run_id) is None:
         raise HTTPException(404, "run not found")
     return repo.list_evidence(conn, run_id)
+
+
+@router.get("/runs/{run_id}/queries")
+def list_run_queries(run_id: str,
+                     conn: sqlite3.Connection = Depends(get_db_conn)) -> list[dict]:
+    """真实查询词列表(Plan A:replay/事后查看检索台)。run 不存在 → 404;无查询 → 空列表。"""
+    if repo.get_run(conn, run_id) is None:
+        raise HTTPException(404, "run not found")
+    return repo.list_queries(conn, run_id)
