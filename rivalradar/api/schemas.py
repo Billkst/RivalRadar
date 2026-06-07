@@ -179,3 +179,26 @@ class SSEEvidenceDeltaData(BaseModel):
     total_count: int
     new_evidence_ids: list[str] = Field(default_factory=list)
     ts: str
+
+
+class SSECellRef(BaseModel):
+    """cell_row 事件内的轻量 ref(只携 id + quote,信任信号在 verdict_recheck)。"""
+    evidence_id: str
+    quote: str
+
+
+class SSECellRowCell(BaseModel):
+    competitor: str
+    value_type: str
+    value: str
+    evidence_refs: list[SSECellRef] = Field(default_factory=list)
+
+
+class SSECellRowData(BaseModel):
+    """cell_row event — analyze 逐维对比结果(spec §5.3,矩阵边算边填)。
+    cell 不携可信 support_verdict(真三色在 qc verdict_recheck 回写)。
+    status=ok(有 cells)| empty(无证据维,已知空非 pending)| failed(单维抽取抛错)。"""
+    dimension: str
+    status: str          # ok | empty | failed
+    cells: list[SSECellRowCell] = Field(default_factory=list)
+    ts: str

@@ -18,3 +18,11 @@ def test_sse_source_and_delta_schema():
                              new_evidence_ids=["ev_1"], ts="t")
     assert e.added_count == 3 and e.new_evidence_ids == ["ev_1"]
     SSEQueryHitData(query_text="飞书 价格", hit_count=3, round=0, ts="t")
+
+
+def test_sse_cell_row_schema():
+    from rivalradar.api.schemas import SSECellRowData
+    d = SSECellRowData(dimension="pricing", status="ok", cells=[
+        {"competitor": "Notion", "value_type": "enum", "value": "v",
+         "evidence_refs": [{"evidence_id": "ev_1", "quote": "q"}]}], ts="t")
+    assert d.dimension == "pricing" and d.status == "ok" and d.cells[0].competitor == "Notion"

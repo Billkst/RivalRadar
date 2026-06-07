@@ -103,7 +103,7 @@ def test_analyze_node_converts_evidence_and_persists(conn, monkeypatch):
         name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
     seen = {}
 
-    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         seen["n"] = len(evidence)                  # 验证 dict→Evidence 转换后传入
         return fake
     monkeypatch.setattr(nodes_mod, "analyze", _fake_analyze)
@@ -127,7 +127,7 @@ def test_analyze_node_sets_degraded_when_extraction_degrades(conn, monkeypatch):
     fake = CompetitorAnalysis(competitors=[CompetitorProfile(
         name="Notion", pricing=PricingModel(model_type="未知"), swot=SWOT())], comparison=[])
 
-    def _degrading_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+    def _degrading_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         if degraded_sink is not None:
             degraded_sink.append("Notion.features")  # 模拟单项抽取降级
         return fake
@@ -158,7 +158,7 @@ def test_analyze_node_retry_reuses_profiles_only_recompares(conn, monkeypatch):
         calls["analyze"] += 1
         return CompetitorAnalysis(competitors=prior_profiles, comparison=[])
 
-    def _fake_build_comparison(profiles, evidence, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+    def _fake_build_comparison(profiles, evidence, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         calls["build_comparison"] += 1
         calls["profiles_in"] = [p.name for p in profiles]
         return []
@@ -186,7 +186,7 @@ def test_analyze_node_first_pass_runs_full_analyze(conn, monkeypatch):
     )
     calls = {"analyze": 0, "build_comparison": 0}
 
-    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         calls["analyze"] += 1
         return CompetitorAnalysis(competitors=[CompetitorProfile(
             name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
@@ -214,7 +214,7 @@ def test_analyze_node_retry_collect_runs_full_analyze_not_reuse(conn, monkeypatc
         name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[]).model_dump()
     calls = {"analyze": 0, "build_comparison": 0}
 
-    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         calls["analyze"] += 1
         return CompetitorAnalysis(competitors=[CompetitorProfile(
             name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
@@ -243,7 +243,7 @@ def test_analyze_node_retry_analyze_bad_prior_falls_back_to_full_analyze(conn, m
     bad_prior = {"competitors": "不是列表", "comparison": []}  # CompetitorAnalysis(**prior) 必抛
     calls = {"analyze": 0, "build_comparison": 0}
 
-    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         calls["analyze"] += 1
         return CompetitorAnalysis(competitors=[CompetitorProfile(
             name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
@@ -853,3 +853,29 @@ def test_write_node_streams_insight_chunks(conn):
     out = node({"analysis": {"competitors": [], "comparison": []}, "evidence": []}, cfg)
     assert chunks == ["草", "稿"]                          # write_node 真 run 路径走两步流式
     assert out["insight"]["market_context"] == "m"        # 结构化产物落库契约不破
+
+
+def test_analyze_node_emits_cell_row(conn, monkeypatch):
+    import rivalradar.graph.nodes as nodes_mod
+    from rivalradar.schema.models import CompetitorAnalysis, ComparisonRow, ComparisonCell
+
+    def fake_analyze(evidence, competitors, *, dimensions, degraded_sink, on_progress,
+                     on_cell_row=None, client, model):
+        if on_cell_row is not None:
+            on_cell_row("pricing", ComparisonRow(dimension="pricing", cells=[
+                ComparisonCell(competitor="Notion", value_type="enum", value="v")]), "ok")
+        return CompetitorAnalysis(competitors=[], comparison=[
+            ComparisonRow(dimension="pricing", cells=[
+                ComparisonCell(competitor="Notion", value_type="enum", value="v")])])
+
+    monkeypatch.setattr(nodes_mod, "analyze", fake_analyze)
+    repo.create_run(conn, "ra1", ["Notion"], ["pricing"])
+    node = nodes_mod.make_analyze_node(conn=conn, client=None, model="m")
+    events = []
+    def emit(ev_type, data):
+        events.append((ev_type, data))
+    out = node({"evidence": [], "competitors": ["Notion"], "dimensions": ["pricing"]},
+               {"configurable": {"thread_id": "ra1", "emit": emit}})
+    cr = [d for t, d in events if t == "cell_row"]
+    assert len(cr) == 1 and cr[0]["dimension"] == "pricing" and cr[0]["status"] == "ok"
+    assert cr[0]["cells"][0]["competitor"] == "Notion"

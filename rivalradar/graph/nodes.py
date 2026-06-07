@@ -193,6 +193,16 @@ def make_analyze_node(*, conn, client, model):
         t0 = time.monotonic()
         evidence = [Evidence(**d) for d in state["evidence"]]
         dims = tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS)
+
+        def on_cell_row(dimension, row, status):
+            if emit is None:
+                return
+            cells = [] if row is None else [
+                {"competitor": c.competitor, "value_type": c.value_type, "value": c.value,
+                 "evidence_refs": [{"evidence_id": r.evidence_id, "quote": r.quote}
+                                   for r in c.evidence_refs]}
+                for c in row.cells]
+            emit("cell_row", {"dimension": dimension, "status": status, "cells": cells})
         # 收集本轮 profile 抽取降级(单项 LLM 截断/失败优雅降级,见 analyst._safe_extract)。
         # 非空 → 置 run 级 degraded,保证「降级必可见」(否则整竞品 profile 半瘫却 done)。
         degraded_sink: list[str] = []
@@ -221,7 +231,7 @@ def make_analyze_node(*, conn, client, model):
             tick = _make_ticker(emit, "analyst", "thinking", len(dims))  # 只剩对比阶段进度
             comparison = build_comparison(profiles, evidence, dimensions=dims,
                                           degraded_sink=degraded_sink, on_progress=tick,
-                                          client=rc_client, model=model)
+                                          on_cell_row=on_cell_row, client=rc_client, model=model)
             analysis = CompetitorAnalysis(competitors=profiles, comparison=comparison)
         else:
             _emit_progress(
@@ -233,7 +243,7 @@ def make_analyze_node(*, conn, client, model):
             tick = _make_ticker(emit, "analyst", "thinking", len(state["competitors"]) * 4 + len(dims))
             analysis = analyze(evidence, state["competitors"], dimensions=dims,
                                degraded_sink=degraded_sink, on_progress=tick,
-                               client=rc_client, model=model)
+                               on_cell_row=on_cell_row, client=rc_client, model=model)
         save_analysis(conn, run_id, analysis)
         _emit_progress(
             emit, "analyst", "done",
