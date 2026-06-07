@@ -1,83 +1,92 @@
 /**
- * CompetitorComparison — 对比矩阵(DESIGN.md §对比矩阵 / plan §4.2)。
+ * CompetitorComparison — 对比矩阵(DESIGN.md §对比矩阵 / plan §4.2 / Plan C Task 23)。
  *
- * 行=维度、列=竞品;header sticky-top + 首列 sticky-left;竞品 >3 矩阵内横滚。
- * **单元格四态**:有据三色(support_verdict)/ 查无此项(斜体灰"未找到公开数据")/
- * 采集失败("—")/ stale(灰角标)。证据徽章固定挂格底。
+ * 行=维度(请求顺序)、列=竞品;header sticky-top + 首列 sticky-left;竞品 >3 矩阵内横滚。
  *
- * **因果桥**(DESIGN §对比矩阵 #110):选中决策 → 其 evidence_refs 的 id 集合传入,
- * 命中(cell.evidence_refs ∩ highlightIds 非空)的格子高亮,其余淡化。
+ * **逐维生长**(spec §5.3):running 时按维度从 `runStore.cellRows` 填(乱序安全,按 dimension
+ * key 落位);done 后回落 `cockpitStore.analysis.comparison`。
+ *
+ * **单元格四态 + 剔除**:
+ *   - 有据三色(cell 级 support_verdict)/ 查无此项(斜体灰"未找到公开数据")/
+ *     采集失败("分析失败"/"—")/ stale(灰角标)。
+ *   - **剔除格**(`runStore.droppedCells` 含 `${dim}|${comp}`)显「—」,qc 完成即生效(不必等 done)。
+ *   - **三色一律读 cell 级**:`runStore.cellVerdicts['${dim}|${comp}']`(verdict_recheck 实时)
+ *     → 回落 `analysisCell.support_verdict`(REST)。**绝不读 ref 级**(反幻觉核心)。
+ *
+ * **因果桥**(DESIGN §对比矩阵 #146):接受 `highlightedCells: ReadonlySet<string>`(`${dim}|${comp}`),
+ * 由 DecisionBoard 选中决策(其 evidence_refs ∩ cell evidence ids 求交)驱动;命中格高亮,其余淡化。
+ * 每 `<td>` 暴露 `data-ev-ids`(该 cell evidence_id 列表)供因果桥契约与调试。
  */
 import { dimensionLabel } from '@/lib/dimensions'
 import { useEvidence } from '@/stores/evidenceStore'
 import { isStale } from '@/lib/freshness'
 import { SectionTitle, PanelSkeleton, EmptyNote, ErrorNote } from '@/components/cockpit/parts'
 import { VerdictDot } from '@/components/cockpit/VerdictDot'
+import { useRunStore } from '@/stores/runStore'
+import { useCockpitStore } from '@/stores/cockpitStore'
 import type { LoadState } from '@/stores/cockpitStore'
-import type { CompetitorAnalysis, ComparisonCell, EvidenceRef, SupportVerdict } from '@/types/api'
+import type { SupportVerdict } from '@/types/api'
 
-const SEVERITY: Record<SupportVerdict, number> = { unsupported: 2, partial: 1, supported: 0 }
-
-function worstVerdict(refs: EvidenceRef[]): SupportVerdict | null {
-  if (refs.length === 0) return null
-  let w: SupportVerdict = 'supported'
-  for (const r of refs) if (SEVERITY[r.support_verdict] > SEVERITY[w]) w = r.support_verdict
-  return w
+/** 归一后的格子模型(同时承接 cell_row cell 与 analysis cell)。 */
+interface MatrixCell {
+  competitor: string
+  value: string
+  evidenceIds: string[]
 }
 
-interface VerdictAgg {
-  supported: number
-  partial: number
-  unsupported: number
-  total: number
-}
-
-/** 跨全矩阵聚合每格 worst verdict —— 喂头部信任徽章,取代每格绿点。 */
-function aggregateMatrix(analysis: CompetitorAnalysis): VerdictAgg {
-  const a: VerdictAgg = { supported: 0, partial: 0, unsupported: 0, total: 0 }
-  for (const row of analysis.comparison) {
-    for (const cell of row.cells) {
-      const v = worstVerdict(cell.evidence_refs)
-      if (!v) continue
-      a[v] += 1
-      a.total += 1
-    }
-  }
-  return a
-}
-
-/** 列顺序:优先 analysis.competitors,空则从 comparison cells 并集推导。 */
-function competitorOrder(analysis: CompetitorAnalysis): string[] {
-  if (analysis.competitors.length > 0) return analysis.competitors.map((c) => c.name)
-  const seen: string[] = []
-  for (const row of analysis.comparison) {
-    for (const cell of row.cells) if (!seen.includes(cell.competitor)) seen.push(cell.competitor)
-  }
-  return seen
-}
-
-function Cell({ cell, matched, dimmed }: { cell: ComparisonCell | null; matched: boolean; dimmed: boolean }) {
-  const firstRef = cell?.evidence_refs[0]
-  const ev = useEvidence(firstRef?.evidence_id)
+function Cell({
+  cell,
+  verdict,
+  dropped,
+  matched,
+  dimmed,
+  cellKey,
+}: {
+  cell: MatrixCell | null
+  verdict: SupportVerdict | null
+  dropped: boolean
+  matched: boolean
+  dimmed: boolean
+  cellKey: string
+}) {
+  const firstId = cell?.evidenceIds[0]
+  const ev = useEvidence(firstId)
   const stale = ev ? isStale(ev.fetched_at) : false
-  const verdict = cell ? worstVerdict(cell.evidence_refs) : null
 
-  // 查无此项:没有该竞品的格子
+  // 被策展剔除:矩阵显「—」(不再永久「待裁决」,codex P2#12)。
+  if (dropped) {
+    return (
+      <td
+        className="border border-border px-2 py-2 align-top text-[13px] text-text-muted"
+        data-cell={cellKey}
+        title="该格因证据不足被质检策展剔除"
+      >
+        —
+      </td>
+    )
+  }
+
+  // 查无此项:没有该竞品的格子。
   if (!cell) {
     return (
-      <td className="border border-border px-2 py-2 align-top text-[12px] italic text-text-muted">
+      <td
+        className="border border-border px-2 py-2 align-top text-[12px] italic text-text-muted"
+        data-cell={cellKey}
+      >
         未找到公开数据
       </td>
     )
   }
-  // 采集失败:格子在但无值
+
   const empty = !cell.value || cell.value.trim() === '' || cell.value.trim() === '—'
 
   return (
     <td
       className={`border px-2 py-2 align-top transition-colors ${
-        matched ? 'border-accent bg-accent-soft' : 'border-border'
+        matched ? 'border-accent bg-accent-soft ring-2 ring-accent ring-inset' : 'border-border'
       } ${dimmed ? 'opacity-45' : ''}`}
+      data-cell={cellKey}
+      data-ev-ids={cell.evidenceIds.join(',')}
     >
       {empty ? (
         <span className="text-[13px] text-text-muted">—</span>
@@ -90,8 +99,7 @@ function Cell({ cell, matched, dimmed }: { cell: ComparisonCell | null; matched:
           {cell.value}
         </span>
       )}
-      {/* 绿点重设计:充分佐证不再每格挂点(全绿=噪音),只在「部分/不足」时显标记+文案;
-          整体「佐证充分」信号上移到矩阵头部聚合徽章。stale 仍单独标。 */}
+      {/* cell 级真三色:充分不挂点(全绿=噪音),只在「部分/不足」显标记;stale 单独标。 */}
       {verdict && verdict !== 'supported' ? (
         <div className="mt-1.5 flex items-center gap-1">
           <VerdictDot verdict={verdict} showLabel />
@@ -105,17 +113,54 @@ function Cell({ cell, matched, dimmed }: { cell: ComparisonCell | null; matched:
 }
 
 export function CompetitorComparison({
-  analysis,
   state,
-  highlightIds,
+  dimensions,
+  competitors,
   evidenceCount,
 }: {
-  analysis: CompetitorAnalysis | null
+  /** analysis 资源 LoadState(skeleton / error / empty 控制)。 */
   state: LoadState
-  highlightIds: Set<string>
+  /** 请求维度(行顺序,来自 run detail)。 */
+  dimensions: string[]
+  /** 请求竞品(列顺序,来自 run detail)。 */
+  competitors: string[]
+  /** running 进度文案的已采集证据数。 */
   evidenceCount: number
 }) {
-  if (state === 'loading' || state === 'idle') {
+  // 逐维生长源(running 实时)+ 真三色 + 剔除集合(cell 级,绝不读 ref 级)。
+  const cellRows = useRunStore((s) => s.cellRows)
+  const cellVerdicts = useRunStore((s) => s.cellVerdicts)
+  const droppedCells = useRunStore((s) => s.droppedCells)
+  // done 兜底:REST analysis(渐进 fetch)。
+  const analysis = useCockpitStore((s) => s.analysis)
+  // 因果桥:共享高亮格集合(cockpitStore,稳定引用 — selector 返 raw 不 new Set)。
+  const highlightedCells = useCockpitStore((s) => s.highlightedCells)
+
+  const hlActive = highlightedCells.size > 0
+  const droppedSet = new Set(droppedCells)
+
+  // 行 = 请求维度(请求顺序,非到达序)。每维数据优先 cellRows[dim],回落 analysis.comparison。
+  const hasAnyCellRow = Object.keys(cellRows).length > 0
+  const hasAnalysis = !!analysis && analysis.comparison.length > 0
+
+  // loading / idle:既无逐维 cell_row、也无 analysis → skeleton(running 进度提示)。
+  if (!hasAnyCellRow && !hasAnalysis) {
+    if (state === 'error') {
+      return (
+        <section className="space-y-2" aria-label="对比矩阵">
+          <SectionTitle>竞品怎么比</SectionTitle>
+          <ErrorNote>对比矩阵加载失败(网络或服务异常)。</ErrorNote>
+        </section>
+      )
+    }
+    if (state === 'loaded' || state === 'absent') {
+      return (
+        <section className="space-y-2" aria-label="对比矩阵">
+          <SectionTitle>竞品怎么比</SectionTitle>
+          <EmptyNote>本轮未产出可对比的维度数据。</EmptyNote>
+        </section>
+      )
+    }
     return (
       <section className="space-y-2" aria-label="对比矩阵">
         <SectionTitle>竞品怎么比</SectionTitle>
@@ -129,49 +174,35 @@ export function CompetitorComparison({
       </section>
     )
   }
-  if (state === 'error') {
-    return (
-      <section className="space-y-2" aria-label="对比矩阵">
-        <SectionTitle>竞品怎么比</SectionTitle>
-        <ErrorNote>对比矩阵加载失败(网络或服务异常)。</ErrorNote>
-      </section>
-    )
-  }
-  if (!analysis || analysis.comparison.length === 0) {
-    return (
-      <section className="space-y-2" aria-label="对比矩阵">
-        <SectionTitle>竞品怎么比</SectionTitle>
-        <EmptyNote>本轮未产出可对比的维度数据。</EmptyNote>
-      </section>
-    )
-  }
 
-  const competitors = competitorOrder(analysis)
-  const hlActive = highlightIds.size > 0
-  const agg = aggregateMatrix(analysis)
-  const allSupported = agg.total > 0 && agg.partial === 0 && agg.unsupported === 0
+  // analysis 列回落:run detail 未给竞品时,从 analysis cells 并集推导。
+  const analysisCompetitors =
+    competitors.length > 0
+      ? competitors
+      : (() => {
+          const seen: string[] = []
+          if (analysis) {
+            for (const row of analysis.comparison) {
+              for (const c of row.cells) if (!seen.includes(c.competitor)) seen.push(c.competitor)
+            }
+          }
+          return seen
+        })()
+
+  // 行维度回落:run detail 未给维度时,用 cellRows + analysis 并集(到达 / REST 顺序)。
+  const rowDims =
+    dimensions.length > 0
+      ? dimensions
+      : (() => {
+          const seen: string[] = []
+          for (const d of Object.keys(cellRows)) if (!seen.includes(d)) seen.push(d)
+          if (analysis) for (const r of analysis.comparison) if (!seen.includes(r.dimension)) seen.push(r.dimension)
+          return seen
+        })()
 
   return (
     <section className="space-y-2" aria-label="对比矩阵">
-      <div className="flex items-center justify-between gap-2">
-        <SectionTitle>竞品怎么比</SectionTitle>
-        {agg.total > 0 ? (
-          allSupported ? (
-            <span
-              className="inline-flex shrink-0 items-center gap-1 rounded-full bg-success/12 px-2.5 py-0.5 text-[11px] font-medium text-verdict-supported"
-              title="每格结论都由引用证据充分支撑(佐证不足的已被质检剔除)"
-            >
-              <span aria-hidden>●</span> {agg.total} 项结论佐证充分
-            </span>
-          ) : (
-            <span className="inline-flex shrink-0 items-center gap-2 rounded-full bg-surface-subtle px-2.5 py-0.5 text-[11px]">
-              <span className="text-verdict-supported" title="佐证充分">● {agg.supported}</span>
-              <span className="text-verdict-partial" title="部分佐证">◐ {agg.partial}</span>
-              <span className="text-verdict-unsupported" title="佐证不足">○ {agg.unsupported}</span>
-            </span>
-          )
-        ) : null}
-      </div>
+      <SectionTitle>竞品怎么比</SectionTitle>
       <div className="overflow-x-auto rounded-lg border border-border">
         <table className="w-full border-collapse text-left tabular-nums">
           <thead>
@@ -179,7 +210,7 @@ export function CompetitorComparison({
               <th className="sticky left-0 top-0 z-20 border-b border-r border-border bg-surface-subtle px-2 py-2 text-[12px] font-medium text-text-muted">
                 维度
               </th>
-              {competitors.map((c) => (
+              {analysisCompetitors.map((c) => (
                 <th
                   key={c}
                   className="sticky top-0 z-10 min-w-[140px] border-b border-border bg-surface-subtle px-2 py-2 text-[13px] font-semibold text-text-primary"
@@ -190,30 +221,95 @@ export function CompetitorComparison({
             </tr>
           </thead>
           <tbody>
-            {analysis.comparison.map((row) => {
-              // 行命中:本行任一 cell 证据与高亮集合相交
+            {rowDims.map((dim) => {
+              const cr = cellRows[dim]
+              const analysisRow = analysis?.comparison.find((r) => r.dimension === dim)
+
+              // 该维整行失败:cell_row.status === 'failed'。
+              if (cr && cr.status === 'failed') {
+                return (
+                  <tr key={dim}>
+                    <th className="sticky left-0 z-10 border-b border-r border-border bg-surface px-2 py-2 text-left text-[13px] font-medium text-text-primary">
+                      {dimensionLabel(dim)}
+                    </th>
+                    <td
+                      className="border border-border px-2 py-2 text-[12px] italic text-text-muted"
+                      colSpan={Math.max(1, analysisCompetitors.length)}
+                    >
+                      分析失败(本维度采集 / 抽取异常,未产出可对比数据)
+                    </td>
+                  </tr>
+                )
+              }
+              // 该维整行查无:cell_row.status === 'empty'。
+              if (cr && cr.status === 'empty') {
+                return (
+                  <tr key={dim}>
+                    <th className="sticky left-0 z-10 border-b border-r border-border bg-surface px-2 py-2 text-left text-[13px] font-medium text-text-primary">
+                      {dimensionLabel(dim)}
+                    </th>
+                    <td
+                      className="border border-border px-2 py-2 text-[12px] italic text-text-muted"
+                      colSpan={Math.max(1, analysisCompetitors.length)}
+                    >
+                      未找到公开数据
+                    </td>
+                  </tr>
+                )
+              }
+
+              // 该维任一格命中高亮 → 行头高亮。
               const rowMatched =
-                hlActive &&
-                row.cells.some((cell) => cell.evidence_refs.some((r) => highlightIds.has(r.evidence_id)))
+                hlActive && analysisCompetitors.some((comp) => highlightedCells.has(`${dim}|${comp}`))
+
               return (
-                <tr key={row.dimension}>
+                <tr key={dim}>
                   <th
                     className={`sticky left-0 z-10 border-b border-r border-border bg-surface px-2 py-2 text-left text-[13px] font-medium ${
                       rowMatched ? 'text-accent' : 'text-text-primary'
                     } ${hlActive && !rowMatched ? 'opacity-45' : ''}`}
                   >
-                    {dimensionLabel(row.dimension)}
+                    {dimensionLabel(dim)}
                   </th>
-                  {competitors.map((comp) => {
-                    const cell = row.cells.find((c) => c.competitor === comp) ?? null
-                    const matched =
-                      hlActive && !!cell && cell.evidence_refs.some((r) => highlightIds.has(r.evidence_id))
+                  {analysisCompetitors.map((comp) => {
+                    const cellKey = `${dim}|${comp}`
+                    const dropped = droppedSet.has(cellKey)
+                    // 归一格子:优先 cell_row(逐维生长),回落 analysis cell(REST)。
+                    let cell: MatrixCell | null = null
+                    if (cr) {
+                      const c = cr.cells.find((x) => x.competitor === comp)
+                      if (c) {
+                        cell = {
+                          competitor: comp,
+                          value: c.value,
+                          evidenceIds: c.evidence_refs.map((r) => r.evidence_id),
+                        }
+                      }
+                    } else if (analysisRow) {
+                      const c = analysisRow.cells.find((x) => x.competitor === comp)
+                      if (c) {
+                        cell = {
+                          competitor: comp,
+                          value: c.value,
+                          evidenceIds: c.evidence_refs.map((r) => r.evidence_id),
+                        }
+                      }
+                    }
+                    // 三色:cell 级真算优先 cellVerdicts(实时),回落 analysisCell.support_verdict;绝不读 ref 级。
+                    const verdict: SupportVerdict | null =
+                      cellVerdicts[cellKey] ??
+                      analysisRow?.cells.find((x) => x.competitor === comp)?.support_verdict ??
+                      null
+                    const matched = hlActive && highlightedCells.has(cellKey)
                     return (
                       <Cell
                         key={comp}
                         cell={cell}
+                        verdict={verdict}
+                        dropped={dropped}
                         matched={matched}
                         dimmed={hlActive && !matched}
+                        cellKey={cellKey}
                       />
                     )
                   })}
@@ -224,10 +320,10 @@ export function CompetitorComparison({
         </table>
       </div>
       <p className="text-[11px] text-text-muted">
-        佐证不足的结论已被质检剔除,矩阵仅列站得住的格子;◐/○ 标记表示该格证据偏弱,需谨慎。
+        佐证不足的结论已被质检剔除(显「—」),矩阵仅列站得住的格子;◐/○ 标记表示该格证据偏弱,需谨慎。
       </p>
       {hlActive ? (
-        <p className="text-[11px] text-accent">已高亮选中决策的依据所在行列(再点一次决策的高亮按钮取消)。</p>
+        <p className="text-[11px] text-accent">已高亮选中决策的依据所在格(再点一次该决策的高亮按钮取消)。</p>
       ) : null}
     </section>
   )

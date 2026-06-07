@@ -61,9 +61,17 @@ interface CockpitData {
   traceState: LoadState
 }
 
+/** 因果桥稳定空集合(selector 纪律:绝不在 selector / render 内 new Set())。 */
+const EMPTY_CELL_SET: ReadonlySet<string> = new Set<string>()
+
 interface CockpitStore extends CockpitData {
+  /** 因果桥:选中决策 evidence_refs ∩ 各 cell evidence ids 命中的格 `${dim}|${comp}`。
+   *  DecisionBoard 写、CompetitorComparison 读;空集合 = 无高亮(稳定引用,防 selector 死循环)。 */
+  highlightedCells: ReadonlySet<string>
   /** 由 DecisionSurface effect 调,依据 run 状态渐进取数(idempotent)。 */
   sync: (args: { runId: string; status: RunStatus; analyzeReady: boolean }) => void
+  /** 因果桥写入:传非空 Set 高亮、传 null/空清空(归一到稳定 EMPTY_CELL_SET)。 */
+  setHighlightedCells: (cells: ReadonlySet<string> | null) => void
   reset: () => void
 }
 
@@ -110,9 +118,10 @@ export const useCockpitStore = create<CockpitStore>((set, get) => {
 
   return {
     ...initial(),
+    highlightedCells: EMPTY_CELL_SET,
 
     sync: ({ runId, status, analyzeReady }) => {
-      if (get().runId !== runId) set({ ...initial(), runId })
+      if (get().runId !== runId) set({ ...initial(), runId, highlightedCells: EMPTY_CELL_SET })
 
       const demo = isDemoRun(runId) ? getDemoCockpitData() : null
       const done =
@@ -162,6 +171,9 @@ export const useCockpitStore = create<CockpitStore>((set, get) => {
       }
     },
 
-    reset: () => set(initial()),
+    setHighlightedCells: (cells) =>
+      set({ highlightedCells: cells && cells.size > 0 ? cells : EMPTY_CELL_SET }),
+
+    reset: () => set({ ...initial(), highlightedCells: EMPTY_CELL_SET }),
   }
 })

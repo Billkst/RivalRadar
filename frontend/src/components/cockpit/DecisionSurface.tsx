@@ -48,6 +48,8 @@ export function DecisionSurface({
   decisionContext,
   runStatus,
   runDegraded,
+  dimensions = [],
+  competitors = [],
 }: {
   runId: string
   decisionContext?: string
@@ -55,6 +57,10 @@ export function DecisionSurface({
   runStatus?: string
   /** RunDetail.degraded(REST 权威)。deep-link 无 live 流时仍能显降级 caveat。 */
   runDegraded?: boolean
+  /** 请求维度(矩阵行顺序,来自 RunDetail)。 */
+  dimensions?: string[]
+  /** 请求竞品(矩阵列顺序,来自 RunDetail)。 */
+  competitors?: string[]
 }) {
   const storeRunId = useRunStore((s) => s.runId)
   const storeStatus = useRunStore((s) => s.status)
@@ -76,7 +82,6 @@ export function DecisionSurface({
 
   const sync = useCockpitStore((s) => s.sync)
   const cockpitRunId = useCockpitStore((s) => s.runId)
-  const analysis = useCockpitStore((s) => s.analysis)
   const decisions = useCockpitStore((s) => s.decisions)
   const insight = useCockpitStore((s) => s.insight)
   const qc = useCockpitStore((s) => s.qc)
@@ -94,7 +99,7 @@ export function DecisionSurface({
     sync({ runId, status, analyzeReady: analyzeDone })
   }, [runId, status, analyzeDone, sync])
 
-  // 因果桥:选中决策 idx → 其 evidence id 集合。切 run 清选择。
+  // 因果桥:选中决策 idx(切 run / 切换决策清空共享高亮在 DecisionBoard 内处理)。
   const [selectedIdx, setSelectedIdx] = React.useState<number | null>(null)
   React.useEffect(() => setSelectedIdx(null), [runId])
 
@@ -102,15 +107,6 @@ export function DecisionSurface({
   const live = cockpitRunId === runId
   const s = (st: LoadState): LoadState => (live ? st : 'idle')
   const decisionList = live && decisions ? decisions.decisions : []
-
-  const highlightIds = React.useMemo(() => {
-    const set = new Set<string>()
-    if (selectedIdx !== null && live && decisions) {
-      const d = decisions.decisions[selectedIdx]
-      d?.evidence_refs.forEach((r) => set.add(r.evidence_id))
-    }
-    return set
-  }, [selectedIdx, decisions, live])
 
   const genericContext =
     !decisionContext || !decisionContext.trim() || decisionContext.trim().startsWith('通用浏览')
@@ -166,11 +162,11 @@ export function DecisionSurface({
         </>
       )}
 
-      {/* 对比矩阵(analysis 在 done/中断都取 → 正常渲染,各态自处理) */}
+      {/* 对比矩阵(逐维生长 running / analysis 兜底 done;因果桥读 cockpitStore.highlightedCells) */}
       <CompetitorComparison
-        analysis={live ? analysis : null}
         state={s(analysisState)}
-        highlightIds={highlightIds}
+        dimensions={dimensions}
+        competitors={competitors}
         evidenceCount={evidenceCount}
       />
 

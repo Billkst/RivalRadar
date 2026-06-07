@@ -190,6 +190,8 @@ export function RunPage() {
             decisionContext={run?.decision_context}
             runStatus={run?.status}
             runDegraded={run?.degraded}
+            dimensions={run?.dimensions ?? []}
+            competitors={run?.competitors ?? []}
           />
         </CockpitLayout>
       )}
