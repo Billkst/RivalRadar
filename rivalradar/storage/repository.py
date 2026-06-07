@@ -319,6 +319,36 @@ def list_curation_drops(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# ---- agent_skills(Plan C:run 无关的 agent 技能配置,upsert per (agent_id, skill_id))----
+def upsert_agent_skill(conn: sqlite3.Connection, agent_id: str, skill_id: str,
+                       version: str, enabled: bool) -> None:
+    conn.execute(
+        "INSERT INTO agent_skills (agent_id, skill_id, version, enabled, installed_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(agent_id, skill_id) DO UPDATE SET "
+        "version=excluded.version, enabled=excluded.enabled",
+        (agent_id, skill_id, version, 1 if enabled else 0, _now()),
+    )
+    conn.commit()
+
+
+def list_agent_skills(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT agent_id, skill_id, version, enabled, installed_at FROM agent_skills "
+        "ORDER BY agent_id, installed_at").fetchall()
+    return [
+        {"agent_id": r[0], "skill_id": r[1], "version": r[2],
+         "enabled": bool(r[3]), "installed_at": r[4]}
+        for r in rows
+    ]
+
+
+def delete_agent_skill(conn: sqlite3.Connection, agent_id: str, skill_id: str) -> None:
+    conn.execute("DELETE FROM agent_skills WHERE agent_id=? AND skill_id=?",
+                 (agent_id, skill_id))
+    conn.commit()
+
+
 # ---- runs list ----
 def list_runs(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
     rows = conn.execute(
