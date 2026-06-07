@@ -133,3 +133,35 @@ spec §11.4 的"实时 DAG 把等待做成可看的协作"依旧成立(多 Agent
 **结论:** GO。SSE 事件 start/node/done 齐全;run 终态合法(insufficient_evidence,max_retries=1);
 trace ≥5 条(9 条);report 非空 markdown(9631 chars);analysis 含 ≥1 competitor。Lane E
 与 Lane D 接驳通了,为 Lane F 前端铺好可消费 API。
+
+## Spike H — insight 两步化字符流 ✅ GO(2026-06-07,Plan A · Task 0)
+
+运行:`unset http_proxy ... ; NO_PROXY=localhost,127.0.0.1 .venv/bin/python spikes/spike_insight_two_step.py`
+
+**目的:** 验证报告台「真打字感」的两步化路径 —— Step1 `stream_chat` 流式吐自由文本草稿(喂前端逐字),
+Step2 `generate_insight` 把草稿抽成结构化 `ReportInsight`(契约不破)。整条 Plan B insight 两步化压在
+「`stream_chat` 在 Doubao 真能流式吐 delta」这一假设上。
+
+**实测(两次真打,body=626 chars):**
+
+| 指标 | Run 1 | Run 2 |
+|------|-------|-------|
+| chunks | 729 | 871 |
+| TTFB(首块) | 37.0s | 40.3s |
+| total stream | 45.5s | 51.5s |
+| draft 字符 | 1166 | 1359 |
+| extract(Step2) | 6.9s | 7.9s |
+
+- 首块后流速 ~80-90 chunk/s(打字感极佳,远在前端 throttle 上限内)。
+- `ReportInsight` 三字段(market_context / differentiation_thesis / actionable_takeaway)全非空且语义合法。
+- 脚本零字段修正:所有 model 构造与 `schema/models.py` 字段名/必填项一致,pydantic 零 ValidationError。
+
+**结论:GO —— Plan B insight 走真 typing 可行**(数据真、契约不破)。
+
+**给 Plan B / Plan C 的硬约束(spike 抓出的非显性发现):**
+1. **TTFB 偏高(37-40s)是 Doubao 复杂 prompt 的首 token 思考延迟,不是网络/代理问题**(tiny-prompt 探针
+   TTFB 仅 7.4s,代理已正确 unset)。生产真 body(数 KB ~ 25K+ chars)只会更高。
+2. **前端首块前必须有「起草中」占位/骨架态**,不能空屏等 ~38s+;否则体验 =「卡死 38s 然后突然狂吐字」,
+   反不如一次性。建议 Step1 流式前先 emit `step="drafting"` 的「灵犀正在起草洞察…」,首块到达切逐字 typing。
+3. **Step2 抽取额外 ~7-8s**。整条两步链 626-char body 端到端 ~53-59s,生产更久。若在意总时长:Step1 流完
+   即把草稿呈现,Step2 抽取异步补结构化字段(不阻塞用户阅读)。
