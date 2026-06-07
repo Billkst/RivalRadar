@@ -19,7 +19,7 @@ from rivalradar.schema.models import (
     ReportInsight,
 )
 from rivalradar.storage.repository import (
-    append_trace, insert_evidence, mark_run_finalized, save_analysis,
+    append_trace, insert_evidence, insert_queries, mark_run_finalized, save_analysis,
     save_decisions, save_insight, save_qc_result, save_report, update_run_degraded,
 )
 
@@ -107,6 +107,24 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
         t0 = time.monotonic()
         existing = {e["id"] for e in state.get("evidence", [])}
         qc_result = state.get("qc_result")
+        rnd = _collect_round(state)
+
+        # 真实查询词检索台:每 query 完成发 query + query_hit 事件(worker 线程,emit 经
+        # sse.py call_soon_threadsafe 线程安全),并收集 query 记录供主线程批量落库。
+        q_records: list[dict] = []
+        q_lock = threading.Lock()
+
+        def on_query(q, evs):
+            if emit is not None:
+                emit("query", {"competitor": q.competitor, "dimension": q.dimension,
+                               "query_text": q.query_text, "language": q.language, "round": rnd})
+                emit("query_hit", {"query_text": q.query_text,
+                                   "hit_count": len(evs), "round": rnd})
+            with q_lock:
+                q_records.append({"competitor": q.competitor, "dimension": q.dimension,
+                                  "language": q.language, "query_text": q.query_text,
+                                  "round": rnd, "hit_count": len(evs)})
+
         if qc_result is None:
             _emit_progress(
                 emit, "collector", "search",
@@ -117,7 +135,7 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
                                 len(state["competitors"]) * len(state["dimensions"]) * 2)
             evs = collect_evidence(state["competitors"], state["dimensions"],
                                    provider=provider, official_domains=official_domains,
-                                   max_results=max_results, on_progress=tick)
+                                   max_results=max_results, on_progress=tick, on_query=on_query)
             tgt_desc = "all"
         else:
             targets = extract_collect_targets(
@@ -133,19 +151,35 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
             for comp, dim in targets:
                 evs += collect_evidence([comp], [dim], provider=provider,
                                         official_domains=official_domains,
-                                        max_results=max_results, broaden=True, on_progress=tick)
+                                        max_results=max_results, broaden=True,
+                                        on_progress=tick, on_query=on_query)
             tgt_desc = f"{len(targets)} gaps"
+
         fresh = [e for e in evs if e.id not in existing]
         for e in fresh:
             insert_evidence(conn, run_id, e)
+            # 来源卡明细(spec §5.2):只发实际落库的新证据,不发 content 全文(点开走 REST)。
+            if emit is not None:
+                emit("source", {"evidence_id": e.id, "competitor": e.competitor,
+                                "dimension": e.dimension, "source_title": e.source_title,
+                                "source_url": e.source_url, "fetched_at": e.fetched_at,
+                                "language": e.language, "round": rnd})
+        # 真实查询词落库(主线程批量,worker 线程只收集,避免并发写 sqlite)。
+        insert_queries(conn, run_id, q_records)
+        # retry 增量(spec §5.4):本轮新增汇总,前端重试环显「第 N 轮 · 证据 X→Y」。
+        total_after = len(existing) + len(fresh)
+        if emit is not None:
+            emit("evidence_delta", {"round": rnd, "added_count": len(fresh),
+                                    "total_count": total_after,
+                                    "new_evidence_ids": [e.id for e in fresh]})
         _emit_progress(
             emit, "collector", "done",
-            f"找到 {len(fresh)} 条新证据,累计 {len(existing) + len(fresh)} 条",
-            metric={"current": len(fresh), "total": len(existing) + len(fresh)},
+            f"找到 {len(fresh)} 条新证据,累计 {total_after} 条",
+            metric={"current": len(fresh), "total": total_after},
         )
         append_trace(conn, run_id, "collect",
-                     input_summary=f"targets={tgt_desc}",
-                     output_summary=f"+{len(fresh)} (total {len(existing) + len(fresh)})",
+                     input_summary=f"targets={tgt_desc} round={rnd}",
+                     output_summary=f"+{len(fresh)} (total {total_after})",
                      latency_ms=int((time.monotonic() - t0) * 1000))
         return {"evidence": [e.model_dump() for e in fresh]}
     return collect_node

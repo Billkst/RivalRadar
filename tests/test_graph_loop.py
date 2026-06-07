@@ -113,8 +113,8 @@ def test_real_feedback_loop_improves_to_pass(conn):
 
     # 1) 恰好打回重采一次(collect 跑 2 次:首遍全量 + 一次补缺口),pass 后无多余循环
     assert len(collects) == 2
-    assert collects[0]["input_summary"] == "targets=all"        # 首遍全量
-    assert collects[1]["input_summary"] == "targets=5 gaps"     # retry 只补 5 个缺口维(白盒锁死)
+    assert collects[0]["input_summary"] == "targets=all round=0"        # 首遍全量(round 0)
+    assert collects[1]["input_summary"] == "targets=5 gaps round=1"     # retry 只补 5 个缺口维(round 1,白盒锁死)
 
     # 2) 第一遍确实因覆盖不足被打回(可证伪:证明不是碰巧两次 collect)
     assert "verdict=retry_collect" in qcs[0]["output_summary"]
