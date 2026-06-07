@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
+from rivalradar.llm.streaming import stream_chat
 from rivalradar.llm.structured import structured_call
 from rivalradar.schema.feature_tree import assemble_tree
 from rivalradar.schema.models import (
@@ -180,6 +183,34 @@ deterministically 渲染好的竞品分析正文(含数据 + 引用 + SWOT + 跨
 {body}"""
     msgs = [{"role": "user", "content": prompt}]
     return structured_call(ReportInsight, msgs, client=client, model=model)
+
+
+_INSIGHT_DRAFT_PROMPT = (
+    "你是竞品战略分析师。基于下面的对比正文,写一段三部分的自由文本草稿:"
+    "①市场格局 ②战略路径分歧 ③短/中/长期可执行建议。只写散文,不要 JSON。\n\n"
+)
+
+
+def generate_insight_streamed(
+    body: str, *, client, model,
+    emit: Callable[[str, dict], None] | None = None,
+    agent_id: str = "writer", step: str = "drafting",
+) -> ReportInsight:
+    """insight 两步化(spec §5.6,Spike H GO):Step1 stream_chat 出三段自由文本草稿,逐 delta
+    emit chunk 供前端报告台 typing;Step2 generate_insight 把草稿抽成结构化 ReportInsight(契约不破)。
+    emit=None → 直接一次性 generate_insight(body)(tests/CLI,无 typing)。
+    stream 或抽取抛错(Exception)→ 回落一次性 generate_insight(body):数据有保证,typing best-effort。
+    RunAborted(BaseException)不在此捕获,取消信号照常上抛。"""
+    if emit is None:
+        return generate_insight(body, client=client, model=model)
+    try:
+        draft = stream_chat([{"role": "user", "content": _INSIGHT_DRAFT_PROMPT + body}],
+                            client=client, model=model, emit=emit, agent_id=agent_id, step=step)
+        if not draft.strip():
+            raise ValueError("empty draft")
+        return generate_insight(draft, client=client, model=model)
+    except Exception:  # noqa: BLE001 — stream/抽取失败回落一次性,数据真;RunAborted 是 BaseException 不入此分支
+        return generate_insight(body, client=client, model=model)
 
 
 def generate_decisions(

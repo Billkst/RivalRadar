@@ -244,4 +244,62 @@ def test_generate_decisions_prompt_bans_platitudes():
     generate_decisions("正文", None, client=client, model="m")
     prompt = client.chat.completions.last_kwargs["messages"][0]["content"]
     assert "持续关注" in prompt  # 黑名单词出现在「严禁」约束里
+
+
+class _StreamThenStructured:
+    """create(stream=True) → 逐 delta 吐流;create(无 stream,structured_call) → tool_call(ReportInsight JSON)。"""
+    def __init__(self, deltas, insight_json, raise_on_stream=False):
+        self.deltas = deltas; self.insight_json = insight_json
+        self.raise_on_stream = raise_on_stream
+    def create(self, **kw):
+        if kw.get("stream"):
+            if self.raise_on_stream:
+                raise RuntimeError("stream boom")
+            def gen():
+                for d in self.deltas:
+                    yield SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=d))])
+            return gen()
+        return SimpleNamespace(
+            choices=[SimpleNamespace(message=SimpleNamespace(
+                tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=self.insight_json))]))],
+            usage=SimpleNamespace(total_tokens=10))
+
+
+class _StreamClient:
+    def __init__(self, deltas, insight_json, raise_on_stream=False):
+        self.chat = SimpleNamespace(completions=_StreamThenStructured(deltas, insight_json, raise_on_stream))
+
+
+_INSIGHT_JSON = json.dumps({"market_context": "m", "differentiation_thesis": "d",
+                            "actionable_takeaway": "a"})
+
+
+def test_generate_insight_streamed_emits_chunks_then_extracts():
+    from rivalradar.agents.writer import generate_insight_streamed
+    client = _StreamClient(["市场", "格局", "三足"], _INSIGHT_JSON)
+    chunks = []
+    def emit(ev_type, data):
+        if ev_type == "chunk":
+            chunks.append(data["delta"])
+    insight = generate_insight_streamed("BODY", client=client, model="m", emit=emit)
+    assert chunks == ["市场", "格局", "三足"]            # Step1 真流 delta
+    assert insight.market_context == "m" and insight.actionable_takeaway == "a"  # Step2 抽取契约不破
+
+
+def test_generate_insight_streamed_falls_back_when_stream_fails():
+    from rivalradar.agents.writer import generate_insight_streamed
+    client = _StreamClient([], _INSIGHT_JSON, raise_on_stream=True)
+    chunks = []
+    def emit(ev_type, data):
+        chunks.append(data)
+    insight = generate_insight_streamed("BODY", client=client, model="m", emit=emit)
+    assert chunks == []                                  # stream 抛错 → 无 chunk
+    assert insight.market_context == "m"                 # 回落一次性,数据仍真
+
+
+def test_generate_insight_streamed_emit_none_is_oneshot():
+    from rivalradar.agents.writer import generate_insight_streamed
+    client = _StreamClient(["x"], _INSIGHT_JSON)
+    insight = generate_insight_streamed("BODY", client=client, model="m", emit=None)
+    assert insight.differentiation_thesis == "d"         # emit=None → 直接一次性,不走 stream
     assert all(term in PLATITUDE_TERMS for term in ("持续关注", "深入研究"))
