@@ -25,6 +25,7 @@ export function SampleView() {
   const [activeId, setActiveId] = React.useState<string>('')
 
   const isMd = sample?.kind === 'md'
+  const isMethodology = sample?.type === 'methodology'
 
   // 目录:只取 h2/h3(跳过 h1 标题与更深层级,保持精简可扫读)
   const toc = React.useMemo(
@@ -108,8 +109,8 @@ export function SampleView() {
       <div className="mx-auto max-w-[1180px] px-6 py-8">
         {/* 杂志报头(全宽):导语标 + 出处署名行 + 青绿细分隔线 */}
         <header className="mb-7">
-          <div className="text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
-            竞品分析范文 · 他人公开发表
+          <div className="font-mono text-[11px] font-semibold uppercase tracking-[0.14em] text-accent">
+            {isMethodology ? '方法论 · 本库导览' : '竞品分析范文 · 他人公开发表'}
           </div>
           <div className="mt-2 flex flex-wrap items-center gap-x-2 gap-y-1 text-[13px] text-text-muted">
             <span className="font-medium text-text-primary">{sample.publisher}</span>
@@ -131,9 +132,13 @@ export function SampleView() {
               </>
             )}
           </div>
-          <div className="mt-3 h-px w-full bg-gradient-to-r from-accent/50 to-transparent" />
+          <div
+            className={`mt-3 h-px w-full ${isMethodology ? 'bg-accent/40' : 'bg-gradient-to-r from-accent/50 to-transparent'}`}
+          />
           <p className="mt-3 text-[12px] leading-relaxed text-text-muted">
-            供参照「理想输出长什么样」—— 非 RivalRadar 生成,版权归原作者所有。
+            {isMethodology
+              ? '本文为 RivalRadar 原创方法论,综合公开资料编写,来源见文末。'
+              : '供参照「理想输出长什么样」—— 非 RivalRadar 生成,版权归原作者所有。'}
           </p>
         </header>
 
@@ -181,6 +186,28 @@ export function SampleView() {
 
               {/* 阅读栏 */}
               <article className="sample-reading min-w-0 max-w-[760px]">
+                {isMethodology && toc.filter((h) => h.level === 2).length > 0 && (
+                  <div className="mb-6 rounded-lg border border-border bg-surface p-4">
+                    <div className="mb-2.5 font-mono text-[11px] uppercase tracking-wider text-accent">
+                      标尺速览 · {toc.filter((h) => h.level === 2).length} 步
+                    </div>
+                    <ol className="grid grid-cols-1 gap-1.5 sm:grid-cols-2">
+                      {toc
+                        .filter((h) => h.level === 2)
+                        .map((h, i) => (
+                          <li key={h.id}>
+                            <a
+                              href={`#${h.id}`}
+                              className="flex items-baseline gap-2 text-[13px] text-text-muted hover:text-accent"
+                            >
+                              <span className="font-mono text-accent">{String(i + 1).padStart(2, '0')}</span>
+                              <span>{h.text}</span>
+                            </a>
+                          </li>
+                        ))}
+                    </ol>
+                  </div>
+                )}
                 <Markdown source={md} />
               </article>
             </div>

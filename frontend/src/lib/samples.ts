@@ -13,12 +13,32 @@ export interface Sample {
   date: string
   competitors: string[]
   kind: 'md' | 'pdf'
+  type?: 'report' | 'methodology' // 默认 report;methodology = 范文库方法论(库章)
+  structure?: string // 范例结构徽章:双雄对决 / 全矩阵横评 / 批判视角 / 战略评论
   file: string // /samples/ref-0X.(md|pdf)
   sourceUrl?: string // 原文链接(PDF 报告无公开直链)
+  sourceUrls?: string[] // 方法论多来源(3 篇参考)
   note: string // 一句话:为什么值得参照
 }
 
 export const SAMPLES: Sample[] = [
+  {
+    id: 'methodology',
+    title: '竞品分析报告怎么写',
+    publisher: 'RivalRadar',
+    author: 'RivalRadar 原创',
+    date: '2026-06-07',
+    competitors: [],
+    kind: 'md',
+    type: 'methodology',
+    file: '/samples/methodology.md',
+    sourceUrls: [
+      'https://www.woshipm.com/evaluating/5672064.html',
+      'https://www.feishu.cn/template/competitive-product-analysis-report-key-aspects',
+      'https://zhuanlan.zhihu.com/p/668621286',
+    ],
+    note: '8 步框架 + 对齐 RivalRadar 10 条评分标尺,综合 woshipm / 飞书 / 知乎三篇权威方法论。范文库的"怎么读"。',
+  },
   {
     id: 'ref-01',
     title: '竞品分析报告:飞书 VS 钉钉 VS 企业微信,移动办公哪家强?',
@@ -65,6 +85,58 @@ export const SAMPLES: Sample[] = [
     kind: 'pdf',
     file: '/samples/ref-04.pdf',
     note: '厂商权威 38 页赛道全景报告,含完整图表(PDF,可在线阅览 / 下载)。',
+  },
+  {
+    id: 'ref-05',
+    title: '抢客户、战表格、押AI:钉钉和飞书继续贴身肉搏',
+    publisher: '36氪(听潮Ti)',
+    author: '听潮Ti',
+    date: '2026-02-25',
+    competitors: ['钉钉', '飞书'],
+    kind: 'md',
+    structure: '双雄对决',
+    file: '/samples/ref-05.md',
+    sourceUrl: 'https://36kr.com/p/3697005094203910',
+    note: '2026 双雄对决:三战线(抢客户/AI表格/押AI)+ ARR/份额硬数据 + 战略推论。',
+  },
+  {
+    id: 'ref-06',
+    title: '飞书、企业微信、钉钉三款协同办公软件深度对比与行业洞察',
+    publisher: 'CSDN',
+    author: '靓男大师兄',
+    date: '2026-03-09',
+    competitors: ['飞书', '企业微信', '钉钉'],
+    kind: 'md',
+    structure: '全矩阵横评',
+    file: '/samples/ref-06.md',
+    sourceUrl: 'https://blog.csdn.net/s867859765/article/details/147877238',
+    note: '2026 全矩阵横评:多张对比矩阵(市占/商业模式/痛点)+ 市场规模 + 多源引证。',
+  },
+  {
+    id: 'ref-07',
+    title: '协同办公概念"泛滥",中小企业和打工人真的需要吗?',
+    publisher: '21经济网',
+    author: '道总有理',
+    date: '2025-12-05',
+    competitors: ['钉钉', '飞书', '企业微信'],
+    kind: 'md',
+    structure: '批判视角',
+    file: '/samples/ref-07.md',
+    sourceUrl: 'https://www.21jingji.com/article/20251205/herald/7dd1dd58b4c6135a57b884a3e6758ba3.html',
+    note: '2025 末批判视角:质疑真实需求 + QuestMobile 硬数据(满意度/付费率)+ 转向推论。',
+  },
+  {
+    id: 'ref-08',
+    title: '这次,钉钉领先半目',
+    publisher: '人人都是产品经理',
+    author: '潘乱(乱翻书)',
+    date: '2026-03-23',
+    competitors: ['钉钉', '飞书', '企业微信'],
+    kind: 'md',
+    structure: '战略评论',
+    file: '/samples/ref-08.md',
+    sourceUrl: 'https://www.woshipm.com/ai/6361304.html',
+    note: '2026 战略评论:钉钉新平台「悟空」+ 从「人」到「AI」作为工作主体的范式判断。',
   },
 ]
 

@@ -8,9 +8,11 @@
  * 行内 `[ev_xxx]` / `[ev_a, ev_b]` 渲成弱化「收据」徽章,呼应「点结论看收据」的信任范式。
  */
 import * as React from 'react'
+import { Link } from 'react-router-dom'
 import { HEADING_RE, headingId } from './markdownHeadings'
 
 const CITE_SPLIT = /(\[ev_[^\]]*\])/g
+const ANCHOR_PREFIX = '锚定: '
 
 // 图片 src 白名单(对抗审查 F4 / Codex P2):**只放行相对路径与 data:image**。范文配图全是
 // 仓库本地相对路径(如 ref-01-img/x.png);生成报告本不产图。一律拒绝 http(s)/file: 等带网络
@@ -49,6 +51,49 @@ function renderCitations(text: string, keyPrefix: string): React.ReactNode[] {
   )
 }
 
+// 行内 markdown 链接 [label](href):站内 /samples/:id 走 react-router(SPA 不刷新),
+// http(s) 外链走新标签页 + noopener;其余 scheme(javascript: 等)退为字面文本防注入。
+// [ev_xxx] 无 `(`,不会被本正则吃到,仍由 renderCitations 处理。
+// href 允许一层嵌套括号(如 wikipedia ..._(programming_language)),避免静默截断。
+const LINK_RE = /\[([^\]]+)\]\(([^()]+(?:\([^()]*\)[^()]*)*)\)/g
+function renderLinksAndCites(text: string, keyPrefix: string): React.ReactNode[] {
+  const out: React.ReactNode[] = []
+  let last = 0
+  let i = 0
+  LINK_RE.lastIndex = 0
+  let m: RegExpExecArray | null
+  while ((m = LINK_RE.exec(text)) !== null) {
+    if (m.index > last) out.push(...renderCitations(text.slice(last, m.index), `${keyPrefix}p${i}`))
+    const label = m[1]
+    const href = m[2].trim()
+    if (href.startsWith('/')) {
+      out.push(
+        <Link key={`${keyPrefix}l${i}`} to={href} className="text-accent underline-offset-2 hover:underline">
+          {label}
+        </Link>,
+      )
+    } else if (/^https?:\/\//i.test(href)) {
+      out.push(
+        <a
+          key={`${keyPrefix}l${i}`}
+          href={href}
+          target="_blank"
+          rel="noopener noreferrer"
+          className="text-accent underline-offset-2 hover:underline"
+        >
+          {label}
+        </a>,
+      )
+    } else {
+      out.push(<React.Fragment key={`${keyPrefix}l${i}`}>{m[0]}</React.Fragment>)
+    }
+    last = m.index + m[0].length
+    i++
+  }
+  if (last < text.length) out.push(...renderCitations(text.slice(last), `${keyPrefix}pE`))
+  return out
+}
+
 // 行内渲染:**粗体**(范文大量使用)+ [ev_] 收据。先按 **bold** 切,段内再处理收据。
 function renderInline(text: string): React.ReactNode[] {
   const out: React.ReactNode[] = []
@@ -56,11 +101,11 @@ function renderInline(text: string): React.ReactNode[] {
     if (part.startsWith('**') && part.endsWith('**')) {
       out.push(
         <strong key={`b${i}`} className="font-semibold text-text-primary">
-          {renderCitations(part.slice(2, -2), `b${i}`)}
+          {renderLinksAndCites(part.slice(2, -2), `b${i}`)}
         </strong>,
       )
     } else {
-      out.push(...renderCitations(part, `s${i}`))
+      out.push(...renderLinksAndCites(part, `s${i}`))
     }
   })
   return out
@@ -225,6 +270,18 @@ export function Markdown({ source }: { source: string }) {
           </h5>,
         )
       }
+      continue
+    }
+    // 三联锚定 chip(方法论专用):mono + accent 描边,内含站内/外链。
+    if (line.startsWith(ANCHOR_PREFIX)) {
+      blocks.push(
+        <div
+          key={blocks.length}
+          className="my-3 rounded border border-accent/40 bg-accent-soft px-2.5 py-1.5 font-mono text-[12px] leading-relaxed text-text-muted"
+        >
+          {renderInline(line.slice(ANCHOR_PREFIX.length))}
+        </div>,
+      )
       continue
     }
     if (line.startsWith('> ')) {
