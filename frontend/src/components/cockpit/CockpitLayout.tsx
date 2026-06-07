@@ -11,6 +11,7 @@
 import * as React from 'react'
 import { StatusBar, type VerdictSummary } from '@/components/cockpit/StatusBar'
 import { ResearcherWorkbench } from '@/components/workbench/ResearcherWorkbench'
+import { Drawer } from '@/components/drawer/Drawer'
 import { useRunStore } from '@/stores/runStore'
 
 interface CockpitLayoutProps {
@@ -52,6 +53,8 @@ export function CockpitLayout({
           <ResearcherWorkbench collapsed={terminal} />
         </aside>
       </div>
+      {/* 抽屉导航栈(agent / 证据 / 步骤)— 全局挂一次,由 drawerStore 驱动 */}
+      <Drawer />
     </div>
   )
 }
