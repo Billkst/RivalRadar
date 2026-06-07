@@ -316,6 +316,94 @@ async def _replay_from_trace(
     """
     yield {"event": "start",
            "data": json.dumps({"run_id": run_id, "replay": True, "ts": _now()})}
+
+    # ── Plan D 富 replay 重建:从持久化状态还原过程事件,刷新/深链进入不丢「看得见的活儿」。──
+    # 不重建 evidence_delta(evidence 无 round 列)+ chunk(瞬态);RetryLoop 动画 replay 不显,
+    # 但 retryCount 从 queries.round 真值重建(见末尾合成 qc node)。详见 plan D-D2/D-D3。
+
+    # (1) query + query_hit(检索台):queries 表带真 round / hit_count;0 命中也重建(标「无结果」)。
+    #     存局部变量 queries:末尾 retryCount = max(queries.round) 复用。
+    queries = repo.list_queries(conn, run_id)
+    for q in queries:
+        yield {"event": "query", "data": json.dumps({
+            "competitor": q["competitor"], "dimension": q["dimension"],
+            "query_text": q["query_text"], "language": q["language"],
+            "round": q["round"], "ts": q["created_at"]})}
+        yield {"event": "query_hit", "data": json.dumps({
+            "query_text": q["query_text"], "hit_count": q["hit_count"],
+            "round": q["round"], "ts": q["created_at"]})}
+
+    # (2) source(来源卡):evidence 无 round 列 → round 默认 0;只发卡片字段,不发 content 全文;
+    #     不含 provider/confidence(反幻觉 §1.5)。
+    for ev in repo.list_evidence(conn, run_id):
+        yield {"event": "source", "data": json.dumps({
+            "evidence_id": ev.id, "competitor": ev.competitor, "dimension": ev.dimension,
+            "source_title": ev.source_title, "source_url": ev.source_url,
+            "language": ev.language, "fetched_at": ev.fetched_at,
+            "round": 0, "ts": ev.fetched_at})}
+
+    # (3) cell_row(矩阵逐维)+ (4) verdict_recheck(三色):从 curated analysis 重建。
+    analysis = repo.get_analysis(conn, run_id)
+    if analysis is not None:
+        present_dims: set[str] = set()
+        cell_verdicts: list[dict] = []
+        n_supported = 0
+        n_partial = 0
+        for row in analysis.comparison:
+            present_dims.add(row.dimension)
+            yield {"event": "cell_row", "data": json.dumps({
+                "dimension": row.dimension, "status": "ok",
+                "cells": [{
+                    "competitor": cell.competitor,
+                    "value_type": cell.value_type,
+                    "value": cell.value,
+                    "evidence_refs": [{"evidence_id": r.evidence_id, "quote": r.quote}
+                                      for r in cell.evidence_refs],
+                } for cell in row.cells],
+                "ts": _now()})}
+            for cell in row.cells:
+                cell_verdicts.append({
+                    "dimension": row.dimension, "competitor": cell.competitor,
+                    "support_verdict": cell.support_verdict})
+                if cell.support_verdict == "supported":
+                    n_supported += 1
+                elif cell.support_verdict == "partial":
+                    n_partial += 1
+        # 请求维度但 analysis 无 row(无证据/失败)→ 发 status="empty",让 PlanRail 刷新后显
+        # 「已知空」而非永远 todo。不可区分 empty/failed → 统一 empty(不伪造 failed)。
+        run = repo.get_run(conn, run_id)
+        for dim in (run["dimensions"] if run else []):
+            if dim not in present_dims:
+                yield {"event": "cell_row", "data": json.dumps({
+                    "dimension": dim, "status": "empty", "cells": [], "ts": _now()})}
+        dropped = [{"dimension": d["dimension"], "competitor": d["competitor"],
+                    "detail": d["detail"]}
+                   for d in repo.list_curation_drops(conn, run_id)
+                   if d["scope"] == "cell"]
+        # downgraded = partial cell 子集(对齐 live 契约);C-D6:无 decision_verdicts。
+        downgraded = [cv for cv in cell_verdicts if cv["support_verdict"] == "partial"]
+        yield {"event": "verdict_recheck", "data": json.dumps({
+            "cell_verdicts": cell_verdicts,
+            "dropped": dropped,
+            "downgraded": downgraded,
+            "summary": {"supported": n_supported, "partial": n_partial,
+                        "dropped": len(dropped)},
+            "ts": _now()})}
+
+    # (5) 合成终态 qc node 注入真 retryCount(让「自我纠错 N 次 / N 轮」replay 显真值而非恒 0)。
+    #     仅当 qc_result 存在才发(空 / 早失败 run 不发,保既有空-run 测试)。
+    qc_res = repo.get_qc_result(conn, run_id)
+    if qc_res is not None:
+        max_round = max((q["round"] for q in queries), default=0)
+        run_row = repo.get_run(conn, run_id)
+        yield {"event": "node", "data": json.dumps({
+            "node": "qc",
+            "summary": {"node": "qc", "verdict": qc_res.verdict,
+                        "issues": len(qc_res.issues), "issue_types": {},
+                        "retry_count": max_round,
+                        "degraded": bool(run_row["degraded"]) if run_row else False},
+            "ts": _now()})}
+
     for t in repo.list_trace(conn, run_id):
         # 与 live 流 'node' event 同形状 `{node, summary:{...}, ts}`,前端可用同一
         # 解析路径处理 live + replay(context7 调研:sse-starlette 不强 opinion event
