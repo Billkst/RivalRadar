@@ -11,12 +11,9 @@ export type AgentId = 'collector' | 'analyst' | 'writer' | 'qc'
 
 export interface AgentDescriptor {
   id: AgentId
-  name: string                       // 中文名:夜枭 / 灵犀 / 灵巧 / 镜湖
-  role: string                       // 中文 role:收集员 / 分析员 / 撰稿员 / 质检员
-  avatar: string                     // SVG sprite path / Lottie path(不带扩展,组件按 state 加 -idle.svg 等)
-  persona: string                    // 一句话人设(speech bubble idle 时 hover / aria-label 显示)
+  name: string                       // 中文 role 名:采集员 / 分析员 / 撰写员 / 质检员
+  role: string                       // 中文 role:采集员 / 分析员 / 撰写员 / 质检员
   capabilities: readonly string[]    // 能力 tag(LiveFeedPanel 标签 / DAG 节点 label)
-  workspace_seat: readonly [number, number]  // 2x2 office 工位坐标 (col, row),[0,0]=左上
 }
 
 export interface AgentTeam {

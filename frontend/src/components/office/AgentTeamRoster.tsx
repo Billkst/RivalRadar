@@ -88,9 +88,9 @@ export function AgentTeamRoster() {
                 </div>
                 <div
                   className="truncate text-[10px] text-text-muted"
-                  title={agent.persona}
+                  title={agent.role}
                 >
-                  {agent.persona}
+                  {agent.role}
                 </div>
                 <span
                   className="mt-1 inline-block rounded px-1.5 py-0.5 text-[10px] font-medium"
