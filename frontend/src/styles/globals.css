@@ -70,6 +70,11 @@
   --text-faint: #9aa29c;
   --accent-deep: #0b574d;
   --accent-line: #bcd9d2;
+  /* v-* alias 到 verdict 三色(后者已 alias --success/--warning/--error,自动跟随
+     dark,无需 .dark 重复)。工作台来源卡 / 时间轴 / 重试环用 var(--v-sup) 等。 */
+  --v-sup: var(--verdict-supported);
+  --v-par: var(--verdict-partial);
+  --v-uns: var(--verdict-unsupported);
   --v-sup-soft: #e2efe7;
   --v-par-soft: #f6eedb;
   --v-uns-soft: #f4e1e0;
