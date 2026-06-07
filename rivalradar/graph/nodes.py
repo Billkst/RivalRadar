@@ -89,6 +89,15 @@ def _make_ticker(
     return tick
 
 
+def _collect_round(state: dict) -> int:
+    """采集轮次(spec §5.1 codex [P1] 防造假):首轮 qc_result 为 None → 0;retry 轮由
+    qc_result 存在性推导(第一次 retry 时 retry_count 仍为 0,qc 节点首轮不 +1),故
+    round = retry_count + 1。不能直接用 retry_count(会把第一次 retry 误标 round 0)。"""
+    if state.get("qc_result") is None:
+        return 0
+    return int(state.get("retry_count", 0)) + 1
+
+
 def make_collect_node(*, conn, provider, official_domains, max_results: int = 5):
     """采集节点:首遍全量采;retry 时按 qc issues 只补缺口 + broaden 广搜。
     只 insert 真新增(对 state 已有 id 去重),证据 dict 由 reducer 累加去重。"""
