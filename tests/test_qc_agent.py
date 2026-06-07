@@ -226,7 +226,7 @@ def test_check_entailment_comparison_only_skips_profile_conclusions():
     issues = check_entailment(analysis, [_ev("e1"), _ev("e2"), _ev("e3")],
                               comparison_only=True, client=client, model="m")
     assert len(issues) == 1
-    assert issues[0].detail.startswith("证据不支撑结论(对比:")
+    assert issues[0].detail.startswith("证据不支撑结论:")
 
 
 def test_check_entailment_comparison_only_with_dimensions_production_path():
@@ -592,3 +592,35 @@ def test_curate_returns_two_tuple_unchanged_signature(monkeypatch):
                                 dimensions=("pricing",), client=None, model="m")
     curated, dropped = res                        # 二元解包不抛
     assert isinstance(dropped, list)
+
+
+# ── Task 6: check_entailment 重写 / check_decision_entailment 三级 / curate_decisions 回写 ──
+def test_check_entailment_partial_not_an_issue(monkeypatch):
+    """partial 不再算 hallucination issue(只 unsupported 算);守策展人 + 不误触 retry。"""
+    import rivalradar.agents.qc as qcmod
+    monkeypatch.setattr(qcmod, "_judge_comparison_verdicts",
+                        lambda *a, **k: {("Notion", "pricing"): qcmod.EntailmentVerdict(verdict="partial")})
+    issues = qcmod.check_entailment(_analysis_with_cell(dim="pricing"), [_ev("e1", "pricing")],
+                                    dimensions=("pricing",), comparison_only=True, client=None, model="m")
+    assert issues == []                              # partial 不产 issue
+
+
+def test_check_entailment_unsupported_is_issue(monkeypatch):
+    import rivalradar.agents.qc as qcmod
+    monkeypatch.setattr(qcmod, "_judge_comparison_verdicts",
+                        lambda *a, **k: {("Notion", "pricing"): qcmod.EntailmentVerdict(verdict="unsupported")})
+    issues = qcmod.check_entailment(_analysis_with_cell(dim="pricing"), [_ev("e1", "pricing")],
+                                    dimensions=("pricing",), comparison_only=True, client=None, model="m")
+    assert len(issues) == 1 and issues[0].problem_type == "hallucination"
+
+
+def test_curate_decisions_writes_back_verdict(monkeypatch):
+    import json
+    import rivalradar.agents.qc as qcmod
+    from rivalradar.schema.models import Decision, EvidenceRef
+    d = Decision(stance="建议采用", action="A", horizon="短期", risk_reversibility="可逆",
+                 risk_cost="低", why="w", evidence_refs=[EvidenceRef(evidence_id="e1", quote="q")])
+    client = _FakeClient([json.dumps({"verdict": "partial", "reason": "旁证"})])
+    kept, dropped = qcmod.curate_decisions([d], [_ev("e1", "pricing")], client=client, model="m")
+    assert len(kept) == 1 and kept[0].support_verdict == "partial"
+    assert dropped == []

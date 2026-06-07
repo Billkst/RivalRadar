@@ -675,7 +675,7 @@ class _DecCompletions:
     不能再按 call-order 派发 verdict(否则"留我/丢我"会随机错配)。entail_map 给定时,
     蕴含调用按 prompt 里的决策 action 内容键匹配(顺序无关、线程安全);generate 调用仍走
     order-index。entail_map=None 时退回纯 order-index(0/1 个蕴含调用的老测试不受影响)。"""
-    _ENTAIL_MARK = "判断下列证据是否支撑该决策建议"
+    _ENTAIL_MARK = "判断下列证据对该决策建议的支撑程度"
 
     def __init__(self, payloads, entail_map=None):
         self.payloads = list(payloads); self.calls = 0
