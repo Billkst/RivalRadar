@@ -690,7 +690,8 @@ class _DecCompletions:
             content = ""
         if self.entail_map is not None and self._ENTAIL_MARK in content:
             ok = next((v for a, v in self.entail_map.items() if a in content), True)
-            return _dec_wrap(json.dumps({"supported": bool(ok), "reason": ""}))
+            verdict_str = "supported" if ok else "unsupported"
+            return _dec_wrap(json.dumps({"verdict": verdict_str, "reason": ""}))
         with self._lock:
             p = self.payloads[self.calls]; self.calls += 1
         return _dec_wrap(p)
@@ -708,7 +709,7 @@ def _decision_payload(eid="g1"):
         "evidence_refs": [{"evidence_id": eid, "quote": "q"}], "watch": None}]})
 
 
-_SUPPORTED = json.dumps({"supported": True, "reason": ""})
+_SUPPORTED = json.dumps({"verdict": "supported", "reason": ""})
 
 
 def test_decide_node_generates_qcs_and_persists(conn):

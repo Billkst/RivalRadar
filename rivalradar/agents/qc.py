@@ -8,7 +8,7 @@ from pydantic import BaseModel
 from rivalradar.llm.structured import structured_call
 from rivalradar.schema.models import (
     CONTROLLED_DIMENSIONS, CompetitorAnalysis, Decision, Evidence, EvidenceRef,
-    QCIssue, QCResult, QCVerdict,
+    QCIssue, QCResult, QCVerdict, SupportVerdict,
 )
 
 # 蕴含判定并行度:check_entailment / curate_decisions 逐结论独立调 LLM,线程池并发。
@@ -146,8 +146,51 @@ def check_coverage(
 
 
 class EntailmentVerdict(BaseModel):
-    supported: bool
+    verdict: SupportVerdict = "supported"
     reason: str = ""
+
+
+_ENTAIL_PROMPT = (
+    "判断下列证据对结论的支撑程度,三选一:\n"
+    "- supported:证据直接、充分支撑结论。\n"
+    "- partial:证据相关但不充分(单一来源/旁证/只支撑部分)。\n"
+    "- unsupported:证据不支撑或与结论无关。\n\n"
+    "结论:{text}\n\n证据:\n{quotes}"
+)
+
+
+def _judge_comparison_verdicts(
+    analysis: CompetitorAnalysis, evidence: list[Evidence],
+    *, dimensions: tuple[str, ...] | None = None, comparison_only: bool = True,
+    on_progress: Callable[[str], None] | None = None, client, model,
+) -> dict[tuple[str, str], EntailmentVerdict]:
+    """对每个有引用的 comparison cell 判三级蕴含,返回 {(competitor, dimension): EntailmentVerdict}。
+    每 cell 一次 LLM 调用(合并该 cell 全部 refs 一起判,不逐 ref),并行(GIL 下不同 key 写 dict 安全)。"""
+    idx = {e.id: e for e in evidence}
+    conclusions = [
+        (comp, dim, text, refs)
+        for comp, dim, text, refs in _iter_conclusions(
+            analysis, dimensions=dimensions, comparison_only=comparison_only)
+        if refs
+    ]
+    if not conclusions:
+        return {}
+
+    def _judge(item: tuple[str, str, str, list[EvidenceRef]]) -> tuple[tuple[str, str], EntailmentVerdict]:
+        comp, dim, text, refs = item
+        quotes = []
+        for r in refs:
+            src = idx[r.evidence_id].content if r.evidence_id in idx else ""
+            quotes.append(f"- 引语:{r.quote}\n  证据原文:{src[:600]}")
+        msgs = [{"role": "user", "content": _ENTAIL_PROMPT.format(text=text, quotes="\n".join(quotes))}]
+        v = structured_call(EntailmentVerdict, msgs, client=client, model=model)
+        if on_progress is not None:
+            on_progress(f"质检校验 {comp}·{dim}")
+        return (comp, dim), v
+
+    with cf.ThreadPoolExecutor(max_workers=min(_MAX_ENTAIL_WORKERS, len(conclusions))) as ex:
+        results = list(ex.map(_judge, conclusions))
+    return dict(results)
 
 
 def check_entailment(
@@ -187,7 +230,7 @@ def check_entailment(
         verdict = structured_call(EntailmentVerdict, msgs, client=client, model=model)
         if on_progress is not None:
             on_progress(f"质检校验 {comp}·{dim}")  # 每格判完报一次(94s 静默段 → 逐格亮起)
-        if not verdict.supported:
+        if verdict.verdict == "unsupported":
             return QCIssue(competitor=comp, dimension=dim,
                            problem_type="hallucination",
                            detail=f"证据不支撑结论({text}):{verdict.reason}")
@@ -330,7 +373,7 @@ def check_decision_entailment(
                  f"决策(行动):{d.action}\n理由:{d.why}\n\n证据:\n" + "\n".join(quotes)}]
         verdict = structured_call(EntailmentVerdict, msgs, client=client, model=model)
         calls += 1
-        if not verdict.supported:
+        if verdict.verdict == "unsupported":
             issues.append(QCIssue(competitor="*", dimension="decision",
                                   problem_type="hallucination",
                                   detail=f"证据不支撑决策({d.action}):{verdict.reason}"))
@@ -366,7 +409,8 @@ def curate_decisions(
                  "判断下列证据是否支撑该决策建议。supported=true 表示证据确实支撑该建议的"
                  "行动与理由;false 表示不支撑或无关。\n\n"
                  f"决策(行动):{d.action}\n理由:{d.why}\n\n证据:\n" + "\n".join(quotes)}]
-        return structured_call(EntailmentVerdict, msgs, client=client, model=model).supported
+        v = structured_call(EntailmentVerdict, msgs, client=client, model=model)
+        return v.verdict != "unsupported"
 
     # ex.map 保序对齐 to_judge;任一上抛 → 迭代时重新抛出(由 decide 节点捕获机械门 fallback)。
     flags: list[bool] = []
