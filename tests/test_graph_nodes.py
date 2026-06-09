@@ -117,9 +117,11 @@ def test_analyze_node_converts_evidence_and_persists(conn, monkeypatch):
     assert repo.get_analysis(conn, "r1") is not None              # 落库
 
 
-def test_analyze_node_sets_degraded_when_extraction_degrades(conn, monkeypatch):
-    # silent-failure 修复端到端:analyze 把降级 label 填进 degraded_sink → 节点置 run 级
-    # degraded(out["degraded"]=True)+ trace output_summary 含降级 marker(降级必可见)。
+def test_analyze_node_profile_failure_does_not_degrade_run(conn, monkeypatch):
+    # [[qc-curator-not-judge]] 回归(真 run run_3073ba01facb):profile 辅助项(features/
+    # pricing/personas/swot)抽取降级**不**置 run 级 degraded —— 它们不进对比矩阵/决策/请求
+    # 维度,用户界面看不到。一个 SWOT 截断曾把 113 证据/满矩阵/QC pass 的健康 run 误标降级。
+    # trace output_summary 仍折进降级 marker(观测可见,不静默)。
     import rivalradar.graph.nodes as nodes_mod
     from rivalradar.schema.models import (
         CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
@@ -129,7 +131,7 @@ def test_analyze_node_sets_degraded_when_extraction_degrades(conn, monkeypatch):
 
     def _degrading_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         if degraded_sink is not None:
-            degraded_sink.append("Notion.features")  # 模拟单项抽取降级
+            degraded_sink.append("Notion.swot")  # profile 辅助项抽取降级(用户不可见)
         return fake
     monkeypatch.setattr(nodes_mod, "analyze", _degrading_analyze)
     repo.create_run(conn, "r1", ["Notion"], ["pricing"])
@@ -137,10 +139,35 @@ def test_analyze_node_sets_degraded_when_extraction_degrades(conn, monkeypatch):
     ev = [{"id": "e1", "competitor": "Notion", "dimension": "pricing", "content": "c",
            "source_url": "u", "source_title": "t", "language": "en", "fetched_at": "t0"}]
     out = node({"competitors": ["Notion"], "evidence": ev}, _CFG)
-    assert out.get("degraded") is True                               # run 级 degraded 置位
+    assert out.get("degraded") is not True                           # profile 项失败不污染整 run
     traces = repo.list_trace(conn, "r1")
     analyze_trace = [t for t in traces if t["node"] == "analyze"][-1]
-    assert "降级" in analyze_trace["output_summary"]                # trace 含降级 marker(可见)
+    assert "降级" in analyze_trace["output_summary"]                # trace 仍含降级 marker(观测可见)
+
+
+def test_analyze_node_comparison_failure_degrades_run(conn, monkeypatch):
+    # 失败路径对照:影响用户可见产出(对比矩阵 cell)的降级**才**置 run 级 degraded(降级必可见)。
+    import rivalradar.graph.nodes as nodes_mod
+    from rivalradar.schema.models import (
+        CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
+    )
+    fake = CompetitorAnalysis(competitors=[CompetitorProfile(
+        name="Notion", pricing=PricingModel(model_type="未知"), swot=SWOT())], comparison=[])
+
+    def _degrading_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
+        if degraded_sink is not None:
+            degraded_sink.append("comparison.pricing")  # 对比矩阵某维降级(用户可见)
+        return fake
+    monkeypatch.setattr(nodes_mod, "analyze", _degrading_analyze)
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    node = make_analyze_node(conn=conn, client=None, model="m")
+    ev = [{"id": "e1", "competitor": "Notion", "dimension": "pricing", "content": "c",
+           "source_url": "u", "source_title": "t", "language": "en", "fetched_at": "t0"}]
+    out = node({"competitors": ["Notion"], "evidence": ev}, _CFG)
+    assert out.get("degraded") is True                               # 矩阵降级 → run 级 degraded
+    traces = repo.list_trace(conn, "r1")
+    analyze_trace = [t for t in traces if t["node"] == "analyze"][-1]
+    assert "降级" in analyze_trace["output_summary"]
 
 
 def test_analyze_node_retry_reuses_profiles_only_recompares(conn, monkeypatch):

@@ -262,6 +262,19 @@ def test_build_comparison_returns_rows():
     assert rows[0].dimension == "pricing"
 
 
+def test_compare_one_dimension_injects_compare_and_refs_rules():
+    """对比 prompt 必须注入 _COMPARE_RULE(收紧 claim,治真 run「全 partial+空格」)与 _REFS_RULE。
+    两条规则只在 prompt 字符串里 —— 把注入删掉(回退本次收紧)不会让任何打桩 LLM 的测试变红,
+    属 symbol-level silent(真打真 run 才暴露)。这条锁住 prompt 拼接不被静默回退。"""
+    from rivalradar.agents.analyst import _compare_one_dimension, _COMPARE_RULE, _REFS_RULE
+    client = _FakeClient([json.dumps({"rows": []})])
+    _compare_one_dimension("pricing", "Notion, 飞书",
+                           [_ev("e1", "Notion", "pricing")], client=client, model="m")
+    content = client.chat.completions.last_kwargs["messages"][0]["content"]
+    assert _COMPARE_RULE in content   # 本次收紧规则被拼进
+    assert _REFS_RULE in content      # 既有引用纪律未被挤掉
+
+
 def test_build_comparison_degrades_single_dimension_into_sink(monkeypatch):
     """单维对比脆败隔离(post-real-run-6/7 核心卖点):某维 _compare_one_dimension 抛(非
     RunAborted)→ 该维记入 degraded_sink('comparison.{dim}')且被丢弃,其余维照常产出,

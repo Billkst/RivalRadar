@@ -115,6 +115,20 @@ _REFS_RULE = (
     "找不到对应字样的项一律删掉。宁可粗粒度但每条都站得住,不要细粒度而被质检判为不支撑。"
 )
 
+# 对比 cell 专用纪律(真 run 钓出:LLM 把单格写成超出证据的复合大 claim → 质检逐格判 partial/
+# 剔除。例:WPS 定价格混 365 企业版¥ 与 Office 消费版$ 两个产品 + 塞「不到平均价 31%」「整体
+# 采购价仅为 A+B+C」等派生营销数字 → 证据只支撑部分 → partial)。收紧上游让 claim 落在证据能
+# 全撑的范围内,supported 升、剔除降、矩阵更准更可比。**不动质检防虚构闸**(红线)。
+_COMPARE_RULE = (
+    "对比 cell 写作纪律(让每格都站得住、可横向比):\n"
+    "1. 每格围绕【同一产品/版本线】写一个聚焦、可横向对比的核心事实;证据里若混了同品牌多个"
+    "产品(如企业版 vs 消费版、国内版 vs 海外版、按年 vs 按月),只取与本竞品对比最相关的一种,"
+    "**绝不把多个产品/口径混进同一格**(混写必被质检判只支撑部分)。\n"
+    "2. **只**陈述证据原文直接给出的事实;严禁写证据未明示的派生/推断数字或营销话术——"
+    "如「不到同类平均价的 X%」「整体采购价仅为 A+B+C」「性价比最高」「行业领先」等,一律删。\n"
+    "3. value 简洁、同口径、可比(一句话或一组同单位数字),不要把多条事实堆成长段。"
+)
+
 
 def extract_features(evidence: list[Evidence], competitor: str, *, client, model) -> list[FeatureItem]:
     """从证据抽取竞品功能项,每条挂 evidence_refs。"""
@@ -213,7 +227,7 @@ def _compare_one_dimension(
         return None  # 该维无证据 → 不产该行(下游显「—」+ 覆盖说明)
     block = build_evidence_block(dim_ev)
     msgs = [{"role": "user", "content":
-             f"{_REFS_RULE}\n\n对竞品 [{names}] **只在维度「{dimension}」上**做横向对比。"
+             f"{_REFS_RULE}\n\n{_COMPARE_RULE}\n\n对竞品 [{names}] **只在维度「{dimension}」上**做横向对比。"
              f"为每个竞品产一个 cell,标 value_type(bool/enum/number/quote_text)与 value,挂 evidence_refs。"
              f"\n\n证据:\n{block}"}]
     rows = structured_call(ComparisonExtraction, msgs, client=client, model=model).rows

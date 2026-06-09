@@ -259,7 +259,12 @@ def make_analyze_node(*, conn, client, model):
                                     f"{len(analysis.comparison)} rows{degraded_note}",
                      latency_ms=int((time.monotonic() - t0) * 1000))
         out: dict = {"analysis": analysis.model_dump()}
-        if degraded_sink:
+        # 仅"影响用户可见产出(对比矩阵 cell)"的降级才置 run 级 degraded。profile 辅助项
+        # (features/pricing/personas/swot)抽取失败只折进上面的 trace degraded_note(仍可见),
+        # **不**污染整 run —— 它们不进对比矩阵、不进决策、不是请求维度,用户界面根本看不到。
+        # [[qc-curator-not-judge]]:用户看不到的边角字段失败不该给整份报告盖降级章。真 run
+        # run_3073ba01facb 钓出:钉钉一个 SWOT 截断把 113 证据/满矩阵/QC pass 的健康 run 误标降级。
+        if any(d.startswith("comparison.") for d in degraded_sink):
             out["degraded"] = True  # qc_node read-then-OR 保 sticky 到 finalize
         return out
     return analyze_node
