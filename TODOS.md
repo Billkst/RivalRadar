@@ -59,10 +59,6 @@
 
 ## QC + Agents
 
-### `check_entailment` 多竞品并行/抽样降本
-**Priority:** P3
-**详情:** spec §13 ⑤ 必办项,Lane E plan 含 TODO(`rivalradar/graph/nodes.py:101` 注释)。当前 `check_entailment` 调用数 = 结论数 × 竞品数,N 个竞品 × M 个 pricing 维度 → N × M 次 LLM 调用。考虑:① 并行(`asyncio.gather` over chunks);② 抽样(每竞品抽 K 个结论)。Day-4 真跑大数据集再优化。
-
 ### LLM 输出 `quote` 字段未做 verbatim 校验
 **Priority:** P3
 **详情:** `check_traceability` 只验 `evidence_id` 存在,不校验 `quote` 是否真在 `evidence.content` 中(adversarial opus 揪到)。LLM 可绑真 `evidence_id` 但伪造 `quote`。修法:`check_traceability` 内加 `quote in evidence.content` 子串校验 — flag 为 `missing_evidence` if absent。低概率,Day-4。
@@ -195,6 +191,7 @@
 
 ## Completed
 
+- `check_entailment` 逐 cell 并行降本(`qc.py _judge_comparison_verdicts` 用 `ThreadPoolExecutor` + `ex.map`,N×M 蕴含调用并发)— ① 并行已落地;② 抽样未做(并行已够,按需再加)— **Completed:** v0.6.0.0 (2026-06-09)
 - Writer v2 — `generate_insight` 3 段 schema-encoded(market_context / differentiation_thesis / actionable_takeaway)替代 v1 单段 summary;rubric v1 真打两轮 18.5/30 → 24/30 验证(距 ref-01 仅 2 分);references/ 加 4 份中文 SaaS reference baseline + Round 1/2 evidence — **Completed:** v0.3.0.0 (2026-05-28)
 - pipeline graceful skip(`_run_query_safe` try/except + 返 []+ failed_count 日志)— 单 Tavily query 60s timeout 不再 abort 整轮 — **Completed:** v0.3.0.0 (2026-05-28)
 - SDK 调用 timeout — `structured_call` Doubao SDK 90s timeout(基于 production payload 35-70s 校准 + Clash 抖动 headroom)+ `APITimeoutError/APIConnectionError/APIError` 入 retry 循环 + 封顶 `StructuredCallError` 显式抛 — **Completed:** v0.3.0.0 (2026-05-28)

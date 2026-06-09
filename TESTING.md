@@ -6,7 +6,7 @@
 .venv/bin/python -m pytest
 ```
 
-198 个测试,约 7 秒。无任何外部依赖(全部 mock)。
+401 个测试,约 14 秒。无任何外部依赖(全部 mock)。
 
 ```bash
 # 只跑某个模块
@@ -36,7 +36,7 @@
 tests/
   # 配置与基础设施
   test_config.py              # 环境变量读取,KEY 纪律 bool 检查
-  test_db.py                  # SQLite 5 表 schema + repository CRUD + 复合 PK
+  test_db.py                  # SQLite 12 表 schema + repository CRUD + 复合 PK
   test_checkpointer.py        # SqliteSaver checkpointer 工厂
 
   # LLM 层
@@ -69,6 +69,19 @@ tests/
   test_api_reads.py           # evidence / analysis / report / trace 端点
   test_api_annotations.py     # POST /annotations + run_id 404 校验
   test_api_concurrent.py      # WAL 并发读写安全
+  test_api_cancel.py          # POST /run/:id/cancel 取消路径
+
+  # v0.6 过程可视化 / 三级佐证 / 技能子系统
+  test_queries_repo.py        # queries 表 repository(真检索词 + 命中数)
+  test_curation_drops_repo.py # curation_drops 策展丢弃记录(三级佐证)
+  test_collect_node_emit.py   # 采集节点 SSE emit(query / source / evidence_delta)
+  test_sse_schemas.py         # SSE 事件各类型 payload Pydantic schema
+  test_replay_parity.py       # replay 与真 run 富过程事件等价
+  test_agent_skills.py        # agent_skills 表 + REST 技能目录子系统
+  test_runcontrol.py          # RunControl 墙钟预算 + 协作式取消
+  test_evals.py               # LLM 输出质量评测框架(可溯源 / 反套话门)
+
+  # (以上为代表性列举;tests/ 实际共 43 个 test_*.py)
 ```
 
 ---
@@ -142,7 +155,7 @@ spike 文件命名:如 `spikes/spike_doubao_e2e.py`。结果记录在 `spikes/SP
 
 见 [`TODOS.md`](TODOS.md) 中"测试 / 质量 / 评测"节。主要:
 
-- **eval 框架**:LLM 输出质量自动评测(当前靠人工看 spike 结果)
 - **高强度并发写写**:`PRAGMA busy_timeout` 未设,高强度争用会 `OperationalError`
-- **SDK timeout 路径**:Tavily/Exa/Doubao 超时映射成 sanitized error event 未覆盖
-- **Lane F 前端 E2E**:React + SSE 集成测试,待 Lane F 实现后补
+- **前端 E2E**:React + SSE 集成测试(实时工作台 / 决策座舱)仍无 E2E 框架
+
+> 已闭合:eval 框架(`test_evals.py`:决策可溯源 / 反套话机械门)、SDK 超时 / 墙钟(`test_runcontrol.py` 墙钟预算 + 取消、`test_structured_call.py` SDK 错误路径)。
