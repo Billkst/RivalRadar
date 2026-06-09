@@ -6,7 +6,7 @@
 .venv/bin/python -m pytest
 ```
 
-401 个测试,约 14 秒。无任何外部依赖(全部 mock)。
+402 个测试,约 13 秒。无任何外部依赖(全部 mock)。
 
 ```bash
 # 只跑某个模块
@@ -36,7 +36,7 @@
 tests/
   # 配置与基础设施
   test_config.py              # 环境变量读取,KEY 纪律 bool 检查
-  test_db.py                  # SQLite 12 表 schema + repository CRUD + 复合 PK
+  test_db.py                  # SQLite/Postgres schema + repository CRUD + 复合 PK + _RUN_SCOPED_TABLES 完整性
   test_checkpointer.py        # SqliteSaver checkpointer 工厂
 
   # LLM 层
@@ -81,7 +81,7 @@ tests/
   test_runcontrol.py          # RunControl 墙钟预算 + 协作式取消
   test_evals.py               # LLM 输出质量评测框架(可溯源 / 反套话门)
 
-  # (以上为代表性列举;tests/ 实际共 43 个 test_*.py)
+  # (以上为代表性列举;tests/ 实际共 44 个 test_*.py)
 ```
 
 ---
@@ -148,6 +148,8 @@ def test_rerun_same_url_no_integrity_error(tmp_path):
 | `spikes/` | 真打外部 API,验证集成点 | 否(手动跑) |
 
 spike 文件命名:如 `spikes/spike_doubao_e2e.py`。结果记录在 `spikes/SPIKE_RESULTS.md`。
+
+**Postgres 方言路径**:repository 的方言统一(`ON CONFLICT`)在 SQLite 上由 402 单测覆盖;Postgres 专属分支(`RETURNING id` / `fetched_at,id` 排序 / dict_row / 失败即 rollback)无法在无 PG server 的 CI 里单测,改由 `spikes/spike_supabase_crud.py` 真打 Supabase 验证(9 段 CRUD + 事务污染恢复,首尾自清理)。
 
 ---
 
