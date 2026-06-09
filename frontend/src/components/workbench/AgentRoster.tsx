@@ -11,7 +11,8 @@ import { useRunStore } from '@/stores/runStore'
 export function AgentRoster() {
   const narrative = useRunStore((s) => s.perAgentNarrative) // agent_id → 进度摘要[]
   return (
-    <div className="grid grid-cols-2 gap-[9px] mb-1.5">
+    // 顶部 run 卡片右半区的研究团队:窄屏 2 列、宽屏 4 列一字排开(填满原本空白的右半边)。
+    <div className="grid grid-cols-2 gap-2 md:grid-cols-4">
       {ROLE_ORDER.map((id) => {
         const lines = narrative[id]
         const task = lines && lines.length ? lines[lines.length - 1] : undefined

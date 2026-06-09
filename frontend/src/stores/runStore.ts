@@ -106,6 +106,8 @@ interface RunStore {
   perAgentNarrative: Record<string, string[]>      // agent_id → progress summaries
   nodeStartTs: Partial<Record<NodeName, string>>   // node → 第一次 progress event ts
   nodeEndTs: Partial<Record<NodeName, string>>     // node → 最后一次 node event ts
+  runStartTs: string | null                        // run 开始时刻(SSE start.ts)— StatusBar 计时器
+  runEndTs: string | null                          // run 结束时刻(SSE done.ts)— 终态显总耗时
 
   // v3 招牌时刻 #3(Epic 4.5):forward handoff queue。
   // node done 时入队 → VirtualOfficeView 渲染队头 → onComplete 调 dequeueHandoff。
@@ -118,7 +120,6 @@ interface RunStore {
 
   // Plan C 工作台切片(SSE 派生)。消费在 Epic 5;此处仅承接数据。
   queries: SSEQueryData[]                          // 检索台:逐条查询词(prepend 最新在前)
-  queryHits: Record<string, number>               // query_text → hit_count
   sources: SSESourceData[]                         // 来源卡(到达序)
   cellRows: Record<string, SSECellRowData>         // dimension → 该维 cell_row(逐维填,乱序安全)
   evidenceDeltas: SSEEvidenceDeltaData[]           // retry 增量(重试环)
@@ -149,7 +150,6 @@ const initialNodeTs = (): Partial<Record<NodeName, string>> => ({})
 /** Plan C 工作台切片初值(每次 reset / start 前清,防跨 run 污染)。 */
 const initialPlanCSlices = () => ({
   queries: [] as SSEQueryData[],
-  queryHits: {} as Record<string, number>,
   sources: [] as SSESourceData[],
   cellRows: {} as Record<string, SSECellRowData>,
   evidenceDeltas: [] as SSEEvidenceDeltaData[],
@@ -185,6 +185,8 @@ export const useRunStore = create<RunStore>((set, get) => ({
   perAgentNarrative: initialPerAgentNarrative(),
   nodeStartTs: initialNodeTs(),
   nodeEndTs: initialNodeTs(),
+  runStartTs: null,
+  runEndTs: null,
   handoffQueue: [],
   writerReport: '',
   ...initialPlanCSlices(),
@@ -204,6 +206,8 @@ export const useRunStore = create<RunStore>((set, get) => ({
       perAgentNarrative: initialPerAgentNarrative(),
       nodeStartTs: initialNodeTs(),
       nodeEndTs: initialNodeTs(),
+      runStartTs: null,
+      runEndTs: null,
       handoffQueue: [],
       writerReport: '',
       ...initialPlanCSlices(),
@@ -236,8 +240,8 @@ export const useRunStore = create<RunStore>((set, get) => ({
       return
     }
     if (ev.type === 'query_hit') {
-      const { query_text, hit_count } = ev.data
-      set((s) => ({ queryHits: { ...s.queryHits, [query_text]: hit_count } }))
+      // per-query 命中数的唯一消费者(SearchStation)已随实时引擎重构删除 → 直接丢弃。
+      // 仍需早 return:query_hit 是高频事件,不可落入 events[](同 query/chunk 设计)。
       return
     }
     if (ev.type === 'source') {
@@ -289,6 +293,10 @@ export const useRunStore = create<RunStore>((set, get) => ({
         perAgentNarrative: initialPerAgentNarrative(),
         nodeStartTs: initialNodeTs(),
         nodeEndTs: initialNodeTs(),
+        // 计时器起点(start event 权威)。replay 的 start/done 都是服务端 _now()(非真实历史
+        // 时长,仅相差回放秒级)→ runStartTs 置 null,终态不显「总耗时」(显错数字不如不显)。
+        runStartTs: ev.data.replay ? null : ev.data.ts,
+        runEndTs: null,
         // Epic 4.5 漏了 handoffQueue reset(start event handler 与 startRun
         // 是两套 reset 路径,startRun 在 SSE 连前调,start event 在第一个 SSE
         // 包到达时调 — 都该清 queue 防 stale state)。同时加 writerReport reset。
@@ -356,6 +364,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
         events,
         status: finalStatus,
         degraded: state.degraded || finalStatus === 'degraded',
+        runEndTs: ev.data.ts,   // 计时器终点 → StatusBar 显总耗时
       })
       return
     }
@@ -477,6 +486,8 @@ export const useRunStore = create<RunStore>((set, get) => ({
       perAgentNarrative: initialPerAgentNarrative(),
       nodeStartTs: initialNodeTs(),
       nodeEndTs: initialNodeTs(),
+      runStartTs: null,
+      runEndTs: null,
       handoffQueue: [],
       writerReport: '',
       ...initialPlanCSlices(),

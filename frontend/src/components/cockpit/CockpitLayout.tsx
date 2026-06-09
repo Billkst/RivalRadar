@@ -23,12 +23,18 @@ interface CockpitLayoutProps {
   /** StatusBar 决策派生指标(Epic 4/5 喂入;未就绪显 "—")。 */
   decisionCount?: number
   riskCount?: number
+  /** 实时引擎分析阶段「矩阵 N/total 维」进度条分母(run.dimensions.length)。 */
+  totalDimensions?: number
 }
 
 export function CockpitLayout({
-  children, runId, decisionCount, riskCount,
+  children, runId, decisionCount, riskCount, totalDimensions,
 }: CockpitLayoutProps) {
   const status = useRunStore((s) => s.status)
+  // 收窄摘要态的「查看工作 ↗」展开:在此持有,展开时右列同步加宽(原先 expanded 在
+  // ResearcherWorkbench 内,grid 宽度看不到它 → 终态展开时实时内容被挤进 280px,看不清)。
+  const [expanded, setExpanded] = React.useState(false)
+  React.useEffect(() => setExpanded(false), [runId]) // 切 run 复位
 
   // 技能子系统:首次挂载加载一次(GET /agent-skills,空表 seed);loaded 守卫防重复。
   React.useEffect(() => {
@@ -37,14 +43,16 @@ export function CockpitLayout({
     }
   }, [])
 
-  const terminal =
-    status === 'done' ||
-    status === 'degraded' ||
-    status === 'insufficient_evidence' ||
-    status === 'failed' ||
-    status === 'cancelled'
+  // 有决策产出的终态(done/degraded/insufficient)默认收窄成摘要,聚焦决策面;running 与
+  // 中断态(failed/cancelled,无决策、实时内容才是主角)保持完整实时内容。展开则一律加宽。
+  const collapsibleTerminal =
+    status === 'done' || status === 'degraded' || status === 'insufficient_evidence'
+  const showFull = !collapsibleTerminal || expanded
   return (
-    <div className="flex h-[100dvh] flex-col">
+    // h-full + min-h-0:填满父级(RunPage flex-1 槽)而非强占整视口高度。原 h-[100dvh] 嵌在
+    // 「返回行 + RunSummary 卡」下方的可滚动 main 里 → 文档高 = 卡片 + 100dvh > 一屏 → 页面滚出
+    // 一大片空 cockpit 列背景(#6 白区)。改填满父级后,卡片 + cockpit 正好一屏,列内部各自滚。
+    <div className="flex h-full min-h-0 flex-col">
       <StatusBar
         runId={runId}
         decisionCount={decisionCount}
@@ -53,14 +61,21 @@ export function CockpitLayout({
       <div
         className={
           'grid min-h-0 flex-1 grid-cols-1 ' +
-          (terminal ? 'lg:grid-cols-[1fr_280px]' : 'lg:grid-cols-[1fr_472px]')
+          (showFull ? 'lg:grid-cols-[1fr_600px]' : 'lg:grid-cols-[1fr_280px]')
         }
       >
-        <main aria-label="决策与证据" className="min-w-0 overflow-y-auto bg-bg px-6 pb-14 pt-5">
+        {/* relative:成为决策面内绝对定位后代(VerdictDot sr-only span / pill popover 等)的
+            包含块,使其被本列 overflow-y-auto 裁剪,而非逃逸到 Layout 外层 main 把其 scrollHeight
+            撑高 → 外层凭空多一条可滚白区(#6 根因,/browse 实测 3088→844)。 */}
+        <main aria-label="决策与证据" className="relative min-w-0 overflow-y-auto bg-bg px-6 pb-14 pt-5">
           {children}
         </main>
         <aside className="relative flex min-w-0 flex-col overflow-hidden border-l border-border bg-surface-subtle">
-          <ResearcherWorkbench collapsed={terminal} />
+          <ResearcherWorkbench
+            collapsed={!showFull}
+            onExpand={() => setExpanded(true)}
+            totalDimensions={totalDimensions}
+          />
         </aside>
       </div>
       {/* 抽屉导航栈(agent / 证据 / 步骤)— 全局挂一次,由 drawerStore 驱动 */}

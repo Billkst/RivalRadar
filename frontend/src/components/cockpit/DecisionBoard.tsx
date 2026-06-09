@@ -11,7 +11,7 @@
  *    最弱证据 verdict + 决策后果(可逆/成本),framing 为结构性警示,**不虚构后端字段**。
  *    (未来可在 Decision 加 LLM 生成的 counterargument;见交付说明。)
  *
- * 状态(§12.4):loading skeleton / 0 决策解释性空卡 / degraded 每条 caveat /
+ * 状态(§12.4):loading skeleton / 0 决策解释性空卡 / 每条 caveat 按各自 support_verdict /
  *              通用浏览 收敛语气 banner。insufficient_evidence 处境卡在 DecisionSurface 处理。
  */
 import * as React from 'react'
@@ -106,22 +106,23 @@ function EvidenceLine({ refItem }: { refItem: EvidenceRef }) {
 function DecisionCard({
   decision,
   index,
-  degraded,
   selected,
   onToggle,
 }: {
   decision: Decision
   index: number
-  degraded: boolean
   selected: boolean
   onToggle: () => void
 }) {
   const best = bestRef(decision.evidence_refs)
+  // caveat / 视觉淡化按**这条决策自己**的 support_verdict 分级,不再吃 run 级 degraded
+  // (真 run 钓出:run 级 degraded 一刀切盖到 supported 决策 →「佐证充分却说证据未达标」自相矛盾)。
+  const weak = decision.support_verdict !== 'supported'
   return (
     <article
       className={`rounded-lg border bg-surface p-4 ${
         selected ? 'border-accent ring-1 ring-accent' : 'border-border'
-      } ${degraded ? 'opacity-90' : ''}`}
+      } ${weak ? 'opacity-90' : ''}`}
     >
       {/* 做什么 */}
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -148,8 +149,13 @@ function DecisionCard({
         </span>
       </div>
 
-      {degraded ? (
-        <p className="mt-2 text-[12px] text-warning">⚠ 本轮证据未完全达标,此建议置信度下降,请谨慎参考。</p>
+      {weak ? (
+        <p className="mt-2 text-[12px] text-warning">
+          ⚠{' '}
+          {decision.support_verdict === 'partial'
+            ? '这条建议部分依据只拿到部分佐证,请结合其他因素判断。'
+            : '这条建议关键依据佐证不足,建议补足证据后再决定。'}
+        </p>
       ) : null}
 
       {/* 为什么 */}
@@ -221,7 +227,6 @@ export function DecisionBoard({
   decisions,
   analysis,
   state,
-  degraded,
   genericContext,
   evidenceCount,
   selectedIdx,
@@ -231,7 +236,6 @@ export function DecisionBoard({
   /** 对比矩阵 analysis(因果桥求交需要 cell evidence ids;running 未就绪 → null)。 */
   analysis: CompetitorAnalysis | null
   state: LoadState
-  degraded: boolean
   genericContext: boolean
   evidenceCount: number
   selectedIdx: number | null
@@ -292,7 +296,6 @@ export function DecisionBoard({
               key={idx}
               decision={d}
               index={idx + 1}
-              degraded={degraded}
               selected={selectedIdx === idx}
               onToggle={() => onSelect(selectedIdx === idx ? null : idx)}
             />

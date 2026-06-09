@@ -31,7 +31,11 @@ export function SelfAuditTrace({ trace, state }: { trace: TraceEntry[] | null; s
     return (
       <section className="space-y-2" aria-label="审计轨迹">
         <SectionTitle>查看工作(审计轨迹)</SectionTitle>
-        <EmptyNote>{state === 'absent' ? '本轮无审计记录。' : '审计轨迹加载失败。'}</EmptyNote>
+        {/* 只有真失败(error=网络/5xx)才说加载失败;加载成功但为空(loaded,如中断 run 未产 trace)
+            或 404(absent)都是"本轮无记录",不是错误(修:空 200 [] 曾被误显「加载失败」)。 */}
+        <EmptyNote>
+          {state === 'error' ? '审计轨迹加载失败(网络或服务异常,可刷新重试)。' : '本轮无审计记录。'}
+        </EmptyNote>
       </section>
     )
   }

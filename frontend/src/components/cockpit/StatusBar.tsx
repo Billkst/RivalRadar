@@ -13,6 +13,7 @@
  */
 import * as React from 'react'
 import { useRunStore } from '@/stores/runStore'
+import { useElapsed } from '@/hooks/useElapsed'
 import { fetchCurationDrops } from '@/lib/api'
 import { formatBeijingDate } from '@/lib/time'
 import { VerdictDot } from '@/components/cockpit/VerdictDot'
@@ -47,6 +48,15 @@ const TERMINAL: ReadonlySet<RunStatus> = new Set<RunStatus>([
 ])
 
 const EMPTY_DROPS: CurationDrop[] = []
+
+/** ms → 紧凑用时:"7s" / "1m20s" / "1h05m"。 */
+function fmtElapsed(ms: number): string {
+  const total = Math.floor(ms / 1000)
+  if (total < 60) return `${total}s`
+  const m = Math.floor(total / 60)
+  if (m < 60) return `${m}m${(total % 60).toString().padStart(2, '0')}s`
+  return `${Math.floor(m / 60)}h${(m % 60).toString().padStart(2, '0')}m`
+}
 
 function Metric({ label, value }: { label: string; value: React.ReactNode }) {
   return (
@@ -111,6 +121,19 @@ export function StatusBar({ runId, decisionCount, riskCount }: StatusBarProps) {
   const degraded = useRunStore((s) => s.degraded)
   const retryCount = useRunStore((s) => s.retryCount)
   const snapshots = useRunStore((s) => s.evidenceCountSnapshots)
+  // 计时器(#1):running 实时走表;终态显总耗时;无 ts(冷 REST 载入)→ 不显,诚实不臆造。
+  const runStartTs = useRunStore((s) => s.runStartTs)
+  const runEndTs = useRunStore((s) => s.runEndTs)
+  // live 走表用客户端墙钟锚点(本 run 首次进 running 的本地时刻),**不**直接用 server runStartTs:
+  // demo 用历史假 ts(2026-05-28),Date.now()-假ts 会显示数百小时;真 live run 客户端锚点 ≈ 真起点。
+  // 终态总耗时用 server ts 差值(demo 用一致的历史假 ts → 时长正确)。replay 的 start/done 都是
+  // _now()(回放秒级,非真实时长)→ runStore 把 replay 的 runStartTs 置 null → 此处 totalMs=null 不显。
+  const [liveStart, setLiveStart] = React.useState<number | null>(null)
+  React.useEffect(() => setLiveStart(null), [runId])
+  React.useEffect(() => {
+    setLiveStart((prev) => (status === 'running' ? prev ?? Date.now() : null))
+  }, [status])
+  const liveElapsed = useElapsed(status === 'running' ? liveStart : null)
   // cell 级真三色汇总(verdict_recheck 实时刷;running 期由 SSE 填,done 后保留最后一次)。
   const verdictSummary = useRunStore((s) => s.verdictSummary)
   // SSE 剔除格 keys(`${dimension}|${competitor}`)—— REST /curation-drops 不可达(demo 无后端)时清单回落它。
@@ -157,6 +180,20 @@ export function StatusBar({ runId, decisionCount, riskCount }: StatusBarProps) {
   const meta = STATUS_META[status] ?? STATUS_META.idle
   const dash = (n: number | undefined) => (typeof n === 'number' ? n : '—')
 
+  // running → 实时走表;终态 → 总耗时;无 ts → 不显(冷 REST 载入,诚实不臆造)。
+  const totalMs =
+    runStartTs && runEndTs
+      ? Math.max(0, new Date(runEndTs).getTime() - new Date(runStartTs).getTime())
+      : null
+  const timer =
+    status === 'running'
+      ? liveStart != null
+        ? { label: '已用时', value: fmtElapsed(liveElapsed) }
+        : null
+      : totalMs != null && totalMs > 0
+        ? { label: '总耗时', value: fmtElapsed(totalMs) }
+        : null
+
   return (
     <header
       className="flex flex-wrap items-center gap-x-3 gap-y-1 rounded-lg border border-border bg-surface px-4 py-2 font-mono text-[13px]"
@@ -169,6 +206,12 @@ export function StatusBar({ runId, decisionCount, riskCount }: StatusBarProps) {
       <Sep />
       <Metric label="已打回" value={`${retryCount} 次`} />
       <Sep />
+      {timer ? (
+        <>
+          <Metric label={timer.label} value={timer.value} />
+          <Sep />
+        </>
+      ) : null}
       <Metric label="最新证据" value={latest ? `${latestDate}（${latest.count} 条）` : '—'} />
       <Sep />
       {/* 证据支持度三色簇(cell 级真算,色盲双编码:颜色 + 形状 ●◐○) */}

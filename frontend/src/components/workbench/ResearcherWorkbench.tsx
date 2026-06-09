@@ -1,38 +1,40 @@
 /**
  * ResearcherWorkbench — 研究员工作台右栏 shell(spec §6.1 2e,Epic 4 Task 12)。
  *
- * 2e §1 DOM:`.engine > .eng-hd(kicker + 状态) + .eng-body(roster + live-pane + timeline)`。
- * 本 shell 只搭区块插槽,各面板在 Epic 5 逐个填实(现为空壳返 null)。
- * collapsed(done 态)→ 收窄摘要条 WorkbenchSummary(Epic 8 Task 27 补全)。
+ * 布局(用户反馈重构):顶部 kicker + **LiveTracker「此刻」追踪卡(常驻,不滚动)** +
+ * 下方滚动区(自我纠错环 + 正序执行时间轴,作历史脊梁)。把「当前在干什么」钉在顶部
+ * 原地刷新 → 用户初始位置不拖动即可看到进度变化;时间轴退化为历史(来源卡折进采集行)。
+ * collapsed(done 收窄态)→ 摘要条 WorkbenchSummary。
  */
-import { useState } from 'react'
-import { AgentRoster } from '@/components/workbench/AgentRoster'
-import { SearchStation } from '@/components/workbench/SearchStation'
-import { SourceCards } from '@/components/workbench/SourceCards'
 import { RetryLoop } from '@/components/workbench/RetryLoop'
-import { ReportStation } from '@/components/workbench/ReportStation'
 import { ExecutionTimeline } from '@/components/workbench/ExecutionTimeline'
+import { LiveTracker } from '@/components/workbench/LiveTracker'
 import { useRunStore } from '@/stores/runStore'
 
-export function ResearcherWorkbench({ collapsed }: { collapsed: boolean }) {
-  const status = useRunStore((s) => s.status)
-  // done 态局部展开:点「查看工作 ↗」临时切回 full workbench(不改 store / layout 宽度)。
-  const [expanded, setExpanded] = useState(false)
-  if (collapsed && !expanded) return <WorkbenchSummary onExpand={() => setExpanded(true)} />
+export function ResearcherWorkbench({
+  collapsed,
+  onExpand,
+  totalDimensions,
+}: {
+  collapsed: boolean
+  /** 收窄摘要态点「查看工作 ↗」→ 由 CockpitLayout 展开(同时把右列加宽)。 */
+  onExpand: () => void
+  /** 分析阶段「矩阵 N/total 维」进度条的分母(run.dimensions.length)。 */
+  totalDimensions?: number
+}) {
+  if (collapsed) return <WorkbenchSummary onExpand={onExpand} />
   return (
     <>
-      <div className="px-[18px] pt-[15px] pb-[13px] border-b border-border bg-surface">
-        <div className="font-mono text-[10px] uppercase tracking-[.5px] text-text-muted">研究团队 · 实时引擎</div>
-        <div className="text-[13px] font-semibold text-text-primary mt-1">{statusLabel(status)}</div>
+      <div className="flex-none border-b border-border bg-surface px-[18px] pb-[10px] pt-[15px]">
+        <div className="font-mono text-[10px] uppercase tracking-[.5px] text-text-muted">实时引擎 · 调研过程</div>
       </div>
-      <div className="flex-1 overflow-y-auto px-[18px] pt-[14px] pb-7">
-        <div className="font-mono text-[10px] uppercase tracking-[.5px] text-text-muted mb-2">研究团队 · 持证员工</div>
-        <AgentRoster />
-        <SearchStation />
-        <SourceCards />
+      {/* 「此刻」追踪卡:钉在顶部常驻,原地刷新,不随下方时间轴滚动。 */}
+      <LiveTracker totalDimensions={totalDimensions} />
+      {/* 历史脊梁:自我纠错环 + 正序执行时间轴。独立滚动区(内容短,通常不溢出;真正的
+          「当前进度」由上方常驻 LiveTracker 承担,故此处不再需要贴底自动跟随)。 */}
+      <div className="min-h-0 flex-1 overflow-y-auto px-[18px] pb-7 pt-3">
         <RetryLoop />
-        <ReportStation />
-        <div className="font-mono text-[10px] uppercase tracking-[.5px] text-text-muted mt-[18px] mb-2">执行时间轴 · 当日</div>
+        <div className="mb-1 mt-[14px] font-mono text-[10px] uppercase tracking-[.5px] text-text-muted">执行时间轴</div>
         <ExecutionTimeline />
       </div>
     </>
@@ -67,16 +69,4 @@ function WorkbenchSummary({ onExpand }: { onExpand: () => void }) {
       </button>
     </div>
   )
-}
-
-function statusLabel(s: string): string {
-  return s === 'running'
-    ? '调研进行中…'
-    : s === 'idle'
-      ? '待启动'
-      : s === 'cancelled'
-        ? '本轮调研已停止'
-        : s === 'failed'
-          ? '本轮调研中断'
-          : '本轮调研完成'
 }

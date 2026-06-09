@@ -23,18 +23,38 @@ function domainOf(url: string): string {
   }
 }
 
-export function SourceCards() {
+export function SourceCards({
+  round,
+  embedded = false,
+  newestFirst = false,
+  limit,
+}: {
+  /** 只显该采集轮的来源(source.round);省略 = 全部。供执行时间轴折叠进采集行复用。 */
+  round?: number
+  /** embedded:去掉「命中来源 · N」标题与上间距,纯卡片列表(嵌进折叠条内 / LiveTracker 采集流)。 */
+  embedded?: boolean
+  /** newestFirst:最新到达的来源在前(LiveTracker 实时流:最新在顶,不滚也可见)。 */
+  newestFirst?: boolean
+  /** limit:最多显示前 N 条(配合 newestFirst = 最新 N 条);省略 = 全部。 */
+  limit?: number
+} = {}) {
   const sources = useRunStore((s) => s.sources)
   const verdicts = useRunStore((s) => s.cellVerdicts)
   const droppedKeys = useRunStore((s) => s.droppedCells)
   const openEvidence = useDrawerStore((s) => s.openEvidence)
-  const list = sources.length ? sources : EMPTY_S
+  const all = sources.length ? sources : EMPTY_S
+  const filtered = round === undefined ? all : all.filter((s) => s.round === round)
+  // newestFirst / limit 在 render body 派生新数组(非 selector,无 zustand 新引用陷阱)。
+  const ordered = newestFirst ? [...filtered].reverse() : filtered
+  const list = limit !== undefined ? ordered.slice(0, limit) : ordered
   if (!list.length) return null
   return (
-    <div className="mt-[18px] flex flex-col gap-[7px]">
-      <div className="font-mono text-[10px] uppercase tracking-[.5px] text-text-muted mb-1">
-        命中来源 · {list.length}
-      </div>
+    <div className={`flex flex-col gap-[7px]${embedded ? '' : ' mt-[18px]'}`}>
+      {!embedded && (
+        <div className="mb-1 font-mono text-[10px] uppercase tracking-[.5px] text-text-muted">
+          命中来源 · {list.length}
+        </div>
+      )}
       {list.map((src) => {
         const key = `${src.dimension}|${src.competitor}`
         const v = verdicts[key] as SupportVerdict | undefined

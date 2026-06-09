@@ -26,7 +26,10 @@ export function EvidenceTimeline({ evidence, state }: { evidence: Evidence[] | n
     return (
       <section className="space-y-2" aria-label="证据时间线">
         <SectionTitle>证据来自哪里</SectionTitle>
-        <EmptyNote>{state === 'absent' ? '本轮无证据记录。' : '证据列表加载失败。'}</EmptyNote>
+        {/* 同 SelfAuditTrace:只有真失败(error)才说加载失败;loaded-空 / 404(absent)= 无记录。 */}
+        <EmptyNote>
+          {state === 'error' ? '证据列表加载失败(网络或服务异常,可刷新重试)。' : '本轮无证据记录。'}
+        </EmptyNote>
       </section>
     )
   }

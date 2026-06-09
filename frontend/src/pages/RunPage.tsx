@@ -10,10 +10,21 @@ import { useRunStore } from '@/stores/runStore'
 import { useCockpitStore } from '@/stores/cockpitStore'
 import type { RunDetail } from '@/types/api'
 import { Button } from '@/components/ui/button'
-import { Card, CardContent, CardHeader, CardTitle } from '@/components/ui/card'
 import { CancelButton } from '@/components/office/CancelButton'
 import { CockpitLayout } from '@/components/cockpit/CockpitLayout'
 import { DecisionSurface } from '@/components/cockpit/DecisionSurface'
+import { AgentRoster } from '@/components/workbench/AgentRoster'
+
+// run 状态 → 头卡状态药丸(● 字符复用已知 tone text-class,不依赖 bg-* token;中文标签不漏英文 enum)。
+const STATUS_PILL: Record<string, { label: string; tone: string }> = {
+  idle: { label: '待开始', tone: 'text-text-muted' },
+  running: { label: '运行中', tone: 'text-accent' },
+  done: { label: '已完成', tone: 'text-success' },
+  insufficient_evidence: { label: '证据不足', tone: 'text-warning' },
+  degraded: { label: '已降级', tone: 'text-warning' },
+  failed: { label: '失败', tone: 'text-error' },
+  cancelled: { label: '已停止', tone: 'text-text-muted' },
+}
 
 /**
  * /run/:run_id — 单 run 详情页(v0.4 证据驾驶舱,Epic 3)。
@@ -103,8 +114,10 @@ export function RunPage() {
       : undefined
 
   return (
-    <div className="space-y-4">
-      <div className="flex items-center justify-between gap-2">
+    // 整页满高 flex 列:返回行 + 概要卡 flex-none,cockpit 占剩余空间(flex-1)。原先 space-y-4
+    // 自然高 + cockpit h-[100dvh] → 文档超一屏滚出白区(#6)。现在卡片 + cockpit 正好一屏。
+    <div className="flex h-full min-h-0 flex-col gap-4">
+      <div className="flex flex-none items-center justify-between gap-2">
         <Button variant="ghost" size="sm" asChild>
           <Link to="/runs" className="gap-1">
             <ArrowLeft className="h-3 w-3" />
@@ -124,70 +137,110 @@ export function RunPage() {
         </div>
       </div>
 
-      <Card>
-        <CardHeader>
-          <CardTitle className="font-mono text-base">{run_id}</CardTitle>
-        </CardHeader>
-        <CardContent className="space-y-2 text-sm">
-          {error && <div className="text-xs text-error">加载失败:{error}</div>}
-          {!error && !run && (
-            <div className="flex items-center gap-2 text-xs text-text-muted">
-              <Loader2 className="h-3 w-3 animate-spin" />
-              加载中…
-            </div>
-          )}
-          {run && (
-            <>
-              <div>
-                <span className="text-xs text-text-muted">竞品:</span>{' '}
-                {run.competitors.map((c, idx) => (
-                  <Link
-                    key={c}
-                    to={`/run/${run_id}/competitor/${idx}`}
-                    className="mr-2 underline-offset-2 hover:underline"
-                  >
-                    {c}
-                  </Link>
-                ))}
+      {/* 紧凑 run 头卡:左 run 元信息,右研究团队工牌(填满原本空白的右半边)。 */}
+      <div className="flex-none rounded-lg border border-border bg-surface p-4">
+        {error && <div className="text-xs text-error">加载失败:{error}</div>}
+        {!error && !run && (
+          <div className="flex items-center gap-2 text-xs text-text-muted">
+            <Loader2 className="h-3 w-3 animate-spin" />
+            加载中…
+          </div>
+        )}
+        {run &&
+          (() => {
+            const ds =
+              storeRunId === run_id && storeStatus !== 'idle' ? storeStatus : run.status
+            const pill = STATUS_PILL[ds] ?? STATUS_PILL.idle
+            return (
+              <div className="flex flex-col gap-5 lg:flex-row lg:items-start lg:justify-between">
+                {/* 左:调研任务身份 —— kicker(对称右侧)+ run_id 标题 + 状态药丸 + 结构化元信息 */}
+                <div className="min-w-0 lg:flex-1">
+                  <div className="font-mono text-[10px] uppercase tracking-[.5px] text-text-muted">
+                    调研任务
+                  </div>
+                  <div className="mt-1.5 flex flex-wrap items-center gap-x-3 gap-y-1.5">
+                    <h1 className="font-mono text-[18px] font-semibold leading-tight text-text-primary">
+                      {run_id}
+                    </h1>
+                    <span className={`inline-flex items-center gap-1 text-[12px] ${pill.tone}`}>
+                      <span aria-hidden>●</span>
+                      {pill.label}
+                    </span>
+                    {run.degraded && (
+                      <span className="rounded bg-warning/15 px-1.5 py-0.5 text-[11px] font-medium text-warning">
+                        降级
+                      </span>
+                    )}
+                  </div>
+                  {/* 结构化标签栅格(8px 节奏,标签 mono muted 对齐,值有呼吸) */}
+                  <dl className="mt-3.5 space-y-2">
+                    <div className="flex gap-3">
+                      <dt className="w-9 flex-none pt-0.5 font-mono text-[10px] uppercase tracking-[.4px] text-text-muted">
+                        竞品
+                      </dt>
+                      <dd className="flex flex-wrap gap-1.5">
+                        {run.competitors.map((c, idx) => (
+                          <Link
+                            key={c}
+                            to={`/run/${run_id}/competitor/${idx}`}
+                            className="rounded bg-surface-subtle px-2 py-0.5 text-[12px] text-text-primary underline-offset-2 hover:text-accent"
+                          >
+                            {c}
+                          </Link>
+                        ))}
+                      </dd>
+                    </div>
+                    <div className="flex gap-3">
+                      <dt className="w-9 flex-none pt-0.5 font-mono text-[10px] uppercase tracking-[.4px] text-text-muted">
+                        维度
+                      </dt>
+                      <dd className="text-[12px] leading-relaxed text-text-muted">
+                        {run.dimensions.map(dimensionLabel).join(' · ')}
+                      </dd>
+                    </div>
+                    <div className="flex gap-3">
+                      <dt className="w-9 flex-none pt-0.5 font-mono text-[10px] uppercase tracking-[.4px] text-text-muted">
+                        创建
+                      </dt>
+                      <dd className="font-mono text-[12px] text-text-muted">
+                        <time title={run.created_at}>{formatBeijing(run.created_at)}</time> 北京时间
+                      </dd>
+                    </div>
+                  </dl>
+                </div>
+                {/* 右:研究团队四个 agent 工牌 */}
+                <div className="min-w-0 lg:flex-1">
+                  <div className="mb-2 font-mono text-[10px] uppercase tracking-[.5px] text-text-muted">
+                    研究团队 · 持证员工
+                  </div>
+                  <AgentRoster />
+                </div>
               </div>
-              <div>
-                <span className="text-xs text-text-muted">维度:</span>{' '}
-                {run.dimensions.map(dimensionLabel).join(' · ')}
-              </div>
-              <div>
-                <span className="text-xs text-text-muted">状态:</span>{' '}
-                {storeRunId === run_id && storeStatus !== 'idle' ? storeStatus : run.status}
-                {run.degraded && <span className="ml-2 text-warning">· 降级</span>}
-              </div>
-              <div>
-                <span className="text-xs text-text-muted">创建:</span>{' '}
-                <time className="font-mono" title={run.created_at}>
-                  {formatBeijing(run.created_at)}
-                </time>
-                <span className="ml-1 text-[11px] text-text-muted">北京时间</span>
-              </div>
-            </>
-          )}
-        </CardContent>
-      </Card>
+            )
+          })()}
+      </div>
 
-      {/* 证据驾驶舱:StatusBar + 左决策面(Epic 4 实装)/ 右实时分析流程(重试环) */}
-      {run_id && (
-        <CockpitLayout
-          runId={run_id}
-          decisionCount={decisionCount}
-          riskCount={riskCount}
-        >
-          <DecisionSurface
+      {/* 证据驾驶舱:StatusBar + 左决策面 / 右实时分析流程。flex-1 min-h-0 吃掉剩余高度,
+          内部各列自滚,页面不再溢出白区(#6)。 */}
+      <div className="min-h-0 flex-1">
+        {run_id && (
+          <CockpitLayout
             runId={run_id}
-            decisionContext={run?.decision_context}
-            runStatus={run?.status}
-            runDegraded={run?.degraded}
-            dimensions={run?.dimensions ?? []}
-            competitors={run?.competitors ?? []}
-          />
-        </CockpitLayout>
-      )}
+            decisionCount={decisionCount}
+            riskCount={riskCount}
+            totalDimensions={run?.dimensions?.length}
+          >
+            <DecisionSurface
+              runId={run_id}
+              decisionContext={run?.decision_context}
+              runStatus={run?.status}
+              runDegraded={run?.degraded}
+              dimensions={run?.dimensions ?? []}
+              competitors={run?.competitors ?? []}
+            />
+          </CockpitLayout>
+        )}
+      </div>
     </div>
   )
 }

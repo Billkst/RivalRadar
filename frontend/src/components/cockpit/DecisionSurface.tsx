@@ -154,12 +154,19 @@ export function DecisionSurface({
             <div className="rounded-lg border border-warning/50 bg-warning/10 px-4 py-2 text-[13px] text-warning">
               ⚠ 本轮证据未达质检标准,以下建议置信度低,请谨慎参考(详见下方质检面板)。
             </div>
+          ) : degraded ? (
+            // run 级降级只提示一次(非每条)。degraded 信号来源不止矩阵:可能是数据获取/分析降级
+            // (矩阵以「—」标注),也可能是决策溯源未达标(decision_degraded,nodes.finalize 并入同一信号)。
+            // 故文案不写死「矩阵缺维」,避免决策降级时误导用户去看矩阵。每条 caveat 由 DecisionBoard 按
+            // 各自 support_verdict 渲染,不再一刀切。
+            <div className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-[12px] text-text-muted">
+              ⚠ 本轮部分环节(数据获取 / 分析 / 决策溯源)发生降级,相关结论请谨慎参考;以下建议按各自证据支持度分级(见每条三色标识)。
+            </div>
           ) : null}
           <DecisionBoard
             decisions={decisionList}
             analysis={live ? analysis : null}
             state={s(decisionsState)}
-            degraded={degraded || insufficient}
             genericContext={genericContext}
             evidenceCount={evidenceCount}
             selectedIdx={selectedIdx}

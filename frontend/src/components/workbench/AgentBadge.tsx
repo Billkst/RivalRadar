@@ -27,10 +27,13 @@ export function AgentBadge({ id, currentTask }: { id: AgentId; currentTask?: str
   const retryCount = useRunStore((s) => s.retryCount)
   const status = useRunStore((s) => s.status)
   const openAgent = useDrawerStore((s) => s.openAgent)
-  const active = nodeState === 'running' || nodeState === 'retrying'
+  // 中断态(cancelled/failed):**被打断的 running/retrying 节点也算停了**,不再误显「执行中」
+  // (用户已手动停止,采集员却还转——根因:旧逻辑只把 idle 节点判「已停止」,漏了卡在 running 的)。
+  // 已完成节点保留「已完成」;nodeState=failed 显「失败」;其余(含被打断的 running)显「已停止」。
+  const interrupted = status === 'cancelled' || status === 'failed'
+  const active = (nodeState === 'running' || nodeState === 'retrying') && !interrupted
   const done = nodeState === 'done'
-  // cancelled 终态:已完成节点保留「已完成」,未跑(idle)节点灰显「已停止」(Task 27)。
-  const stopped = status === 'cancelled' && nodeState === 'idle'
+  const stopped = interrupted && !done && nodeState !== 'failed'
   const stateText = active
     ? '执行中'
     : done
