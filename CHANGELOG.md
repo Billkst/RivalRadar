@@ -4,6 +4,26 @@ All notable changes to RivalRadar are documented here per [Keep a Changelog](htt
 
 Versioning follows 4-digit semver `MAJOR.MINOR.PATCH.MICRO`(< 1.0 表 API 未稳定,迭代期允许 breaking changes)。
 
+## [0.6.1.0] - 2026-06-10
+
+**Supabase Postgres 持久化迁移**。后端存储层从「仅 SQLite」扩展为「SQLite + Postgres 双方言」:设 `DATABASE_URL=postgres://`(如 Supabase)即切到托管 Postgres 持久化,云端容器重启不丢数据;不设则零行为变化走本地 SQLite。SQLite 路径 402 pytest 全绿 + 真 Supabase 9 段 CRUD 冒烟全 PASS;ship 前 Claude + Codex 跨模型对抗评审收口 1 个 HIGH(PG 事务污染)+ 3 个 INFORMATIONAL。
+
+### Added
+
+- **Postgres 方言支持**(`rivalradar/storage/db.py`)— `PG_SCHEMA`(AUTOINCREMENT→BIGSERIAL、runs 内联全列)+ `_PgConnection` 薄封装(`?`→`%s` 占位符翻译、execute/executemany/commit/rollback/close、`dialect="pg"`)+ `connect()` 按 `DATABASE_URL` 分流(psycopg3 懒加载、dict_row、prepare_threshold=None 兼容 pgBouncer)+ `init_db()` PG 分支逐条建表。无 `DATABASE_URL` → 原 SQLite 路径,行为零变化。
+- **PG 端到端冒烟脚本**(`spikes/spike_supabase_crud.py`)— 9 段真打 Supabase:连接/建表、runs CRUD、evidence 去重+排序、5×save_* upsert 覆盖、trace/queries/curation_drops、agent_skills、annotations RETURNING、delete_run 级联、事务污染恢复;首尾自清理不污染库。
+- **`_RUN_SCOPED_TABLES` 完整性测试**(`tests/test_db.py`)— 把 `delete_run` 的人肉表清单变成机器不变量:schema 里每张带 run_id 的表都必须被覆盖,漏加即红(防孤儿行)。
+
+### Changed
+
+- **SQL 方言统一**(`rivalradar/storage/repository.py`)— 6 处 SQLite 私有 upsert(`INSERT OR IGNORE`/`OR REPLACE`)改标准 `ON CONFLICT … DO NOTHING/UPDATE`(SQLite≥3.24 与 PG 一套 SQL 通吃);`list_evidence` 排序、`insert_annotation` 取主键按方言分叉;`list_agent_skills` 位置访问改列名(dict_row 兼容);`delete_run` 用显式 `_RUN_SCOPED_TABLES` 取代 `sqlite_master`/`PRAGMA` 自省(PG 无此接口)。
+- **依赖**(`pyproject.toml`)— 加 `psycopg[binary]>=3.1`(仅 Postgres 部署懒加载;本地 SQLite 不导入)。
+
+### Fixed
+
+- **PG 事务污染防 run 卡死**(`rivalradar/storage/db.py`;ship 前 Claude+Codex 跨模型一致 HIGH)— PG `autocommit=False` 下一条写失败会 abort 整条长生命周期事务,此后所有语句(含 `mark_run_failed`)报 `InFailedSqlTransaction` → run 永久卡 running(SQLite 不会)。修:`_PgConnection.execute/executemany` 失败即 `rollback()` 再抛(每写紧跟 commit = 单语句事务,rollback 只丢失败那条,并保 `delete_run`/`replace_curation_drops` 多语句原子性)。真 Supabase 故意造写失败验证恢复。
+- **连接泄漏防护**(`rivalradar/api/deps.py`)— `init_db` 移进 `try/finally`,PG 上 init 失败也关连接,防 Supabase pooler 连接耗尽。
+
 ## [0.6.0.0] - 2026-06-09
 
 **过程可视化重做(Plan A–D)+ 实时引擎 + 三级佐证策展 + replay 富回放**。把"调研过程"从黑盒做成用户可见的实时剧场:采集→分析→撰写→质检每步的中间产物逐条流式呈现;证据支持度做成 cell/决策级三色(充分/部分/已剔除),质检从"一票否决法官"翻成"策展人";`/stream` 回放从持久化状态重建完整过程事件。401 pytest 绿 + `tsc -b` + build 绿;ship 前 4 路 + Codex 跨模型对抗评审收口 3 个 finding。
