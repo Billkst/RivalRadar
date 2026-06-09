@@ -26,3 +26,4 @@ __pycache__/
 
 # graphify 知识图谱产物(本地生成,体积大,不入库)
 graphify-out/
+.vercel

@@ -16,8 +16,9 @@ from rivalradar.storage.db import connect, init_db
 def get_db_conn(request: Request) -> Iterator[sqlite3.Connection]:
     """每请求一条连接;请求结束关闭。db_path 由 app.state.db_path 注入。"""
     conn = connect(request.app.state.db_path)
-    init_db(conn)  # idempotent;PRAGMA WAL 也在这里施加
     try:
+        init_db(conn)  # idempotent;PRAGMA WAL 也在这里施加。放 try 内:PG 上 init_db
+        # 若抛错(DDL 权限/网络抖动)也会经 finally 关连接,防 Supabase pooler 连接泄漏耗尽。
         yield conn
     finally:
         conn.close()

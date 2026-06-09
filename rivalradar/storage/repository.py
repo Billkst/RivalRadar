@@ -110,34 +110,39 @@ def update_run_degraded(conn: sqlite3.Connection, run_id: str, degraded: bool) -
     conn.commit()
 
 
-def delete_run(conn: sqlite3.Connection, run_id: str) -> bool:
-    """整条删除一个 run 及其全部关联数据(evidence/analysis/report/qc/insight/
-    decisions/trace/annotations + runs 本行)。
+# 带 run_id 列的子表(供 delete_run 级联清理)。agent_skills 是 run 无关配置,故不在内。
+# 显式常量取代旧 sqlite_master/PRAGMA 内省 —— Postgres 无这两个接口,显式列方言无关;
+# schema 新增带 run_id 的表时,需同步加进本元组。
+_RUN_SCOPED_TABLES = (
+    "evidence", "analysis", "report", "decisions", "qc_result", "insight",
+    "queries", "curation_drops", "trace", "annotations",
+)
 
-    扫 sqlite_master 删所有带 run_id 列的表 —— schema 后续加表也自动覆盖,免逐表手列
-    (与 spikes 的幂等清理同策略)。返回 True if run 原本存在(删到了 runs 行),
-    False 表示 run 不存在(供路由层返 404)。
+
+def delete_run(conn: sqlite3.Connection, run_id: str) -> bool:
+    """整条删除一个 run 及其全部关联数据(_RUN_SCOPED_TABLES 各子表 + runs 本行)。
+
+    返回 True if run 原本存在(删到了 runs 行),False 表示 run 不存在(供路由层返 404)。
     """
     if get_run(conn, run_id) is None:
         return False
-    tables = [r[0] for r in conn.execute(
-        "SELECT name FROM sqlite_master WHERE type='table'")]
-    for t in tables:
-        cols = [c[1] for c in conn.execute(f"PRAGMA table_info({t})")]
-        if "run_id" in cols:
-            conn.execute(f"DELETE FROM {t} WHERE run_id=?", (run_id,))
+    for t in _RUN_SCOPED_TABLES:
+        conn.execute(f"DELETE FROM {t} WHERE run_id=?", (run_id,))
+    conn.execute("DELETE FROM runs WHERE run_id=?", (run_id,))
     conn.commit()
     return True
 
 
 # ---- evidence ----
 def insert_evidence(conn: sqlite3.Connection, run_id: str, ev: Evidence) -> None:
-    # OR IGNORE:同 run 内重复 (id) 被 reducer 防过,这里是双保险防止意外
-    # IntegrityError 让 SSE 流崩(Codex 实测:重跑同 competitor+dim+url 会触发)
+    # ON CONFLICT DO NOTHING:同 run 内重复 (run_id, id) 被 reducer 防过,这里是双保险
+    # 防意外 IntegrityError 让 SSE 流崩(Codex 实测:重跑同 competitor+dim+url 会触发)。
+    # 用标准 ON CONFLICT 而非 SQLite 私有 OR IGNORE,SQLite≥3.24 与 Postgres 一套 SQL 通吃。
     conn.execute(
-        "INSERT OR IGNORE INTO evidence (id, run_id, competitor, dimension, content, "
+        "INSERT INTO evidence (id, run_id, competitor, dimension, content, "
         "source_url, source_title, language, fetched_at) "
-        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?) "
+        "ON CONFLICT (run_id, id) DO NOTHING",
         (ev.id, run_id, ev.competitor, ev.dimension, ev.content,
          ev.source_url, ev.source_title, ev.language, ev.fetched_at),
     )
@@ -157,7 +162,10 @@ def get_evidence(conn: sqlite3.Connection, evidence_id: str) -> Evidence | None:
 
 
 def list_evidence(conn: sqlite3.Connection, run_id: str) -> list[Evidence]:
-    rows = conn.execute("SELECT * FROM evidence WHERE run_id=? ORDER BY rowid", (run_id,))
+    # 插入顺序排序:SQLite 用隐式 rowid;Postgres 无 rowid,evidence 也无自增列,
+    # 用 (fetched_at, id) 近似插入序(fetched_at 大致即采集序,id 派生 hash 作稳定 tiebreaker)。
+    order = "fetched_at, id" if getattr(conn, "dialect", "") == "pg" else "rowid"
+    rows = conn.execute(f"SELECT * FROM evidence WHERE run_id=? ORDER BY {order}", (run_id,))
     return [
         Evidence(
             id=r["id"], competitor=r["competitor"], dimension=r["dimension"],
@@ -173,7 +181,8 @@ def list_evidence(conn: sqlite3.Connection, run_id: str) -> list[Evidence]:
 def save_analysis(conn: sqlite3.Connection, run_id: str,
                   analysis: CompetitorAnalysis) -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO analysis (run_id, payload, created_at) VALUES (?, ?, ?)",
+        "INSERT INTO analysis (run_id, payload, created_at) VALUES (?, ?, ?) "
+        "ON CONFLICT (run_id) DO UPDATE SET payload=excluded.payload, created_at=excluded.created_at",
         (run_id, analysis.model_dump_json(), _now()),
     )
     conn.commit()
@@ -189,7 +198,8 @@ def get_analysis(conn: sqlite3.Connection, run_id: str) -> CompetitorAnalysis | 
 # ---- report ----
 def save_report(conn: sqlite3.Connection, run_id: str, markdown: str) -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO report (run_id, markdown, created_at) VALUES (?, ?, ?)",
+        "INSERT INTO report (run_id, markdown, created_at) VALUES (?, ?, ?) "
+        "ON CONFLICT (run_id) DO UPDATE SET markdown=excluded.markdown, created_at=excluded.created_at",
         (run_id, markdown, _now()),
     )
     conn.commit()
@@ -204,7 +214,8 @@ def get_report(conn: sqlite3.Connection, run_id: str) -> str | None:
 def save_decisions(conn: sqlite3.Connection, run_id: str,
                    decision_set: DecisionSet) -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO decisions (run_id, payload, created_at) VALUES (?, ?, ?)",
+        "INSERT INTO decisions (run_id, payload, created_at) VALUES (?, ?, ?) "
+        "ON CONFLICT (run_id) DO UPDATE SET payload=excluded.payload, created_at=excluded.created_at",
         (run_id, decision_set.model_dump_json(), _now()),
     )
     conn.commit()
@@ -222,7 +233,8 @@ def save_qc_result(conn: sqlite3.Connection, run_id: str, result: QCResult) -> N
     """持久化终态 QCResult(finalize 节点调用)。存全量(含 detail);/qc 端点 serve 时
     sanitize(qc.sanitize_qc_result),绝不把 detail 原文/模型文本暴露给公开端点。"""
     conn.execute(
-        "INSERT OR REPLACE INTO qc_result (run_id, payload, created_at) VALUES (?, ?, ?)",
+        "INSERT INTO qc_result (run_id, payload, created_at) VALUES (?, ?, ?) "
+        "ON CONFLICT (run_id) DO UPDATE SET payload=excluded.payload, created_at=excluded.created_at",
         (run_id, result.model_dump_json(), _now()),
     )
     conn.commit()
@@ -238,7 +250,8 @@ def get_qc_result(conn: sqlite3.Connection, run_id: str) -> QCResult | None:
 # ---- insight(full-C / Epic 2.4)----
 def save_insight(conn: sqlite3.Connection, run_id: str, insight: ReportInsight) -> None:
     conn.execute(
-        "INSERT OR REPLACE INTO insight (run_id, payload, created_at) VALUES (?, ?, ?)",
+        "INSERT INTO insight (run_id, payload, created_at) VALUES (?, ?, ?) "
+        "ON CONFLICT (run_id) DO UPDATE SET payload=excluded.payload, created_at=excluded.created_at",
         (run_id, insight.model_dump_json(), _now()),
     )
     conn.commit()
@@ -337,8 +350,8 @@ def list_agent_skills(conn: sqlite3.Connection) -> list[dict]:
         "SELECT agent_id, skill_id, version, enabled, installed_at FROM agent_skills "
         "ORDER BY agent_id, installed_at").fetchall()
     return [
-        {"agent_id": r[0], "skill_id": r[1], "version": r[2],
-         "enabled": bool(r[3]), "installed_at": r[4]}
+        {"agent_id": r["agent_id"], "skill_id": r["skill_id"], "version": r["version"],
+         "enabled": bool(r["enabled"]), "installed_at": r["installed_at"]}
         for r in rows
     ]
 
@@ -370,6 +383,16 @@ def list_runs(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
 def insert_annotation(conn: sqlite3.Connection, *, run_id: str,
                       evidence_id: str | None, conclusion_path: str | None,
                       note: str) -> int:
+    # 取新行主键:SQLite 用 cursor.lastrowid;Postgres 无 lastrowid,用 RETURNING id 取回。
+    if getattr(conn, "dialect", "") == "pg":
+        cur = conn.execute(
+            "INSERT INTO annotations (run_id, evidence_id, conclusion_path, note, created_at) "
+            "VALUES (?, ?, ?, ?, ?) RETURNING id",
+            (run_id, evidence_id, conclusion_path, note, _now()),
+        )
+        new_id = cur.fetchone()["id"]
+        conn.commit()
+        return int(new_id)
     cur = conn.execute(
         "INSERT INTO annotations (run_id, evidence_id, conclusion_path, note, created_at) "
         "VALUES (?, ?, ?, ?, ?)",
