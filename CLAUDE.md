@@ -129,7 +129,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 .venv/bin/python -m pytest
 ```
 
-350 个测试,约 10 秒通过。
+401 个测试,约 14 秒通过。
 
 **测试哲学:**
 
@@ -164,12 +164,19 @@ tests/
   test_api_reads.py        # evidence / analysis / report / trace 端点
   test_api_annotations.py  # POST /annotations + run_id 存在校验
   test_api_concurrent.py   # WAL 并发写写安全
-  ...                      # 其他单元 + 集成测试
+  test_api_cancel.py       # POST /run/:id/cancel 取消路径
+  test_queries_repo.py     # queries 表 repository(真检索词)
+  test_curation_drops_repo.py # curation_drops 策展丢弃记录
+  test_collect_node_emit.py   # 采集节点 SSE emit(query/source/evidence_delta)
+  test_sse_schemas.py      # SSE 事件 Pydantic schema 校验
+  test_agent_skills.py     # agent_skills 表 + REST 技能目录子系统
+  test_replay_parity.py    # replay 与真 run 富过程事件等价
+  test_evals.py            # LLM 输出质量评测框架
+  test_fallback.py         # SDK timeout / 熔断降级路径
+  ...                      # 其他单元 + 集成测试(tests/ 共 43 个 test_*.py)
 ```
 
 **已知测试缺口(见 TODOS.md):**
 
-- eval 框架(LLM 输出质量自动评测)
 - 高强度并发写写(`busy_timeout` 竞争)
-- SDK timeout / 熔断路径
 - Lane F 前端 E2E 测试

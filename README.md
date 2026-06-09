@@ -4,40 +4,32 @@
 
 ---
 
-## 架构概览(4 Agent 协作)
+## 架构概览(6 节点 StateGraph · 全过程实时可见)
 
 ```
-POST /run
+POST /run  ──►  SSE 实时流式返回(采集→分析→撰写→质检 全过程可见)
     │
     ▼
-┌─────────────────────────────────────────────────────────────┐
-│                    LangGraph StateGraph                     │
-│                                                             │
-│  ┌──────────┐   ┌──────────┐   ┌──────────┐   ┌────────┐  │
-│  │ Collector│──►│ Analyst  │──►│  Writer  │──►│   QC   │  │
-│  │  Agent   │   │  Agent   │   │  Agent   │   │  Agent │  │
-│  └──────────┘   └──────────┘   └──────────┘   └────┬───┘  │
-│       ▲              │                              │       │
-│       │       Doubao function-calling               │       │
-│       │       Tavily / Exa search                  │       │
-│       │                                             │       │
-│       └────────────── 闭环重试(最多 2 轮) ◄──────────┘       │
-│                      QC 不通过 → 重写                        │
-│                      QC 通过 → finalize                     │
-└─────────────────────────────────────────────────────────────┘
+  LangGraph StateGraph · 6 节点
+  collect ─► analyze ─► write ─► qc ─► decide ─► finalize
+     ▲          ▲              │
+     │  Doubao function-calling │  qc 不通过 → 重写 / 补采(闭环 ≤2 轮)
+     │  Tavily 主 / Exa 兜底     │  qc 通过   → 策展(丢不支撑格)→ decide 合成决策
+     └──────── 闭环重试 ◄───────┘
     │
-    ▼
-GET /stream/:run_id  (SSE 实时推流)
+    ▼  每步中间产物逐条实时推送(query · source · cell_row · verdict_recheck …)
+GET /stream/:run_id  ──►  从持久化状态重建过程事件(刷新 / 深链回放)
 ```
 
-**4 个 Agent 职责：**
+**6 节点职责：**
 
-| Agent | 职责 |
+| 节点 | 职责 |
 |---|---|
-| Collector | 按维度 × 语言并行搜索(Tavily 主 / Exa 兜底),提取 Evidence |
-| Analyst | Doubao function-calling 结构化抽取(features / pricing / personas / SWOT),生成对比矩阵 |
-| Writer | 确定性 Markdown 渲染 + LLM grounded 导语,生成完整报告 |
-| QC | 确定性闸(traceability / ontology / coverage)+ LLM 蕴含校验,verdict 决策 |
+| collect | 按维度 × 语言并行搜索(Tavily 主 / Exa 兜底),提取 Evidence,逐条 emit 检索词 / 来源 |
+| analyze | Doubao function-calling 结构化抽取(features / pricing / personas / SWOT)+ 对比纪律(`_COMPARE_RULE`:禁跨产品口径混写 / 派生营销数字),逐维生成对比矩阵 cell |
+| write | 确定性 Markdown 渲染 + LLM grounded 导语(两步式流式起草),生成完整报告 |
+| qc | 策展人模型:逐格裁决 `support_verdict` 三色(充分 / 部分 / 不支撑),丢不支撑格记 `curation_drops`、缺格显「—」+ 覆盖说明(防虚构硬门不变) |
+| decide | 基于策展后证据合成决策建议(决策级三色 + 因果桥) |
 
 ---
 
@@ -94,24 +86,33 @@ RIVALRADAR_RUN_BUDGET_S=  # 可选,默认 900,单 run 墙钟预算(秒);超时�
 
 ---
 
-## API 端点(9 个)
+## API 端点(20 路由)
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | `POST` | `/run` | 发起竞品分析任务,同步 SSE 流式返回 |
-| `GET` | `/stream/{run_id}` | 重放已完成 run 的 SSE 事件(replay 路径) |
+| `POST` | `/discover-competitors` | 由产品名发现候选竞品 |
+| `GET` | `/stream/{run_id}` | 重放已完成 run 的富过程事件(replay 路径) |
 | `GET` | `/runs` | 列出所有 run 摘要(含 `degraded` 字段) |
 | `GET` | `/run/{run_id}` | 获取单个 run 详情 |
+| `POST` | `/run/{run_id}/cancel` | 取消进行中的 run(协作式停掉在飞 LLM) |
+| `GET` | `/runs/{run_id}/queries` | 真检索词列表(逐条 query + 命中数) |
+| `GET` | `/runs/{run_id}/evidence` | 该 run 的全部证据 |
+| `GET` | `/runs/{run_id}/curation-drops` | 质检策展丢弃的格子(三级佐证) |
 | `GET` | `/evidence/{evidence_id}` | 获取单条证据 |
-| `GET` | `/analysis/{run_id}` | 获取结构化分析结果 |
+| `GET` | `/analysis/{run_id}` | 获取结构化分析结果(含 cell 三色) |
+| `GET` | `/decisions/{run_id}` | 决策建议(决策级三色) |
+| `GET` | `/insight/{run_id}` | AI 综合判断 headline(3 段) |
 | `GET` | `/report/{run_id}` | 获取 Markdown 报告 |
+| `GET` | `/qc/{run_id}` | 质检结果(verdict + 缺口) |
 | `GET` | `/trace/{run_id}` | 获取 LangGraph 节点执行 trace |
+| `GET`·`PUT`·`DELETE` | `/agent-skills[/{agent_id}/{skill_id}]` | Agent 技能目录子系统 |
 | `POST` | `/annotations` | 添加人工质疑标注(§17 质疑率统计) |
 | `GET` | `/healthz` | 健康检查 |
 
 **SSE 事件类型:**
-- Live `POST /run`:`start` / `node` / `error` / `done`
-- Replay `GET /stream/:run_id`:`start` / `trace` / `done`
+- Live `POST /run`:`start` / `node` / `query` / `query_hit` / `source` / `cell_row` / `verdict_recheck` / `error` / `cancelled` / `done`
+- Replay `GET /stream/:run_id`:从持久化 trace / 证据重建 `start` / `trace` / 检索台 / 来源 / 矩阵 / 重试环 / `done`
 
 **请求体示例(`POST /run`):**
 
@@ -132,7 +133,7 @@ RIVALRADAR_RUN_BUDGET_S=  # 可选,默认 900,单 run 墙钟预算(秒);超时�
 .venv/bin/python -m pytest
 ```
 
-350 个测试,约 10 秒通过。
+401 个测试,约 10 秒通过。
 
 ---
 
@@ -141,10 +142,11 @@ RIVALRADAR_RUN_BUDGET_S=  # 可选,默认 900,单 run 墙钟预算(秒);超时�
 | 层 | 技术 |
 |---|---|
 | API 框架 | FastAPI + sse-starlette(SSE 推流) |
-| Agent 编排 | LangGraph `StateGraph`(5 节点 + 5 分支路由 + SqliteSaver checkpointer) |
+| Agent 编排 | LangGraph `StateGraph`(6 节点 collect/analyze/write/qc/decide/finalize + 分支路由 + SqliteSaver checkpointer) |
 | LLM | Doubao(字节跳动 ARK 平台,function-calling / tools 路径) |
 | 搜索 | Tavily(主)+ Exa(兜底),`FallbackSearch` 自动切换 |
-| 存储 | SQLite,WAL 模式,6 表 schema(`runs / evidence / analysis / report / trace / annotations`) |
+| 存储 | SQLite,WAL 模式,12 表 schema(`runs / evidence / analysis / decisions / insight / qc_result / report / trace / annotations / queries / curation_drops / agent_skills`) |
+| 前端 | React 19 + Vite + Tailwind 3 + Zustand 5 + framer-motion(SSE 实时工作台 + 决策座舱) |
 | 数据校验 | Pydantic v2,`Evidence / CompetitorAnalysis / QCResult` schema |
 | 依赖管理 | `pyproject.toml`(PEP 517),Python ≥ 3.11 |
 
@@ -154,8 +156,8 @@ RIVALRADAR_RUN_BUDGET_S=  # 可选,默认 900,单 run 墙钟预算(秒);超时�
 
 ```
 rivalradar/
-  agents/      # 4 个 Agent(collector / analyst / writer / qc)
-  api/         # FastAPI 路由(runs / reads / annotations / sse)
+  agents/      # Agent 角色(collector / analyst / writer / qc;decide 决策合成见 graph/)
+  api/         # FastAPI 路由(runs / reads / annotations / sse / agent_skills)
   collect/     # 采集管线(搜索 + safe_fetch + 速率限制)
   graph/       # LangGraph StateGraph + 路由逻辑
   llm/         # Doubao structured_call 包装器
@@ -163,7 +165,7 @@ rivalradar/
   search/      # SearchProvider 协议 + TavilyProvider + ExaProvider + FallbackSearch
   storage/     # SQLite repository + SqliteSaver checkpointer 工厂
   config.py    # 环境变量读取(永不暴露 key 值)
-tests/         # 198 个测试
+tests/         # 401 个测试
 spikes/        # 真打 Doubao/Tavily 端到端 spike(含 SPIKE_RESULTS.md)
 docs/superpowers/specs/  # 设计规格
 main.py        # 服务入口
@@ -175,9 +177,9 @@ main.py        # 服务入口
 
 | 文件 | 内容 |
 |---|---|
-| [`CHANGELOG.md`](CHANGELOG.md) | 版本历史,v0.1.0.0 首次发布 |
-| [`TODOS.md`](TODOS.md) | 21 个非阻断遗留事项(P1-P4) |
-| [`DESIGN.md`](DESIGN.md) | Lane F 前端设计系统(字体/配色/间距/动效) |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本历史,最新 v0.6.0.0 |
+| [`TODOS.md`](TODOS.md) | 非阻断遗留事项(按组 + P0-P4) |
+| [`DESIGN.md`](DESIGN.md) | 前端设计系统 v5(字体 / 配色 / 间距 / 动效 / 决策座舱) |
 | [`DATA_SOURCES.md`](DATA_SOURCES.md) | 数据来源合规声明 |
 | [`SKILLS.md`](SKILLS.md) | Claude Code skill 速查手册 |
 | [`docs/superpowers/specs/2026-05-21-rivalradar-design.md`](docs/superpowers/specs/2026-05-21-rivalradar-design.md) | 完整设计规格 |
@@ -186,7 +188,7 @@ main.py        # 服务入口
 
 ## 版本
 
-当前版本: **v0.1.0.0**(首次完整发布,2026-05-26)
+当前版本: **v0.6.0.0**(过程可视化重做 + 实时引擎 + 三级佐证策展,2026-06-09)
 
 版本格式:`MAJOR.MINOR.PATCH.MICRO`(< 1.0 表 API 未稳定,允许 breaking changes)
 
