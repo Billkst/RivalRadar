@@ -22,7 +22,9 @@ import type {
   TraceEntry,
 } from '@/types/api'
 
-const API_BASE = '/api'
+// 生产(Vercel)把 VITE_API_BASE 设为后端公网根地址(不带 /api 前缀);
+// 本地 dev 不设 → 回退 '/api' → vite 代理剥 /api 前缀转 localhost:8000(行为不变)。
+export const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
 
 async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
   const res = await fetch(`${API_BASE}${path}`, {

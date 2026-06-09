@@ -50,10 +50,12 @@ def main():
         doubao_client=cfg.get_doubao_client(),
         provider=_build_provider(),
     )
-    port = int(os.getenv("RIVALRADAR_PORT", "8000"))
-    # 默认绑 127.0.0.1 防 LAN 暴露(POST /run 无 auth + 无上限会被同网络用户烧 API 配额);
-    # 真要跨主机访问设 RIVALRADAR_HOST=0.0.0.0(知情前提)
-    host = os.getenv("RIVALRADAR_HOST", "127.0.0.1")
+    # 云平台(Render/Railway 等)注入 $PORT;本地无 $PORT 时回退 RIVALRADAR_PORT。
+    _cloud_port = os.getenv("PORT")
+    port = int(_cloud_port or os.getenv("RIVALRADAR_PORT", "8000"))
+    # 本地默认绑 127.0.0.1 防 LAN 暴露(POST /run 无 auth + 无上限会被烧 API 配额);
+    # 云平台注入 $PORT 时必须绑 0.0.0.0 平台才路由得进来,据此切默认值。仍可被 RIVALRADAR_HOST 覆盖。
+    host = os.getenv("RIVALRADAR_HOST", "0.0.0.0" if _cloud_port else "127.0.0.1")
     print(f"[RivalRadar] starting on http://{host}:{port}  (key configured: {bool(cfg.ark_api_key())})")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
