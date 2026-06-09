@@ -16,6 +16,7 @@
 import * as React from 'react'
 import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { useRunStore } from '@/stores/runStore'
+import { API_BASE } from '@/lib/api'
 import type {
   RunRequest,
   SSEEvent,
@@ -92,7 +93,7 @@ async function startStream(opts: StartOpts): Promise<{ runId: string }> {
   activeController = ctrl
 
   const isLive = opts.mode === 'live'
-  const url = isLive ? '/api/run' : `/api/stream/${opts.runId}`
+  const url = isLive ? `${API_BASE}/run` : `${API_BASE}/stream/${opts.runId}`
 
   // Reset store before binding new stream. For replay, also seed runId so
   // store renders the loading shell immediately.

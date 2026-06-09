@@ -1,0 +1,24 @@
+# Render 部署蓝图 —— 后端 FastAPI(常驻容器,支持长连 SSE)。详见 DEPLOY.md。
+# secrets(ARK_API_KEY / DOUBAO_MODEL / TAVILY_API_KEY)在 Render Dashboard 配置,sync:false 不入库。
+services:
+  - type: web
+    name: rivalradar-api
+    runtime: python
+    region: singapore        # 离火山方舟 ark.cn-beijing 最近,降低跨境延迟
+    plan: free               # 免费档:冷启动 ~1min、文件系统非持久(SQLite 重启即丢,demo 够用)
+    buildCommand: pip install -e .
+    startCommand: python main.py   # main.py 读 $PORT 并绑 0.0.0.0(云平台路由要求)
+    healthCheckPath: /healthz
+    envVars:
+      - key: ARK_API_KEY        # Doubao/方舟 key —— Dashboard 填,勿入库
+        sync: false
+      - key: DOUBAO_MODEL       # endpoint ID,与 key 同等敏感 —— Dashboard 填,勿入库
+        sync: false
+      - key: TAVILY_API_KEY     # 搜索 key —— Dashboard 填,勿入库
+        sync: false
+      - key: ARK_BASE_URL
+        value: https://ark.cn-beijing.volces.com/api/v3
+      - key: RIVALRADAR_DB
+        value: rivalradar.db
+      - key: PYTHON_VERSION
+        value: "3.11"
