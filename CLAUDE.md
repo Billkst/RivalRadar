@@ -129,7 +129,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 .venv/bin/python -m pytest
 ```
 
-401 个测试,约 14 秒通过。
+402 个测试,约 13 秒通过。
 
 **测试哲学:**
 
@@ -150,7 +150,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 ```
 tests/
   test_config.py           # 配置层(环境变量读取)
-  test_db.py               # SQLite schema + repository CRUD
+  test_db.py               # SQLite/Postgres schema + repository CRUD + _RUN_SCOPED_TABLES 完整性
   test_doubao_schema.py    # Pydantic schema + $ref 内联
   test_structured_call.py  # Doubao function-calling 包装器
   test_collect_pipeline.py # 采集管线(并行 + 速率限制)
@@ -173,7 +173,7 @@ tests/
   test_replay_parity.py    # replay 与真 run 富过程事件等价
   test_evals.py            # LLM 输出质量评测框架
   test_fallback.py         # SDK timeout / 熔断降级路径
-  ...                      # 其他单元 + 集成测试(tests/ 共 43 个 test_*.py)
+  ...                      # 其他单元 + 集成测试(tests/ 共 44 个 test_*.py)
 ```
 
 **已知测试缺口(见 TODOS.md):**
