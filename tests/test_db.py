@@ -180,3 +180,26 @@ def test_ensure_creates_decision_tables_on_legacy_db(tmp_path):
     assert repo.get_qc_result(c, "r_old") is None
     assert repo.get_insight(c, "r_old") is None
     c.close()
+
+
+def test_run_scoped_tables_covers_every_run_id_table():
+    """delete_run 改用硬编码 _RUN_SCOPED_TABLES 取代 sqlite_master 自省(Postgres 无此接口)。
+
+    本测试把人肉清单变成机器不变量:schema 里每张带 run_id 列的表(runs 本身除外,
+    它在 delete_run 里单独删)都必须在 _RUN_SCOPED_TABLES 中。新增带 run_id 的表却忘加
+    → delete_run 留孤儿行(PG 无 FK 级联,这是唯一防线)→ 这里立刻红。
+    /review 跨模型(Claude+Codex)一致点名的维护性闸。
+    """
+    from rivalradar.storage.db import connect, init_db
+    from rivalradar.storage.repository import _RUN_SCOPED_TABLES
+    c = connect(":memory:")
+    init_db(c)
+    tables = [r["name"] for r in c.execute(
+        "SELECT name FROM sqlite_master WHERE type='table'")]
+    with_run_id = {
+        t for t in tables
+        if "run_id" in {row[1] for row in c.execute(f"PRAGMA table_info({t})")}
+    }
+    # runs 含 run_id(PK)但在 delete_run 里单独删;其余带 run_id 的表必须全被覆盖
+    assert with_run_id - {"runs"} == set(_RUN_SCOPED_TABLES)
+    c.close()

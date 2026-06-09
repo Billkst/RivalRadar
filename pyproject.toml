@@ -15,6 +15,9 @@ dependencies = [
     "fastapi>=0.115",
     "sse-starlette>=2.1",
     "uvicorn[standard]>=0.30",
+    # Postgres 驱动:仅 DATABASE_URL=postgres:// 时懒加载(Supabase 等云部署)。
+    # 本地默认走 SQLite,db.py 不会 import psycopg;Render 部署靠这条装上。
+    "psycopg[binary]>=3.1",
 ]
 
 [project.optional-dependencies]
