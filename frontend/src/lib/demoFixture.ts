@@ -113,44 +113,44 @@ export const DEMO_ANALYSIS: CompetitorAnalysis = {
     {
       dimension: 'pricing',
       cells: [
-        { competitor: '飞书', value_type: 'enum', value: '免费起 + 企业版按人/月',
+        { competitor: '飞书', value_type: 'enum', value: '免费起 + 企业版按人/月', support_verdict: 'supported',
           evidence_refs: [{ evidence_id: 'ev-fs-pricing-1', quote: '企业版按人/月计费,高级能力随版本解锁', support_verdict: 'supported' }] },
-        { competitor: '钉钉', value_type: 'enum', value: '免费起 + 阶梯收费',
+        { competitor: '钉钉', value_type: 'enum', value: '免费起 + 阶梯收费', support_verdict: 'partial',
           evidence_refs: [{ evidence_id: 'ev-dt-pricing-1', quote: '专业版/专属版按规模阶梯收费,部分能力需单独采购', support_verdict: 'partial' }] },
-        { competitor: '企业微信', value_type: 'enum', value: '免费 + 增值来自微信生态',
+        { competitor: '企业微信', value_type: 'enum', value: '免费 + 增值来自微信生态', support_verdict: 'supported',
           evidence_refs: [{ evidence_id: 'ev-wx-pricing-1', quote: '增值来自与微信生态打通的客户联系能力', support_verdict: 'supported' }] },
       ],
     },
     {
       dimension: 'core_workflows',
       cells: [
-        { competitor: '飞书', value_type: 'quote_text', value: '文档+IM+会议+审批一体化',
+        { competitor: '飞书', value_type: 'quote_text', value: '文档+IM+会议+审批一体化', support_verdict: 'supported',
           evidence_refs: [{ evidence_id: 'ev-fs-workflow-1', quote: '审批流可直接嵌入文档与群,跨场景一体化程度高', support_verdict: 'supported' }] },
-        { competitor: '钉钉', value_type: 'quote_text', value: '行政 OA 流程成熟',
+        { competitor: '钉钉', value_type: 'quote_text', value: '行政 OA 流程成熟', support_verdict: 'supported',
           evidence_refs: [{ evidence_id: 'ev-dt-workflow-1', quote: '考勤、审批、汇报等行政办公流程见长,OA 场景成熟', support_verdict: 'supported' }] },
-        { competitor: '企业微信', value_type: 'quote_text', value: '外部触达强,内部协作偏弱',
+        { competitor: '企业微信', value_type: 'quote_text', value: '外部触达强,内部协作偏弱', support_verdict: 'partial',
           evidence_refs: [{ evidence_id: 'ev-wx-workflow-1', quote: '内部协作相对依赖第三方补齐', support_verdict: 'partial' }] },
       ],
     },
     {
       dimension: 'integrations',
+      // 企业微信·集成生态被策展剔除(证据 ev-wx-integ-1 >90 天 stale + 不支撑结论),
+      // 矩阵呈现「—」,与 SAMPLE_EVENTS verdict_recheck.dropped 自洽。
       cells: [
-        { competitor: '飞书', value_type: 'quote_text', value: '开放平台 + 应用市场完整',
+        { competitor: '飞书', value_type: 'quote_text', value: '开放平台 + 应用市场完整', support_verdict: 'supported',
           evidence_refs: [{ evidence_id: 'ev-fs-integ-1', quote: '提供完整 OpenAPI 与应用市场', support_verdict: 'supported' }] },
-        { competitor: '钉钉', value_type: 'quote_text', value: '宜搭低代码 + 行业应用',
+        { competitor: '钉钉', value_type: 'quote_text', value: '宜搭低代码 + 行业应用', support_verdict: 'supported',
           evidence_refs: [{ evidence_id: 'ev-dt-integ-1', quote: '宜搭低代码 + 开放平台支持业务系统对接', support_verdict: 'supported' }] },
-        { competitor: '企业微信', value_type: 'quote_text', value: '集成集中在客户联系(资料较旧)',
-          evidence_refs: [{ evidence_id: 'ev-wx-integ-1', quote: '通用业务系统集成深度弱于飞书/钉钉', support_verdict: 'unsupported' }] },
       ],
     },
     {
       dimension: 'target_users',
       cells: [
-        { competitor: '飞书', value_type: 'quote_text', value: '互联网/新经济中大型团队',
+        { competitor: '飞书', value_type: 'quote_text', value: '互联网/新经济中大型团队', support_verdict: 'supported',
           evidence_refs: [{ evidence_id: 'ev-fs-users-1', quote: '互联网与新经济中大型团队渗透较深', support_verdict: 'supported' }] },
-        { competitor: '钉钉', value_type: 'quote_text', value: '传统行业/政企/连锁',
+        { competitor: '钉钉', value_type: 'quote_text', value: '传统行业/政企/连锁', support_verdict: 'supported',
           evidence_refs: [{ evidence_id: 'ev-dt-users-1', quote: '传统行业、政企与连锁门店等规模化组织覆盖广', support_verdict: 'supported' }] },
-        { competitor: '企业微信', value_type: 'quote_text', value: '需连接 C 端客户的行业',
+        { competitor: '企业微信', value_type: 'quote_text', value: '需连接 C 端客户的行业', support_verdict: 'supported',
           evidence_refs: [{ evidence_id: 'ev-wx-users-1', quote: '与微信用户无缝触达是核心卖点', support_verdict: 'supported' }] },
       ],
     },
@@ -170,6 +170,7 @@ export const DEMO_DECISIONS: DecisionSet = {
         { evidence_id: 'ev-fs-workflow-1', quote: '审批流可直接嵌入文档与群,跨场景一体化程度高', support_verdict: 'supported' },
         { evidence_id: 'ev-fs-integ-1', quote: '提供完整 OpenAPI 与应用市场', support_verdict: 'supported' },
       ],
+      support_verdict: 'supported',
       watch: null,
     },
     {
@@ -182,6 +183,7 @@ export const DEMO_DECISIONS: DecisionSet = {
       evidence_refs: [
         { evidence_id: 'ev-dt-pricing-1', quote: '专业版/专属版按规模阶梯收费,部分能力需单独采购', support_verdict: 'partial' },
       ],
+      support_verdict: 'partial',
       watch: null,
     },
     {
@@ -194,6 +196,7 @@ export const DEMO_DECISIONS: DecisionSet = {
       evidence_refs: [
         { evidence_id: 'ev-wx-integ-1', quote: '通用业务系统集成深度弱于飞书/钉钉', support_verdict: 'unsupported' },
       ],
+      support_verdict: 'partial',
       watch: {
         metric: '企业微信通用业务系统开放 API 数量',
         threshold: '季度环比 +20%',

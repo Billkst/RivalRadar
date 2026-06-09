@@ -9,10 +9,87 @@
  */
 import * as React from 'react'
 import { Link } from 'react-router-dom'
+import { useEvidenceStore } from '@/stores/evidenceStore'
 import { HEADING_RE, headingId } from './markdownHeadings'
 
 const CITE_SPLIT = /(\[ev_[^\]]*\])/g
+const CITE_SCAN = /\[ev_[^\]]*\]/g
 const ANCHOR_PREFIX = '锚定: '
+
+/** 全篇 id→序号映射(预扫描建,Citation 经 Context 读)→ [ev_长hash] 渲成脚注式 [1][2]。 */
+const CiteContext = React.createContext<Map<string, number> | null>(null)
+
+/**
+ * Citation — 报告内 [ev_id] 行内引用 → 可点溯源徽章(#7)。
+ *
+ * ReportView 全屏独立(不在 cockpit 内,无全局证据 Drawer / 未 seed 证据)→ 本组件:
+ *   - 显示脚注式序号(CiteContext 全篇统一编号,同一证据复用同号),取代丑陋长 hash。
+ *   - hover/focus → lazy GET /evidence/:id 出来源预览(标题 + 域名 + 正文摘录)。
+ *   - 点击 → 新标签打开原始 source_url(真·溯源)。**无 provider / confidence**(反幻觉)。
+ */
+function Citation({ id }: { id: string }) {
+  const numbers = React.useContext(CiteContext)
+  const index = numbers?.get(id) ?? 0
+  const getEvidence = useEvidenceStore((s) => s.getEvidence)
+  const ev = useEvidenceStore((s) => s.cache.get(id) ?? null)
+  const [loading, setLoading] = React.useState(false)
+
+  const ensure = () => {
+    if (ev || loading) return
+    setLoading(true)
+    getEvidence(id)
+      .catch(() => {})
+      .finally(() => setLoading(false))
+  }
+  const openSource = (e: React.MouseEvent) => {
+    e.preventDefault()
+    const go = (u?: string) => u && window.open(u, '_blank', 'noopener,noreferrer')
+    if (ev?.source_url) go(ev.source_url)
+    else getEvidence(id).then((x) => go(x.source_url)).catch(() => {})
+  }
+  let host = ''
+  try {
+    host = ev?.source_url ? new URL(ev.source_url).hostname.replace(/^www\./, '') : ''
+  } catch {
+    host = ''
+  }
+
+  return (
+    <span className="group/cite relative mx-0.5 inline-block align-super leading-none">
+      <button
+        type="button"
+        onClick={openSource}
+        onMouseEnter={ensure}
+        onFocus={ensure}
+        className="rounded border border-accent/40 px-1 text-[10px] leading-tight text-accent hover:bg-accent-soft focus-visible:outline focus-visible:outline-2 focus-visible:outline-accent"
+        aria-label={`证据 ${index || ''} 来源`}
+        title="点击打开原始来源"
+      >
+        {index || '·'}
+      </button>
+      <span
+        role="tooltip"
+        className="pointer-events-none absolute left-0 top-full z-40 mt-1 hidden w-72 rounded-lg border border-border bg-surface p-3 text-left shadow-panel group-hover/cite:block group-focus-within/cite:block"
+      >
+        {ev ? (
+          <>
+            <span className="block truncate text-[12px] font-medium text-text-primary">
+              {ev.source_title || '来源'}
+            </span>
+            {host ? (
+              <span className="mt-0.5 block font-mono text-[10px] text-text-muted">{host} · 点击打开 ↗</span>
+            ) : null}
+            <span className="mt-1.5 block max-h-24 overflow-hidden text-[11px] leading-snug text-text-muted">
+              {(ev.content || '').slice(0, 160)}
+            </span>
+          </>
+        ) : (
+          <span className="block text-[11px] text-text-muted">{loading ? '证据加载中…' : '悬停加载来源预览'}</span>
+        )}
+      </span>
+    </span>
+  )
+}
 
 // 图片 src 白名单(对抗审查 F4 / Codex P2):**只放行相对路径与 data:image**。范文配图全是
 // 仓库本地相对路径(如 ref-01-img/x.png);生成报告本不产图。一律拒绝 http(s)/file: 等带网络
@@ -34,21 +111,26 @@ const isTableSep = (line: string): boolean => {
   return s.includes('-') && /^[\s|:-]+$/.test(s)
 }
 
-// 行内 [ev_xxx] → 弱化收据徽章(RivalRadar 报告专有;范文里不出现,透传为文本)。
+// 行内 [ev_xxx] / [ev_a, ev_b] → 每个 id 一个可点溯源 Citation(脚注式序号 + hover 预览 +
+// 点击开来源)。范文(samples)里不出现 [ev_],透传为文本。
 function renderCitations(text: string, keyPrefix: string): React.ReactNode[] {
-  return text.split(CITE_SPLIT).map((part, i) =>
-    part.startsWith('[ev_') ? (
-      <span
-        key={`${keyPrefix}c${i}`}
-        className="mx-0.5 rounded bg-surface-subtle px-1 align-baseline text-[10px] text-text-muted"
-        title="证据收据"
-      >
-        {part}
-      </span>
-    ) : (
-      <React.Fragment key={`${keyPrefix}t${i}`}>{part}</React.Fragment>
-    ),
-  )
+  return text.split(CITE_SPLIT).map((part, i) => {
+    if (!part.startsWith('[ev_')) {
+      return <React.Fragment key={`${keyPrefix}t${i}`}>{part}</React.Fragment>
+    }
+    const ids = part
+      .slice(1, -1)
+      .split(',')
+      .map((s) => s.trim())
+      .filter(Boolean)
+    return (
+      <React.Fragment key={`${keyPrefix}c${i}`}>
+        {ids.map((id, j) => (
+          <Citation key={`${id}-${j}`} id={id} />
+        ))}
+      </React.Fragment>
+    )
+  })
 }
 
 // 行内 markdown 链接 [label](href):站内 /samples/:id 走 react-router(SPA 不刷新),
@@ -112,6 +194,20 @@ function renderInline(text: string): React.ReactNode[] {
 }
 
 export function Markdown({ source }: { source: string }) {
+  // 预扫描全篇 [ev_id],按出现顺序给每个唯一 id 编号(同一证据全篇复用同号)→ 脚注式 [1][2]。
+  const citeNumbers = React.useMemo(() => {
+    const map = new Map<string, number>()
+    let n = 0
+    let m: RegExpExecArray | null
+    CITE_SCAN.lastIndex = 0
+    while ((m = CITE_SCAN.exec(source)) !== null) {
+      for (const raw of m[0].slice(1, -1).split(',')) {
+        const id = raw.trim()
+        if (id && !map.has(id)) map.set(id, ++n)
+      }
+    }
+    return map
+  }, [source])
   const lines = source.replace(/\r\n/g, '\n').split('\n')
   const blocks: React.ReactNode[] = []
   let items: { level: number; text: string; marker: string }[] = []
@@ -303,5 +399,9 @@ export function Markdown({ source }: { source: string }) {
   }
   flushList()
 
-  return <div>{blocks}</div>
+  return (
+    <CiteContext.Provider value={citeNumbers}>
+      <div>{blocks}</div>
+    </CiteContext.Provider>
+  )
 }

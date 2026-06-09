@@ -1,5 +1,8 @@
 from __future__ import annotations
 
+from collections.abc import Callable
+
+from rivalradar.llm.streaming import stream_chat
 from rivalradar.llm.structured import structured_call
 from rivalradar.schema.feature_tree import assemble_tree
 from rivalradar.schema.models import (
@@ -182,6 +185,34 @@ deterministically 渲染好的竞品分析正文(含数据 + 引用 + SWOT + 跨
     return structured_call(ReportInsight, msgs, client=client, model=model)
 
 
+_INSIGHT_DRAFT_PROMPT = (
+    "你是竞品战略分析师。基于下面的对比正文,写一段三部分的自由文本草稿:"
+    "①市场格局 ②战略路径分歧 ③短/中/长期可执行建议。只写散文,不要 JSON。\n\n"
+)
+
+
+def generate_insight_streamed(
+    body: str, *, client, model,
+    emit: Callable[[str, dict], None] | None = None,
+    agent_id: str = "writer", step: str = "drafting",
+) -> ReportInsight:
+    """insight 两步化(spec §5.6,Spike H GO):Step1 stream_chat 出三段自由文本草稿,逐 delta
+    emit chunk 供前端报告台 typing;Step2 generate_insight 把草稿抽成结构化 ReportInsight(契约不破)。
+    emit=None → 直接一次性 generate_insight(body)(tests/CLI,无 typing)。
+    stream 或抽取抛错(Exception)→ 回落一次性 generate_insight(body):数据有保证,typing best-effort。
+    RunAborted(BaseException)不在此捕获,取消信号照常上抛。"""
+    if emit is None:
+        return generate_insight(body, client=client, model=model)
+    try:
+        draft = stream_chat([{"role": "user", "content": _INSIGHT_DRAFT_PROMPT + body}],
+                            client=client, model=model, emit=emit, agent_id=agent_id, step=step)
+        if not draft.strip():
+            raise ValueError("empty draft")
+        return generate_insight(draft, client=client, model=model)
+    except Exception:  # noqa: BLE001 — stream/抽取失败回落一次性,数据真;RunAborted 是 BaseException 不入此分支
+        return generate_insight(body, client=client, model=model)
+
+
 def generate_decisions(
     body: str, decision_context: str | None, *, client, model
 ) -> DecisionSet:
@@ -239,11 +270,14 @@ def generate_decisions(
 def write_report_with_insight(
     analysis: CompetitorAnalysis, evidence: list[Evidence], *,
     as_of: str, client, model,
+    emit: Callable[[str, dict], None] | None = None,
 ) -> tuple[str, ReportInsight]:
     """撰写 Agent 入口(混合):LLM 3 段执行洞察 + 确定性正文 → (markdown, ReportInsight)。
 
     Epic 2.4:同时返回结构化 insight 供持久化(GET /insight/:run → cockpit 顶部语境),
     避免 insight 拍平进 markdown 后丢弃(旧 write_report 的行为)。
+
+    emit 提供时 insight 走两步化流式(§5.6);emit=None 时一次性,行为与改造前完全一致。
 
     报告结构(post-rubric-v1 重构):
       # 竞品分析报告
@@ -253,7 +287,7 @@ def write_report_with_insight(
       ## 跨竞品对比 (deterministic table) / ## 来源 (URLs with as_of)
     """
     body = render_body(analysis, evidence, as_of=as_of)
-    insight = generate_insight(body, client=client, model=model)
+    insight = generate_insight_streamed(body, client=client, model=model, emit=emit)
     return stitch_report(insight, body), insight
 
 

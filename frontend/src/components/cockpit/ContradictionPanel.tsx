@@ -41,8 +41,12 @@ interface Round {
 
 function deriveRounds(events: SSEEvent[]): Round[] {
   const rounds: Round[] = []
+  // Plan D replay 同时带 trace qc(逐轮,§11.4 Play)+ 一个合成的终态 qc node(注入 retryCount
+  // 给 WorkbenchSummary/StatusBar)。两源都计会双算(1 node + N trace → N+1 轮)。故:有 trace qc
+  // 时以 trace 为准(逐轮齐全),忽略 node qc;否则用 node(纯 live 路径,无 trace)。
+  const hasTraceQc = events.some((e) => e.type === 'trace' && e.data.node === 'qc')
   for (const e of events) {
-    if (e.type === 'node' && e.data.node === 'qc') {
+    if (!hasTraceQc && e.type === 'node' && e.data.node === 'qc') {
       // live 路径:node event 带结构化 summary。
       const s = e.data.summary
       rounds.push({
@@ -51,7 +55,7 @@ function deriveRounds(events: SSEEvent[]): Round[] {
         issues: s.issues ?? 0,
         types: s.issue_types ?? {},
       })
-    } else if (e.type === 'trace' && e.data.node === 'qc') {
+    } else if (hasTraceQc && e.type === 'trace' && e.data.node === 'qc') {
       // replay 路径:trace.output 是 "verdict=… issues=… degraded=… retry=…" 字符串。
       const out = e.data.summary?.output ?? ''
       const vm = out.match(/verdict=(\w+)/)

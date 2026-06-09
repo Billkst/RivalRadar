@@ -4,6 +4,33 @@ All notable changes to RivalRadar are documented here per [Keep a Changelog](htt
 
 Versioning follows 4-digit semver `MAJOR.MINOR.PATCH.MICRO`(< 1.0 表 API 未稳定,迭代期允许 breaking changes)。
 
+## [0.6.0.0] - 2026-06-09
+
+**过程可视化重做(Plan A–D)+ 实时引擎 + 三级佐证策展 + replay 富回放**。把"调研过程"从黑盒做成用户可见的实时剧场:采集→分析→撰写→质检每步的中间产物逐条流式呈现;证据支持度做成 cell/决策级三色(充分/部分/已剔除),质检从"一票否决法官"翻成"策展人";`/stream` 回放从持久化状态重建完整过程事件。401 pytest 绿 + `tsc -b` + build 绿;ship 前 4 路 + Codex 跨模型对抗评审收口 3 个 finding。
+
+### Added
+
+- **实时引擎「此刻」追踪卡**(`frontend/.../workbench/LiveTracker.tsx`)— 钉在右栏顶部常驻、原地刷新(不依赖滚动):采集显最新检索词 + 命中来源逐条"播放";分析显对比矩阵 N/total 维进度条 + 抽取工作日志 feed;撰写显报告打字 tail + TTFB 脉冲骨架;质检显逐格校验流 + 三色汇总;含 decide 决策合成阶段计时(治长阶段冻结)。
+- **研究员工作台**(`frontend/.../workbench/`)— ResearcherWorkbench 外壳 + 正序执行时间轴(绝对时刻 + 角色 + → 效果)+ 来源卡(真标题/域名/日期 + 陈旧标记 + 三色)+ 重试环动画 + agent 工牌(工号/状态灯/retry)+ 抽屉式证据/步骤/技能导览(navStack + focus trap a11y)。
+- **三级佐证体系**(`rivalradar/`)— cell/决策级 `support_verdict`(充分/部分/不支撑);质检 `_judge_comparison_verdicts` 逐格裁决;`curate_analysis` 写回三色、丢弃不支撑格(策展人模型);`curation_drops` 表 + REST `/runs/:id/curation-drops` 结构化记录被丢格。
+- **真检索词 + 富过程事件**(`rivalradar/`)— `queries` 表 + collect_node emit query/query_hit/source/evidence_delta;analyze emit cell_row 逐维;两步式 insight 流式起草(stream draft → structured,回退完整)。
+- **replay 富回放**(`rivalradar/api/sse.py`)— `/stream` 从持久化 trace/evidence 重建过程事件(检索台/来源/矩阵/重试环),刷新/深链进历史 run 不丢"看得见的活儿"。
+- **演示模式 fakeSSEPlayer**(`frontend/`)— 无后端可放完整过程剧场(Plan D 全平价),供 `/browse` 与离线演示。
+- **StatusBar 计时器**(`frontend/.../cockpit/StatusBar.tsx`)— running 实时走表、终态显总耗时。
+
+### Changed
+
+- **质检信任模型翻转**(`rivalradar/agents/qc.py`)— 从"一票否决法官"(一弱格否决整 run → 假降级)→"策展人"(站得住留、站不住丢、缺的显「—」+ 覆盖说明);防虚构硬门不变。
+- **降级判别收窄**(`rivalradar/graph/nodes.py`)— 仅"影响用户可见产出(对比矩阵 cell)"的降级才置 run 级 degraded;profile 辅助项(功能/定价/画像/SWOT)抽取失败只折进 trace、不污染整 run(真 run 钓出:一个 SWOT 截断曾误标满矩阵健康 run 降级)。
+- **分析员对比 claim 收紧**(`rivalradar/agents/analyst.py`)— 新增对比纪律 `_COMPARE_RULE`:每格围绕单一产品/版本线写可比核心事实、禁跨产品口径混写、禁派生营销数字 → 真 run partial 50%→0(治"全部分佐证 + 空格");质检 entailment 闸一字未动。
+
+### Fixed
+
+- **replay 多轮 round 退化**(`frontend/.../workbench/ExecutionTimeline.tsx`)— evidence 表无 round 列致 replay source.round 全为 0,加 `roundsReliable` 判定:多采集轮却单一 round 时聚合显「共 N 来源」不谎报「本轮」。
+- **replay 总耗时错误**(`frontend/.../stores/runStore.ts`)— replay 的 start/done 都是服务端 `_now()` → runStartTs 置 null,终态不显错误回放时长(ship 评审 Codex 抓)。
+- **降级横幅文案误导**(`frontend/.../cockpit/DecisionSurface.tsx`)— degraded 可能来自决策溯源失败,文案不再写死"矩阵缺维"(ship 评审 Codex 抓)。
+- 反幻觉清理(无 proto-tags、来源链真实)、a11y(focus order / 色盲双编码 / 对比度 / 44px / reduced-motion)、工作台全状态覆盖(loading / failed / cancelled / done)。
+
 ## [0.5.0.0] - 2026-06-06
 
 **post-real-run-7 硬化 + 范文库 + analyze 卡死根治**。真 run 暴露 analyze 卡死无法完成,实证定位并根治时延 / 取消 / 墙钟 / 精准重跑;新增他人专业竞品分析范文库(原文配图 + 杂志排版 + PDF 在线阅览 + 北京时间全量);ship-time 跨模型(Claude + Codex)对抗评审收口 3 个 finding。350 pytest 绿 + `tsc -b` 绿。

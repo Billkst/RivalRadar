@@ -16,7 +16,16 @@
 import * as React from 'react'
 import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { useRunStore } from '@/stores/runStore'
-import type { RunRequest, SSEEvent } from '@/types/api'
+import type {
+  RunRequest,
+  SSEEvent,
+  SSEQueryData,
+  SSEQueryHitData,
+  SSESourceData,
+  SSEEvidenceDeltaData,
+  SSECellRowData,
+  SSEVerdictRecheckData,
+} from '@/types/api'
 
 let activeController: AbortController | null = null
 
@@ -55,7 +64,20 @@ function parseSSE(msg: { event: string; data: string }): SSEEvent | null {
         return { type: 'error', data }
       case 'done':
         return { type: 'done', data }
+      case 'query':
+        return { type: 'query', data: data as SSEQueryData }
+      case 'query_hit':
+        return { type: 'query_hit', data: data as SSEQueryHitData }
+      case 'source':
+        return { type: 'source', data: data as SSESourceData }
+      case 'evidence_delta':
+        return { type: 'evidence_delta', data: data as SSEEvidenceDeltaData }
+      case 'cell_row':
+        return { type: 'cell_row', data: data as SSECellRowData }
+      case 'verdict_recheck':
+        return { type: 'verdict_recheck', data: data as SSEVerdictRecheckData }
       default:
+        // 枚举防御:未知事件安全跳过(return null),不 throw —— 防后端将来加事件炸前端。
         return null
     }
   } catch {

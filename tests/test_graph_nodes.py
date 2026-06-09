@@ -11,7 +11,7 @@ from rivalradar.graph.nodes import (
 from rivalradar.llm.structured import StructuredCallError
 from rivalradar.schema.models import (
     CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
-    ComparisonRow, ComparisonCell, EvidenceRef, ReportInsight, QCIssue,
+    ComparisonRow, ComparisonCell, EvidenceRef, ReportInsight,
 )
 from rivalradar.search.base import SearchResult
 from rivalradar.storage import repository as repo
@@ -103,7 +103,7 @@ def test_analyze_node_converts_evidence_and_persists(conn, monkeypatch):
         name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
     seen = {}
 
-    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         seen["n"] = len(evidence)                  # 验证 dict→Evidence 转换后传入
         return fake
     monkeypatch.setattr(nodes_mod, "analyze", _fake_analyze)
@@ -117,9 +117,11 @@ def test_analyze_node_converts_evidence_and_persists(conn, monkeypatch):
     assert repo.get_analysis(conn, "r1") is not None              # 落库
 
 
-def test_analyze_node_sets_degraded_when_extraction_degrades(conn, monkeypatch):
-    # silent-failure 修复端到端:analyze 把降级 label 填进 degraded_sink → 节点置 run 级
-    # degraded(out["degraded"]=True)+ trace output_summary 含降级 marker(降级必可见)。
+def test_analyze_node_profile_failure_does_not_degrade_run(conn, monkeypatch):
+    # [[qc-curator-not-judge]] 回归(真 run run_3073ba01facb):profile 辅助项(features/
+    # pricing/personas/swot)抽取降级**不**置 run 级 degraded —— 它们不进对比矩阵/决策/请求
+    # 维度,用户界面看不到。一个 SWOT 截断曾把 113 证据/满矩阵/QC pass 的健康 run 误标降级。
+    # trace output_summary 仍折进降级 marker(观测可见,不静默)。
     import rivalradar.graph.nodes as nodes_mod
     from rivalradar.schema.models import (
         CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
@@ -127,9 +129,9 @@ def test_analyze_node_sets_degraded_when_extraction_degrades(conn, monkeypatch):
     fake = CompetitorAnalysis(competitors=[CompetitorProfile(
         name="Notion", pricing=PricingModel(model_type="未知"), swot=SWOT())], comparison=[])
 
-    def _degrading_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+    def _degrading_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         if degraded_sink is not None:
-            degraded_sink.append("Notion.features")  # 模拟单项抽取降级
+            degraded_sink.append("Notion.swot")  # profile 辅助项抽取降级(用户不可见)
         return fake
     monkeypatch.setattr(nodes_mod, "analyze", _degrading_analyze)
     repo.create_run(conn, "r1", ["Notion"], ["pricing"])
@@ -137,10 +139,35 @@ def test_analyze_node_sets_degraded_when_extraction_degrades(conn, monkeypatch):
     ev = [{"id": "e1", "competitor": "Notion", "dimension": "pricing", "content": "c",
            "source_url": "u", "source_title": "t", "language": "en", "fetched_at": "t0"}]
     out = node({"competitors": ["Notion"], "evidence": ev}, _CFG)
-    assert out.get("degraded") is True                               # run 级 degraded 置位
+    assert out.get("degraded") is not True                           # profile 项失败不污染整 run
     traces = repo.list_trace(conn, "r1")
     analyze_trace = [t for t in traces if t["node"] == "analyze"][-1]
-    assert "降级" in analyze_trace["output_summary"]                # trace 含降级 marker(可见)
+    assert "降级" in analyze_trace["output_summary"]                # trace 仍含降级 marker(观测可见)
+
+
+def test_analyze_node_comparison_failure_degrades_run(conn, monkeypatch):
+    # 失败路径对照:影响用户可见产出(对比矩阵 cell)的降级**才**置 run 级 degraded(降级必可见)。
+    import rivalradar.graph.nodes as nodes_mod
+    from rivalradar.schema.models import (
+        CompetitorAnalysis, CompetitorProfile, PricingModel, SWOT,
+    )
+    fake = CompetitorAnalysis(competitors=[CompetitorProfile(
+        name="Notion", pricing=PricingModel(model_type="未知"), swot=SWOT())], comparison=[])
+
+    def _degrading_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
+        if degraded_sink is not None:
+            degraded_sink.append("comparison.pricing")  # 对比矩阵某维降级(用户可见)
+        return fake
+    monkeypatch.setattr(nodes_mod, "analyze", _degrading_analyze)
+    repo.create_run(conn, "r1", ["Notion"], ["pricing"])
+    node = make_analyze_node(conn=conn, client=None, model="m")
+    ev = [{"id": "e1", "competitor": "Notion", "dimension": "pricing", "content": "c",
+           "source_url": "u", "source_title": "t", "language": "en", "fetched_at": "t0"}]
+    out = node({"competitors": ["Notion"], "evidence": ev}, _CFG)
+    assert out.get("degraded") is True                               # 矩阵降级 → run 级 degraded
+    traces = repo.list_trace(conn, "r1")
+    analyze_trace = [t for t in traces if t["node"] == "analyze"][-1]
+    assert "降级" in analyze_trace["output_summary"]
 
 
 def test_analyze_node_retry_reuses_profiles_only_recompares(conn, monkeypatch):
@@ -158,7 +185,7 @@ def test_analyze_node_retry_reuses_profiles_only_recompares(conn, monkeypatch):
         calls["analyze"] += 1
         return CompetitorAnalysis(competitors=prior_profiles, comparison=[])
 
-    def _fake_build_comparison(profiles, evidence, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+    def _fake_build_comparison(profiles, evidence, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         calls["build_comparison"] += 1
         calls["profiles_in"] = [p.name for p in profiles]
         return []
@@ -186,7 +213,7 @@ def test_analyze_node_first_pass_runs_full_analyze(conn, monkeypatch):
     )
     calls = {"analyze": 0, "build_comparison": 0}
 
-    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         calls["analyze"] += 1
         return CompetitorAnalysis(competitors=[CompetitorProfile(
             name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
@@ -214,7 +241,7 @@ def test_analyze_node_retry_collect_runs_full_analyze_not_reuse(conn, monkeypatc
         name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[]).model_dump()
     calls = {"analyze": 0, "build_comparison": 0}
 
-    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         calls["analyze"] += 1
         return CompetitorAnalysis(competitors=[CompetitorProfile(
             name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
@@ -243,7 +270,7 @@ def test_analyze_node_retry_analyze_bad_prior_falls_back_to_full_analyze(conn, m
     bad_prior = {"competitors": "不是列表", "comparison": []}  # CompetitorAnalysis(**prior) 必抛
     calls = {"analyze": 0, "build_comparison": 0}
 
-    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+    def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         calls["analyze"] += 1
         return CompetitorAnalysis(competitors=[CompetitorProfile(
             name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())], comparison=[])
@@ -266,7 +293,7 @@ def test_write_node_renders_and_persists(conn, monkeypatch):
     import rivalradar.graph.nodes as nodes_mod
     monkeypatch.setattr(
         nodes_mod, "write_report_with_insight",
-        lambda analysis, evidence, *, as_of, client, model: (
+        lambda analysis, evidence, *, as_of, client, model, emit=None: (
             "# 竞品分析报告\nX",
             ReportInsight(market_context="m", differentiation_thesis="d",
                           actionable_takeaway="a")))
@@ -301,10 +328,10 @@ def _evidence_all_dims(eid="g1"):
 
 
 def test_qc_node_degrades_on_entailment_failure(conn, monkeypatch):
-    # check_entailment 上抛 → 节点捕获降级为仅确定性闸(必办项①)
+    # curate 蕴含判定上抛 → 节点捕获降级为仅确定性闸(必办项①)
     def _boom(*a, **k):
         raise StructuredCallError("entailment boom")
-    monkeypatch.setattr(qc, "check_entailment", _boom)
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", _boom)
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
     node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     state = {"analysis": _full_clean_analysis().model_dump(),
@@ -317,7 +344,7 @@ def test_qc_node_degrades_on_entailment_failure(conn, monkeypatch):
 
 
 def test_qc_node_retry_count_bumps_only_with_prior_result(conn, monkeypatch):
-    monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", lambda *a, **k: {})  # curate 不丢、不降级
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
     node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     base = {"analysis": _full_clean_analysis().model_dump(), "evidence": _evidence_all_dims()}
@@ -328,7 +355,7 @@ def test_qc_node_retry_count_bumps_only_with_prior_result(conn, monkeypatch):
 
 
 def test_qc_node_low_coverage_triggers_retry_collect(conn, monkeypatch):
-    monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", lambda *a, **k: {})  # curate 不丢、不降级
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
     node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     # 只覆盖 pricing 的分析 → coverage 缺 5 维 → retry_collect
@@ -348,7 +375,7 @@ def test_qc_node_degrades_on_non_structured_error(conn, monkeypatch):
     # 网络/限流类原生异常(非 StructuredCallError)也必须降级,不崩整图(必办项①,opus 评审 C1)
     def _boom(*a, **k):
         raise RuntimeError("rate limit / network blip")
-    monkeypatch.setattr(qc, "check_entailment", _boom)
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", _boom)
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
     node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     state = {"analysis": _full_clean_analysis().model_dump(),
@@ -373,11 +400,11 @@ def test_qc_node_rerenders_report_from_curated_analysis(conn, monkeypatch):
     # nodes.generate_insight(import 绑定不同名字)→ 两侧都桩掉免 LLM
     monkeypatch.setattr(writer_mod, "generate_insight", _stub_insight)
     monkeypatch.setattr(nodes_mod, "generate_insight", _stub_insight)
-    # check_entailment 判 pricing 的 cell 不支撑 → 被策展丢;deployment 的 cell 留下
+    # curate 路径走 _judge_comparison_verdicts(Plan B Task 5):pricing 判 unsupported →
+    # 被策展丢;deployment 无判定 → 默认 supported → 留下
     monkeypatch.setattr(
-        qc, "check_entailment",
-        lambda *a, **k: [QCIssue(competitor="Notion", dimension="pricing",
-                                 problem_type="hallucination", detail="证据不支撑")])
+        qc, "_judge_comparison_verdicts",
+        lambda *a, **k: {("Notion", "pricing"): qc.EntailmentVerdict(verdict="unsupported")})
     ref = [EvidenceRef(evidence_id="g1", quote="q")]
     analysis = CompetitorAnalysis(
         competitors=[CompetitorProfile(name="Notion",
@@ -411,6 +438,42 @@ def test_qc_node_rerenders_report_from_curated_analysis(conn, monkeypatch):
     assert repo.get_report(conn, "r1") == qout["report"]  # 落库也是策展后报告
 
 
+def test_qc_node_emits_verdict_recheck_and_persists_drops(conn, monkeypatch):
+    import rivalradar.graph.nodes as nodes_mod
+    from rivalradar.agents import qc as qcmod
+    from rivalradar.schema.models import CompetitorAnalysis, ComparisonRow, ComparisonCell
+    from rivalradar.storage.repository import create_run, list_curation_drops
+
+    curated = CompetitorAnalysis(competitors=[], comparison=[
+        ComparisonRow(dimension="pricing", cells=[
+            ComparisonCell(competitor="Notion", value_type="enum", value="v", support_verdict="partial")])])
+    monkeypatch.setattr(qcmod, "curate_analysis",
+                        lambda *a, **k: (curated, [{"competitor": "Notion", "dimension": "deployment"}]))
+    # 防真打:其余确定性门返空 issue
+    monkeypatch.setattr(qcmod, "check_traceability", lambda *a, **k: [])
+    monkeypatch.setattr(qcmod, "check_ontology", lambda *a, **k: [])
+    monkeypatch.setattr(qcmod, "check_coverage", lambda *a, **k: [])
+
+    create_run(conn, "rq1", ["Notion"], ["pricing"])
+    node = nodes_mod.make_qc_node(conn=conn, client=None, model="m", as_of="2026-06-07")
+    events = []
+    state = {"analysis": {"competitors": [], "comparison": [
+        {"dimension": "pricing", "cells": [
+            {"competitor": "Notion", "value_type": "enum", "value": "v", "evidence_refs": []}]}]},
+        "evidence": [], "competitors": ["Notion"], "dimensions": ["pricing"], "retry_count": 0}
+    out = node(state, {"configurable": {"thread_id": "rq1", "emit": lambda t, d: events.append((t, d))}})
+
+    vr = [d for t, d in events if t == "verdict_recheck"]
+    assert len(vr) == 1
+    assert vr[0]["summary"]["partial"] == 1 and vr[0]["summary"]["dropped"] == 1
+    assert vr[0]["dropped"] == [{"competitor": "Notion", "dimension": "deployment"}]
+    # 病因不变量(codex #1):curated 含 partial cell,但 verdict 不路由 → 不是 retry_analyze
+    assert out["qc_result"]["verdict"] != "retry_analyze"
+    # cell 剔除结构化落库(replay 平价,codex #2/#5)
+    rows = list_curation_drops(conn, "rq1")
+    assert [(r["scope"], r["competitor"], r["dimension"]) for r in rows] == [("cell", "Notion", "deployment")]
+
+
 def _two_dim_analysis_with_drop():
     """pricing cell(将被策展丢)+ deployment cell(留下),均挂合法引用。"""
     ref = [EvidenceRef(evidence_id="g1", quote="q")]
@@ -440,10 +503,9 @@ def test_qc_node_regenerates_insight_when_cells_dropped(conn, monkeypatch):
         return ReportInsight(market_context="REGEN_FROM_CURATED",
                              differentiation_thesis="d", actionable_takeaway="a")
     monkeypatch.setattr(nodes_mod, "generate_insight", _spy_insight)  # qc 调的是 nodes 绑定
-    monkeypatch.setattr(
-        qc, "check_entailment",
-        lambda *a, **k: [QCIssue(competitor="Notion", dimension="pricing",
-                                 problem_type="hallucination", detail="x")])
+    monkeypatch.setattr(  # curate 路径走 _judge_comparison_verdicts(Plan B Task 5),pricing 判 unsupported → 丢
+        qc, "_judge_comparison_verdicts",
+        lambda *a, **k: {("Notion", "pricing"): qc.EntailmentVerdict(verdict="unsupported")})
     analysis, evidence = _two_dim_analysis_with_drop()
     pre = ReportInsight(market_context="PRECURATION_HEADLINE",
                         differentiation_thesis="x", actionable_takeaway="y").model_dump()
@@ -467,7 +529,8 @@ def test_qc_node_does_not_regenerate_insight_when_nothing_dropped(conn, monkeypa
         nodes_mod, "generate_insight",
         lambda body, *, client, model: calls.append(body) or ReportInsight(
             market_context="SHOULD_NOT_APPEAR", differentiation_thesis="d", actionable_takeaway="a"))
-    monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])  # 不丢任何 cell
+    # curate 路径走 _judge_comparison_verdicts(Plan B Task 5):空 map → 不丢任何 cell、不降级
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", lambda *a, **k: {})
     pre = ReportInsight(market_context="ORIG_HEADLINE",
                         differentiation_thesis="x", actionable_takeaway="y").model_dump()
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
@@ -480,14 +543,14 @@ def test_qc_node_does_not_regenerate_insight_when_nothing_dropped(conn, monkeypa
 
 
 def test_qc_node_rerenders_report_on_entailment_failure_path(conn, monkeypatch):
-    """降级路径回归(ship 对抗验证 nit):check_entailment 抛 → curate 降级走机械门 fallback,
+    """降级路径回归(ship 对抗验证 nit):curate 蕴含判定抛 → curate 降级走机械门 fallback,
     但 insight 仍在 state → 重渲染必须仍发生(用 curated body)且不崩图。悬空引用 cell 被机械门
     丢掉,不残留在报告里;degraded 置位。"""
     import rivalradar.graph.nodes as nodes_mod
 
     def _boom(*a, **k):
         raise RuntimeError("entailment network blip")
-    monkeypatch.setattr(qc, "check_entailment", _boom)
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", _boom)  # curate 蕴含判定抛 → 降级走机械门
     monkeypatch.setattr(  # 机械门丢了悬空 cell → dropped 非空 → 重生成 insight(桩掉免 LLM)
         nodes_mod, "generate_insight",
         lambda body, *, client, model: ReportInsight(
@@ -626,10 +689,10 @@ def test_qc_node_degraded_sticky_across_rounds(conn, monkeypatch):
     """ship 修复 — degraded 必须 sticky OR 累积:round 1 entailment 降级,
     round 2 entailment 成功,终态 state.degraded 必须仍为 True(不能被 round 2 overwrite)。
     否则 finalize 把 db.degraded 写 False,前端 §11.5 警示横幅消失、对用户隐瞒降级事实。"""
-    # round 1: entailment boom → local degraded=True
+    # round 1: curate 蕴含判定 boom → local degraded=True
     def _boom(*a, **k):
         raise RuntimeError("round 1 rate limit")
-    monkeypatch.setattr(qc, "check_entailment", _boom)
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", _boom)
     repo.create_run(conn, "r1", ["Notion"], list(_CONTROLLED))
     node = make_qc_node(conn=conn, client=None, model="m", as_of="2026-05-26")
     base = {"analysis": _full_clean_analysis().model_dump(),
@@ -637,8 +700,8 @@ def test_qc_node_degraded_sticky_across_rounds(conn, monkeypatch):
     r1 = node(base, _CFG)
     assert r1["degraded"] is True  # round 1 降级 ✓
 
-    # round 2: entailment 成功 — 但 prior state.degraded=True 必须 sticky
-    monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
+    # round 2: curate 蕴含判定成功 — 但 prior state.degraded=True 必须 sticky
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", lambda *a, **k: {})
     r2 = node({**base, "degraded": True, "qc_result": r1["qc_result"]}, _CFG)
     assert r2["degraded"] is True, \
         "BUG: degraded 被 round 2 成功 overwrite 为 False → 前端横幅消失"
@@ -675,7 +738,7 @@ class _DecCompletions:
     不能再按 call-order 派发 verdict(否则"留我/丢我"会随机错配)。entail_map 给定时,
     蕴含调用按 prompt 里的决策 action 内容键匹配(顺序无关、线程安全);generate 调用仍走
     order-index。entail_map=None 时退回纯 order-index(0/1 个蕴含调用的老测试不受影响)。"""
-    _ENTAIL_MARK = "判断下列证据是否支撑该决策建议"
+    _ENTAIL_MARK = "判断下列证据对该决策建议的支撑程度"
 
     def __init__(self, payloads, entail_map=None):
         self.payloads = list(payloads); self.calls = 0
@@ -690,7 +753,8 @@ class _DecCompletions:
             content = ""
         if self.entail_map is not None and self._ENTAIL_MARK in content:
             ok = next((v for a, v in self.entail_map.items() if a in content), True)
-            return _dec_wrap(json.dumps({"supported": bool(ok), "reason": ""}))
+            verdict_str = "supported" if ok else "unsupported"
+            return _dec_wrap(json.dumps({"verdict": verdict_str, "reason": ""}))
         with self._lock:
             p = self.payloads[self.calls]; self.calls += 1
         return _dec_wrap(p)
@@ -708,7 +772,7 @@ def _decision_payload(eid="g1"):
         "evidence_refs": [{"evidence_id": eid, "quote": "q"}], "watch": None}]})
 
 
-_SUPPORTED = json.dumps({"supported": True, "reason": ""})
+_SUPPORTED = json.dumps({"verdict": "supported", "reason": ""})
 
 
 def test_decide_node_generates_qcs_and_persists(conn):
@@ -822,3 +886,59 @@ def test_decide_node_degrades_on_entailment_failure(conn):
     assert out["decision_degraded"] is True               # 蕴含失败 → 降级
     assert completions.calls == 2                          # gen + 1 次 entail(抛即 break,不 storm)
     assert repo.get_decisions(conn, "r1").decisions[0].action == "本周评估接入"  # 机械门通过的决策仍落库
+
+
+# ── Task 2: write_node 透传 emit → insight 两步流式 ─────────────────────────
+
+def test_write_node_streams_insight_chunks(conn):
+    import json
+    from types import SimpleNamespace
+    from rivalradar.graph.nodes import make_write_node
+
+    class _STS:
+        def create(self, **kw):
+            if kw.get("stream"):
+                return (SimpleNamespace(choices=[SimpleNamespace(delta=SimpleNamespace(content=c))])
+                        for c in ["草", "稿"])
+            return SimpleNamespace(choices=[SimpleNamespace(message=SimpleNamespace(
+                tool_calls=[SimpleNamespace(function=SimpleNamespace(arguments=json.dumps(
+                    {"market_context": "m", "differentiation_thesis": "d", "actionable_takeaway": "a"})))]))],
+                usage=SimpleNamespace(total_tokens=10))
+    client = SimpleNamespace(chat=SimpleNamespace(completions=_STS()))
+
+    repo.create_run(conn, "rw1", ["Notion"], ["pricing"])
+    node = make_write_node(conn=conn, client=client, model="m", as_of="2026-06-07")
+    chunks = []
+    def emit(ev_type, data):
+        if ev_type == "chunk":
+            chunks.append(data["delta"])
+    cfg = {"configurable": {"thread_id": "rw1", "emit": emit}}
+    out = node({"analysis": {"competitors": [], "comparison": []}, "evidence": []}, cfg)
+    assert chunks == ["草", "稿"]                          # write_node 真 run 路径走两步流式
+    assert out["insight"]["market_context"] == "m"        # 结构化产物落库契约不破
+
+
+def test_analyze_node_emits_cell_row(conn, monkeypatch):
+    import rivalradar.graph.nodes as nodes_mod
+    from rivalradar.schema.models import CompetitorAnalysis, ComparisonRow, ComparisonCell
+
+    def fake_analyze(evidence, competitors, *, dimensions, degraded_sink, on_progress,
+                     on_cell_row=None, client, model):
+        if on_cell_row is not None:
+            on_cell_row("pricing", ComparisonRow(dimension="pricing", cells=[
+                ComparisonCell(competitor="Notion", value_type="enum", value="v")]), "ok")
+        return CompetitorAnalysis(competitors=[], comparison=[
+            ComparisonRow(dimension="pricing", cells=[
+                ComparisonCell(competitor="Notion", value_type="enum", value="v")])])
+
+    monkeypatch.setattr(nodes_mod, "analyze", fake_analyze)
+    repo.create_run(conn, "ra1", ["Notion"], ["pricing"])
+    node = nodes_mod.make_analyze_node(conn=conn, client=None, model="m")
+    events = []
+    def emit(ev_type, data):
+        events.append((ev_type, data))
+    out = node({"evidence": [], "competitors": ["Notion"], "dimensions": ["pricing"]},
+               {"configurable": {"thread_id": "ra1", "emit": emit}})
+    cr = [d for t, d in events if t == "cell_row"]
+    assert len(cr) == 1 and cr[0]["dimension"] == "pricing" and cr[0]["status"] == "ok"
+    assert cr[0]["cells"][0]["competitor"] == "Notion"

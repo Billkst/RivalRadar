@@ -52,6 +52,41 @@ CREATE TABLE IF NOT EXISTS insight (
     payload    TEXT NOT NULL,
     created_at TEXT NOT NULL
 );
+-- 真实查询词(Plan A:研究员检索台「看得见的活儿」)。CREATE IF NOT EXISTS 自动
+-- 在 init_db 建(老 db 也建,老 run 无行 → 天然空态);round=retry 轮次(0=首轮)。
+CREATE TABLE IF NOT EXISTS queries (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      TEXT NOT NULL,
+    competitor  TEXT NOT NULL,
+    dimension   TEXT NOT NULL,
+    language    TEXT NOT NULL,
+    query_text  TEXT NOT NULL,
+    round       INTEGER NOT NULL DEFAULT 0,
+    hit_count   INTEGER NOT NULL DEFAULT 0,
+    created_at  TEXT NOT NULL
+);
+-- 策展剔除清单(Plan B:support_verdict 真算后被丢弃的 cell/decision)。结构化列(codex #5,
+-- 不拼接 label)供 replay/刷新还原矩阵「—」与 StatusBar 红○计数(spec §7.3);scope=cell|decision。
+-- 写入用 REPLACE per (run_id, scope) 语义(codex #2:qc 多轮重试每轮覆盖,绝不留幽灵剔除)。
+CREATE TABLE IF NOT EXISTS curation_drops (
+    id          INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id      TEXT NOT NULL,
+    scope       TEXT NOT NULL,
+    competitor  TEXT NOT NULL DEFAULT '',
+    dimension   TEXT NOT NULL DEFAULT '',
+    detail      TEXT NOT NULL DEFAULT '',
+    created_at  TEXT NOT NULL
+);
+-- agent 技能持久化(Plan C:run 无关的 agent 配置,spec §6.3/§7.3)。
+-- CREATE IF NOT EXISTS 自动在 init_db 建;PK (agent_id, skill_id) 让 upsert 幂等覆盖。
+CREATE TABLE IF NOT EXISTS agent_skills (
+    agent_id     TEXT NOT NULL,
+    skill_id     TEXT NOT NULL,
+    version      TEXT NOT NULL DEFAULT 'v1',
+    enabled      INTEGER NOT NULL DEFAULT 1,
+    installed_at TEXT NOT NULL,
+    PRIMARY KEY (agent_id, skill_id)
+);
 CREATE TABLE IF NOT EXISTS trace (
     id             INTEGER PRIMARY KEY AUTOINCREMENT,
     run_id         TEXT NOT NULL,
@@ -64,6 +99,8 @@ CREATE TABLE IF NOT EXISTS trace (
     ts             TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_run ON evidence(run_id);
+CREATE INDEX IF NOT EXISTS idx_queries_run ON queries(run_id);
+CREATE INDEX IF NOT EXISTS idx_curation_drops_run ON curation_drops(run_id);
 CREATE INDEX IF NOT EXISTS idx_trace_run ON trace(run_id);
 CREATE TABLE IF NOT EXISTS annotations (
     id              INTEGER PRIMARY KEY AUTOINCREMENT,

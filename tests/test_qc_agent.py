@@ -150,12 +150,12 @@ class _FakeClient:
 
 
 def test_check_entailment_flags_unsupported():
-    # 单结论(pricing 挂 e1),模型判 not supported → hallucination
+    # 单结论(pricing 挂 e1),模型判 unsupported → hallucination
     analysis = CompetitorAnalysis(competitors=[CompetitorProfile(
         name="Notion",
         pricing=PricingModel(model_type="freemium", evidence_refs=[_ref("e1")]),
         swot=SWOT())])
-    client = _FakeClient([json.dumps({"supported": False, "reason": "证据未提定价"})])
+    client = _FakeClient([json.dumps({"verdict": "unsupported", "reason": "证据未提定价"})])
     issues = check_entailment(analysis, [_ev("e1")], client=client, model="m")
     assert len(issues) == 1 and issues[0].problem_type == "hallucination"
 
@@ -165,7 +165,7 @@ def test_check_entailment_passes_supported():
         name="Notion",
         pricing=PricingModel(model_type="freemium", evidence_refs=[_ref("e1")]),
         swot=SWOT())])
-    client = _FakeClient([json.dumps({"supported": True, "reason": ""})])
+    client = _FakeClient([json.dumps({"verdict": "supported", "reason": ""})])
     assert check_entailment(analysis, [_ev("e1")], client=client, model="m") == []
 
 
@@ -185,9 +185,9 @@ def test_check_entailment_scopes_to_requested_dimensions():
         name="Notion",
         pricing=PricingModel(model_type="freemium", evidence_refs=[_ref("e1")]),
         swot=SWOT(threats=[SWOTPoint(text="可能被巨头分流", evidence_refs=[_ref("e2")])]))])
-    # 两个 payload 都判 not supported;scope 后只该消费 pricing 那次 → 仅 1 issue
-    client = _FakeClient([json.dumps({"supported": False, "reason": "x"}),
-                          json.dumps({"supported": False, "reason": "y"})])
+    # 两个 payload 都判 unsupported;scope 后只该消费 pricing 那次 → 仅 1 issue
+    client = _FakeClient([json.dumps({"verdict": "unsupported", "reason": "x"}),
+                          json.dumps({"verdict": "unsupported", "reason": "y"})])
     issues = check_entailment(analysis, [_ev("e1"), _ev("e2", dimension="swot")],
                               dimensions=("pricing",), client=client, model="m")
     assert len(issues) == 1
@@ -200,8 +200,8 @@ def test_check_entailment_no_scope_checks_all_dimensions():
         name="Notion",
         pricing=PricingModel(model_type="freemium", evidence_refs=[_ref("e1")]),
         swot=SWOT(threats=[SWOTPoint(text="t", evidence_refs=[_ref("e2")])]))])
-    client = _FakeClient([json.dumps({"supported": False, "reason": "x"}),
-                          json.dumps({"supported": False, "reason": "y"})])
+    client = _FakeClient([json.dumps({"verdict": "unsupported", "reason": "x"}),
+                          json.dumps({"verdict": "unsupported", "reason": "y"})])
     issues = check_entailment(analysis, [_ev("e1"), _ev("e2", dimension="swot")],
                               client=client, model="m")
     assert len(issues) == 2
@@ -219,14 +219,14 @@ def test_check_entailment_comparison_only_skips_profile_conclusions():
         comparison=[ComparisonRow(dimension="pricing", cells=[
             ComparisonCell(competitor="Notion", value_type="enum", value="免费起",
                            evidence_refs=[_ref("e3")])])])
-    # 三个 payload 都判 not supported;comparison_only 后只该消费对比 cell 那次 → 仅 1 issue
-    client = _FakeClient([json.dumps({"supported": False, "reason": "a"}),
-                          json.dumps({"supported": False, "reason": "b"}),
-                          json.dumps({"supported": False, "reason": "c"})])
+    # 三个 payload 都判 unsupported;comparison_only 后只该消费对比 cell 那次 → 仅 1 issue
+    client = _FakeClient([json.dumps({"verdict": "unsupported", "reason": "a"}),
+                          json.dumps({"verdict": "unsupported", "reason": "b"}),
+                          json.dumps({"verdict": "unsupported", "reason": "c"})])
     issues = check_entailment(analysis, [_ev("e1"), _ev("e2"), _ev("e3")],
                               comparison_only=True, client=client, model="m")
     assert len(issues) == 1
-    assert issues[0].detail.startswith("证据不支撑结论(对比:")
+    assert issues[0].detail.startswith("证据不支撑结论:")
 
 
 def test_check_entailment_comparison_only_with_dimensions_production_path():
@@ -242,9 +242,9 @@ def test_check_entailment_comparison_only_with_dimensions_production_path():
                 ComparisonCell(competitor="Notion", value_type="enum", value="开放平台",
                                evidence_refs=[_ref("e2")])]),
         ])
-    # 两个 cell 都判 not supported;dimensions=("pricing",) 后只 pricing cell 进蕴含 → 1 issue
-    client = _FakeClient([json.dumps({"supported": False, "reason": "a"}),
-                          json.dumps({"supported": False, "reason": "b"})])
+    # 两个 cell 都判 unsupported;dimensions=("pricing",) 后只 pricing cell 进蕴含 → 1 issue
+    client = _FakeClient([json.dumps({"verdict": "unsupported", "reason": "a"}),
+                          json.dumps({"verdict": "unsupported", "reason": "b"})])
     issues = check_entailment(analysis, [_ev("e1"), _ev("e2", dimension="integrations")],
                               dimensions=("pricing",), comparison_only=True, client=client, model="m")
     assert len(issues) == 1
@@ -262,7 +262,7 @@ def test_check_entailment_runs_concurrently():
             barrier.wait()  # 串行则永远等不齐 n 个 → 超时抛 BrokenBarrierError
             return SimpleNamespace(
                 choices=[SimpleNamespace(message=SimpleNamespace(tool_calls=[SimpleNamespace(
-                    function=SimpleNamespace(arguments=json.dumps({"supported": True, "reason": ""})))]))],
+                    function=SimpleNamespace(arguments=json.dumps({"verdict": "supported", "reason": ""})))]))],
                 usage=SimpleNamespace(total_tokens=10))
 
     class _BarrierClient:
@@ -288,7 +288,7 @@ def test_check_entailment_emits_per_cell_progress():
         comparison=[ComparisonRow(dimension="pricing", cells=[
             ComparisonCell(competitor=f"C{i}", value_type="enum", value="v", evidence_refs=[_ref("e1")])
             for i in range(2)])])
-    client = _FakeClient([json.dumps({"supported": True, "reason": ""}) for _ in range(2)])
+    client = _FakeClient([json.dumps({"verdict": "supported", "reason": ""}) for _ in range(2)])
     calls = []
     lock = threading.Lock()
 
@@ -341,7 +341,7 @@ def test_check_end_to_end_clean_passes():
             swot=SWOT())],
         comparison=rows)
     # 结论数 = pricing 1 条 + 6 个对比 cell = 7 → 蕴含 7 次 supported(空引用结论会被跳过,此处无)
-    client = _FakeClient([json.dumps({"supported": True, "reason": ""}) for _ in range(7)])
+    client = _FakeClient([json.dumps({"verdict": "supported", "reason": ""}) for _ in range(7)])
     result = check(analysis, [_ev("e1")], client=client, model="m")
     assert isinstance(result, QCResult)
     assert result.verdict == "pass" and result.issues == []
@@ -371,14 +371,14 @@ def test_check_decision_traceability_clean_when_valid():
 
 
 def test_check_decision_entailment_flags_unsupported():
-    client = _FakeClient([json.dumps({"supported": False, "reason": "证据与该建议无关"})])
+    client = _FakeClient([json.dumps({"verdict": "unsupported", "reason": "证据与该建议无关"})])
     issues = check_decision_entailment([_decision(refs=("e1",))], [_ev("e1")], client=client, model="m")
     assert len(issues) == 1 and issues[0].problem_type == "hallucination"
     assert issues[0].dimension == "decision"
 
 
 def test_check_decision_entailment_clean_when_supported():
-    client = _FakeClient([json.dumps({"supported": True, "reason": ""})])
+    client = _FakeClient([json.dumps({"verdict": "supported", "reason": ""})])
     assert check_decision_entailment([_decision(refs=("e1",))], [_ev("e1")],
                                      client=client, model="m") == []
 
@@ -386,7 +386,7 @@ def test_check_decision_entailment_clean_when_supported():
 def test_check_decision_entailment_cost_guard_caps_calls():
     """COST GUARD(Codex #4):决策数 > max_calls 时封顶,防 retry-storm 撞 90s timeout。"""
     decisions = [_decision(action=f"动作{i}", refs=("e1",)) for i in range(10)]
-    client = _FakeClient([json.dumps({"supported": True, "reason": ""}) for _ in range(10)])
+    client = _FakeClient([json.dumps({"verdict": "supported", "reason": ""}) for _ in range(10)])
     check_decision_entailment(decisions, [_ev("e1")], client=client, model="m", max_calls=3)
     assert client.chat.completions.calls == 3  # 只调 3 次,其余 7 条不验证(机械门仍覆盖)
 
@@ -460,11 +460,11 @@ def test_curate_drops_unsupported_cell(monkeypatch):
     """蕴含判不支撑的对比 cell 被静默丢弃(不再产 hallucination 否决整 run)。"""
     import rivalradar.agents.qc as qc_mod
     monkeypatch.setattr(qc_mod, "structured_call",
-                        lambda *a, **k: EntailmentVerdict(supported=False, reason="x"))
+                        lambda *a, **k: EntailmentVerdict(verdict="unsupported", reason="x"))
     a = _analysis_with_cell(dim="pricing")
     curated, dropped = curate_analysis(a, [_ev()], dimensions=("pricing",),
                                        client=object(), model="m")
-    assert dropped  # 记录了丢弃
+    assert {"competitor": "Notion", "dimension": "pricing"} in dropped  # 结构化记录(codex #5)
     assert curated.comparison == []  # 唯一 cell 站不住 → row 清空
 
 
@@ -472,7 +472,7 @@ def test_curate_keeps_supported_cell(monkeypatch):
     """蕴含支撑的 cell 原样保留,dropped 为空。"""
     import rivalradar.agents.qc as qc_mod
     monkeypatch.setattr(qc_mod, "structured_call",
-                        lambda *a, **k: EntailmentVerdict(supported=True))
+                        lambda *a, **k: EntailmentVerdict(verdict="supported"))
     a = _analysis_with_cell(dim="pricing")
     curated, dropped = curate_analysis(a, [_ev()], dimensions=("pricing",),
                                        client=object(), model="m")
@@ -487,13 +487,13 @@ def test_curate_drops_dangling_ref_cell_without_llm(monkeypatch):
     calls = {"n": 0}
     def _fake(*a, **k):
         calls["n"] += 1
-        return EntailmentVerdict(supported=True)
+        return EntailmentVerdict(verdict="supported")
     monkeypatch.setattr(qc_mod, "structured_call", _fake)
     a = _analysis_with_cell(refs=[EvidenceRef(evidence_id="ZZZ", quote="x",
                                               support_verdict="supported")])
     curated, dropped = curate_analysis(a, [_ev()], dimensions=("pricing",),
                                        client=object(), model="m")
-    assert dropped
+    assert {"competitor": "Notion", "dimension": "pricing"} in dropped  # 结构化记录(codex #5)
     assert curated.comparison == []
     assert calls["n"] == 0  # 悬空引用直接机械丢弃,不送 LLM
 
@@ -502,7 +502,7 @@ def test_curate_leaves_out_of_scope_dim_untouched(monkeypatch):
     """非请求维度的 row 不策展(build_comparison 已 scoped,这里只防御)。"""
     import rivalradar.agents.qc as qc_mod
     monkeypatch.setattr(qc_mod, "structured_call",
-                        lambda *a, **k: EntailmentVerdict(supported=False))
+                        lambda *a, **k: EntailmentVerdict(verdict="unsupported"))
     a = _analysis_with_cell(dim="pricing")
     curated, dropped = curate_analysis(a, [_ev()], dimensions=("core_workflows",),
                                        client=object(), model="m")
@@ -527,7 +527,7 @@ def test_curate_decisions_drops_ungrounded(monkeypatch):
     """ungrounded 决策被丢弃(不再 decision_degraded 标降级),grounded 保留。"""
     import rivalradar.agents.qc as qc_mod
     monkeypatch.setattr(qc_mod, "structured_call",
-                        lambda *a, **k: EntailmentVerdict(supported=True))
+                        lambda *a, **k: EntailmentVerdict(verdict="supported"))
     good = Decision(stance="建议采用", action="上", why="y", horizon="短期",
                     risk_reversibility="可逆", risk_cost="低",
                     evidence_refs=[EvidenceRef(evidence_id="e1", quote="x", support_verdict="supported")])
@@ -537,3 +537,90 @@ def test_curate_decisions_drops_ungrounded(monkeypatch):
     kept, dropped = curate_decisions([good, bad], [_ev()], client=object(), model="m")
     assert [d.action for d in kept] == ["上"]  # 悬空引用决策被丢
     assert dropped
+
+
+# ── Task 4: EntailmentVerdict 三级 + _judge_comparison_verdicts ──────────────
+def test_entailment_verdict_is_three_level():
+    from rivalradar.agents.qc import EntailmentVerdict
+    v = EntailmentVerdict(verdict="partial", reason="单一来源")
+    assert v.verdict == "partial"
+    assert EntailmentVerdict().verdict == "supported"   # 默认 supported
+
+
+def test_judge_comparison_verdicts_returns_per_cell_three_level():
+    import json
+    from rivalradar.agents.qc import _judge_comparison_verdicts
+    analysis = _analysis_with_cell(dim="pricing")        # 1 竞品 Notion / pricing / 挂 e1
+    client = _FakeClient([json.dumps({"verdict": "partial", "reason": "旁证"})])
+    verdicts = _judge_comparison_verdicts(
+        analysis, [_ev("e1", "pricing")], dimensions=("pricing",),
+        client=client, model="m")
+    assert verdicts[("Notion", "pricing")].verdict == "partial"
+
+
+# ── Task 5: curate_analysis 回写 cell 级 verdict + 丢 unsupported(病因不变量)──
+def test_curate_writes_back_partial_and_keeps_cell(monkeypatch):
+    """病因不变量:partial cell 被保留且 cell.support_verdict 被回写 'partial'(不是丢)。"""
+    import rivalradar.agents.qc as qcmod
+    analysis = _analysis_with_cell(dim="pricing")
+    monkeypatch.setattr(qcmod, "_judge_comparison_verdicts",
+                        lambda *a, **k: {("Notion", "pricing"): qcmod.EntailmentVerdict(verdict="partial")})
+    curated, dropped = qcmod.curate_analysis(
+        analysis, [_ev("e1", "pricing")], dimensions=("pricing",), client=None, model="m")
+    cell = curated.comparison[0].cells[0]
+    assert cell.support_verdict == "partial"     # 回写发生(测病因:回写,不是断言某颜色)
+    assert dropped == []                          # partial 不丢
+
+
+def test_curate_drops_unsupported_and_records(monkeypatch):
+    import rivalradar.agents.qc as qcmod
+    analysis = _analysis_with_cell(dim="pricing")
+    monkeypatch.setattr(qcmod, "_judge_comparison_verdicts",
+                        lambda *a, **k: {("Notion", "pricing"): qcmod.EntailmentVerdict(verdict="unsupported")})
+    curated, dropped = qcmod.curate_analysis(
+        analysis, [_ev("e1", "pricing")], dimensions=("pricing",), client=None, model="m")
+    assert curated.comparison == [] or curated.comparison[0].cells == []   # unsupported 被剔
+    assert {"competitor": "Notion", "dimension": "pricing"} in dropped     # 剔除清单结构化记录(codex #5)
+
+
+def test_curate_returns_two_tuple_unchanged_signature(monkeypatch):
+    """病因不变量:curate_analysis 仍返二元组(verdict 骑在 cell 上,不改签名 → nodes.py 解包不破)。"""
+    import rivalradar.agents.qc as qcmod
+    monkeypatch.setattr(qcmod, "_judge_comparison_verdicts",
+                        lambda *a, **k: {("Notion", "pricing"): qcmod.EntailmentVerdict(verdict="supported")})
+    res = qcmod.curate_analysis(_analysis_with_cell(dim="pricing"), [_ev("e1", "pricing")],
+                                dimensions=("pricing",), client=None, model="m")
+    curated, dropped = res                        # 二元解包不抛
+    assert isinstance(dropped, list)
+
+
+# ── Task 6: check_entailment 重写 / check_decision_entailment 三级 / curate_decisions 回写 ──
+def test_check_entailment_partial_not_an_issue(monkeypatch):
+    """partial 不再算 hallucination issue(只 unsupported 算);守策展人 + 不误触 retry。"""
+    import rivalradar.agents.qc as qcmod
+    monkeypatch.setattr(qcmod, "_judge_comparison_verdicts",
+                        lambda *a, **k: {("Notion", "pricing"): qcmod.EntailmentVerdict(verdict="partial")})
+    issues = qcmod.check_entailment(_analysis_with_cell(dim="pricing"), [_ev("e1", "pricing")],
+                                    dimensions=("pricing",), comparison_only=True, client=None, model="m")
+    assert issues == []                              # partial 不产 issue
+
+
+def test_check_entailment_unsupported_is_issue(monkeypatch):
+    import rivalradar.agents.qc as qcmod
+    monkeypatch.setattr(qcmod, "_judge_comparison_verdicts",
+                        lambda *a, **k: {("Notion", "pricing"): qcmod.EntailmentVerdict(verdict="unsupported")})
+    issues = qcmod.check_entailment(_analysis_with_cell(dim="pricing"), [_ev("e1", "pricing")],
+                                    dimensions=("pricing",), comparison_only=True, client=None, model="m")
+    assert len(issues) == 1 and issues[0].problem_type == "hallucination"
+
+
+def test_curate_decisions_writes_back_verdict(monkeypatch):
+    import json
+    import rivalradar.agents.qc as qcmod
+    from rivalradar.schema.models import Decision, EvidenceRef
+    d = Decision(stance="建议采用", action="A", horizon="短期", risk_reversibility="可逆",
+                 risk_cost="低", why="w", evidence_refs=[EvidenceRef(evidence_id="e1", quote="q")])
+    client = _FakeClient([json.dumps({"verdict": "partial", "reason": "旁证"})])
+    kept, dropped = qcmod.curate_decisions([d], [_ev("e1", "pricing")], client=client, model="m")
+    assert len(kept) == 1 and kept[0].support_verdict == "partial"
+    assert dropped == []

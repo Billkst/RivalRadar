@@ -5,7 +5,7 @@
  * support_verdict 圆点;点击 → 证据原文 slide-over。**无 provider / confidence**。
  * 来源/日期从已 seed 的 evidenceStore cache 读(useEvidence,无 N+1 冷取)。
  */
-import { useEvidenceViewer } from '@/stores/evidenceViewerStore'
+import { useDrawerStore } from '@/stores/drawerStore'
 import { useEvidence } from '@/stores/evidenceStore'
 import { ageDays, isStale } from '@/lib/freshness'
 import { formatBeijingDate } from '@/lib/time'
@@ -13,7 +13,7 @@ import { VerdictDot } from '@/components/cockpit/VerdictDot'
 import type { EvidenceRef } from '@/types/api'
 
 export function EvidencePill({ refItem, index }: { refItem: EvidenceRef; index: number }) {
-  const open = useEvidenceViewer((s) => s.open)
+  const open = useDrawerStore((s) => s.openEvidence)
   const ev = useEvidence(refItem.evidence_id)
   const stale = ev ? isStale(ev.fetched_at) : false
 

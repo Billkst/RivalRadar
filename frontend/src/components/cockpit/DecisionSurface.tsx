@@ -9,7 +9,8 @@
  *   - **因果桥**:选中决策 → 其证据 id 集合传给对比矩阵高亮。
  *   - 运行级状态(§12.4):insufficient_evidence → 处境卡片;failed/cancelled →
  *     已填充面板保留、未解锁面板标"运行已中断未生成"。
- *   - 挂载 EvidenceSlideOver(全局单例,pill / 时间线点开)。
+ *   - 证据原文抽屉:统一由 CockpitLayout 的全局 <Drawer/>(navStack)提供,
+ *     pill / 时间线点击经 drawerStore.openEvidence 驱动(不再在此挂单例)。
  *
  * 防串 run:cockpitStore.runId !== 本页 runId 时,数据视为未就绪(idle),避免
  * 切 run 首帧闪上一个 run 的内容。
@@ -21,10 +22,10 @@ import { isDemoRun } from '@/lib/demoFixture'
 import { EmptyNote } from '@/components/cockpit/parts'
 import { DecisionBoard } from '@/components/cockpit/DecisionBoard'
 import { CompetitorComparison } from '@/components/cockpit/CompetitorComparison'
+import { PlanRail } from '@/components/workbench/PlanRail'
 import { ContradictionPanel } from '@/components/cockpit/ContradictionPanel'
 import { SelfAuditTrace } from '@/components/cockpit/SelfAuditTrace'
 import { EvidenceTimeline } from '@/components/cockpit/EvidenceTimeline'
-import { EvidenceSlideOver } from '@/components/cockpit/EvidenceSlideOver'
 import type { LoadState } from '@/stores/cockpitStore'
 import type { RunStatus } from '@/stores/runStore'
 
@@ -48,6 +49,8 @@ export function DecisionSurface({
   decisionContext,
   runStatus,
   runDegraded,
+  dimensions = [],
+  competitors = [],
 }: {
   runId: string
   decisionContext?: string
@@ -55,6 +58,10 @@ export function DecisionSurface({
   runStatus?: string
   /** RunDetail.degraded(REST 权威)。deep-link 无 live 流时仍能显降级 caveat。 */
   runDegraded?: boolean
+  /** 请求维度(矩阵行顺序,来自 RunDetail)。 */
+  dimensions?: string[]
+  /** 请求竞品(矩阵列顺序,来自 RunDetail)。 */
+  competitors?: string[]
 }) {
   const storeRunId = useRunStore((s) => s.runId)
   const storeStatus = useRunStore((s) => s.status)
@@ -94,7 +101,7 @@ export function DecisionSurface({
     sync({ runId, status, analyzeReady: analyzeDone })
   }, [runId, status, analyzeDone, sync])
 
-  // 因果桥:选中决策 idx → 其 evidence id 集合。切 run 清选择。
+  // 因果桥:选中决策 idx(切 run / 切换决策清空共享高亮在 DecisionBoard 内处理)。
   const [selectedIdx, setSelectedIdx] = React.useState<number | null>(null)
   React.useEffect(() => setSelectedIdx(null), [runId])
 
@@ -102,15 +109,6 @@ export function DecisionSurface({
   const live = cockpitRunId === runId
   const s = (st: LoadState): LoadState => (live ? st : 'idle')
   const decisionList = live && decisions ? decisions.decisions : []
-
-  const highlightIds = React.useMemo(() => {
-    const set = new Set<string>()
-    if (selectedIdx !== null && live && decisions) {
-      const d = decisions.decisions[selectedIdx]
-      d?.evidence_refs.forEach((r) => set.add(r.evidence_id))
-    }
-    return set
-  }, [selectedIdx, decisions, live])
 
   const genericContext =
     !decisionContext || !decisionContext.trim() || decisionContext.trim().startsWith('通用浏览')
@@ -121,6 +119,9 @@ export function DecisionSurface({
 
   return (
     <div className="space-y-4">
+      {/* 研究计划 rail(左决策面顶,C-D8):SSE 驱动 doing→done/reopen,点步开 step 抽屉 */}
+      <PlanRail dimensions={dimensions} />
+
       {/* 运行中断横幅(failed/cancelled):诚实展示已得中间结果 */}
       {interrupted ? (
         <div className="rounded-lg border border-warning/50 bg-warning/10 px-4 py-2 text-[13px] text-warning">
@@ -153,11 +154,19 @@ export function DecisionSurface({
             <div className="rounded-lg border border-warning/50 bg-warning/10 px-4 py-2 text-[13px] text-warning">
               ⚠ 本轮证据未达质检标准,以下建议置信度低,请谨慎参考(详见下方质检面板)。
             </div>
+          ) : degraded ? (
+            // run 级降级只提示一次(非每条)。degraded 信号来源不止矩阵:可能是数据获取/分析降级
+            // (矩阵以「—」标注),也可能是决策溯源未达标(decision_degraded,nodes.finalize 并入同一信号)。
+            // 故文案不写死「矩阵缺维」,避免决策降级时误导用户去看矩阵。每条 caveat 由 DecisionBoard 按
+            // 各自 support_verdict 渲染,不再一刀切。
+            <div className="rounded-md border border-warning/40 bg-warning/5 px-3 py-2 text-[12px] text-text-muted">
+              ⚠ 本轮部分环节(数据获取 / 分析 / 决策溯源)发生降级,相关结论请谨慎参考;以下建议按各自证据支持度分级(见每条三色标识)。
+            </div>
           ) : null}
           <DecisionBoard
             decisions={decisionList}
+            analysis={live ? analysis : null}
             state={s(decisionsState)}
-            degraded={degraded || insufficient}
             genericContext={genericContext}
             evidenceCount={evidenceCount}
             selectedIdx={selectedIdx}
@@ -166,11 +175,11 @@ export function DecisionSurface({
         </>
       )}
 
-      {/* 对比矩阵(analysis 在 done/中断都取 → 正常渲染,各态自处理) */}
+      {/* 对比矩阵(逐维生长 running / analysis 兜底 done;因果桥读 cockpitStore.highlightedCells) */}
       <CompetitorComparison
-        analysis={live ? analysis : null}
         state={s(analysisState)}
-        highlightIds={highlightIds}
+        dimensions={dimensions}
+        competitors={competitors}
         evidenceCount={evidenceCount}
       />
 
@@ -183,8 +192,7 @@ export function DecisionSurface({
       {/* 证据时间线(最低优先,折叠;evidence 在 done/中断都取) */}
       <EvidenceTimeline evidence={live ? evidenceList : null} state={s(evidenceState)} />
 
-      {/* 证据原文 slide-over(全局单例) */}
-      <EvidenceSlideOver />
+      {/* 证据原文抽屉由 CockpitLayout 的全局 <Drawer/> 提供(navStack 驱动),此处不再挂单例 */}
     </div>
   )
 }

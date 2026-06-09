@@ -118,6 +118,9 @@ class ComparisonCell(BaseModel):
     value_type: ValueType
     value: str
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    # cell 级三色信任信号(spec §5.5):由 QC 蕴含三级判定回写;分析阶段默认 supported,
+    # 真值在 qc curate 后落定。ref 级 support_verdict 不作信任信号(LLM 自报不可信)。
+    support_verdict: SupportVerdict = "supported"
 
 
 class ComparisonRow(BaseModel):
@@ -183,6 +186,8 @@ class Decision(BaseModel):
     risk_cost: RiskCost
     why: str
     evidence_refs: list[EvidenceRef] = Field(default_factory=list)
+    # decision 级三色(spec §5.5):由 QC curate_decisions 蕴含三级回写。
+    support_verdict: SupportVerdict = "supported"
     watch: Optional[Watch] = None
 
     @model_validator(mode="after")

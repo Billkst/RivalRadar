@@ -138,3 +138,84 @@ class SSEChunkData(BaseModel):
     step: str                        # thinking / drafting / reasoning
     delta: str                       # LLM 增量 token(几个字符)
     ts: str                          # ISO8601
+
+
+class SSEQueryData(BaseModel):
+    """query event — 采集员发起的真实查询词(spec §5.1,检索台逐字)。"""
+    competitor: str
+    dimension: str
+    query_text: str
+    language: str
+    round: int = 0
+    ts: str
+
+
+class SSEQueryHitData(BaseModel):
+    """query_hit event — 某查询词命中的证据条数(spec §5.1)。"""
+    query_text: str
+    hit_count: int
+    round: int = 0
+    ts: str
+
+
+class SSESourceData(BaseModel):
+    """source event — 新落库证据的来源卡明细(spec §5.2,不含正文,点开走 REST)。
+    无 provider / confidence(反幻觉,spec §1.5)。fetched_at 供前端算 stale(后端不算)。"""
+    evidence_id: str
+    competitor: str
+    dimension: str
+    source_title: str
+    source_url: str
+    fetched_at: str
+    language: str
+    round: int = 0
+    ts: str
+
+
+class SSEEvidenceDeltaData(BaseModel):
+    """evidence_delta event — retry 轮证据增量汇总(spec §5.4,重试环 X→Y)。"""
+    round: int
+    added_count: int
+    total_count: int
+    new_evidence_ids: list[str] = Field(default_factory=list)
+    ts: str
+
+
+class SSECellRef(BaseModel):
+    """cell_row 事件内的轻量 ref(只携 id + quote,信任信号在 verdict_recheck)。"""
+    evidence_id: str
+    quote: str
+
+
+class SSECellRowCell(BaseModel):
+    competitor: str
+    value_type: str
+    value: str
+    evidence_refs: list[SSECellRef] = Field(default_factory=list)
+
+
+class SSECellRowData(BaseModel):
+    """cell_row event — analyze 逐维对比结果(spec §5.3,矩阵边算边填)。
+    cell 不携可信 support_verdict(真三色在 qc verdict_recheck 回写)。
+    status=ok(有 cells)| empty(无证据维,已知空非 pending)| failed(单维抽取抛错)。"""
+    dimension: str
+    status: str          # ok | empty | failed
+    cells: list[SSECellRowCell] = Field(default_factory=list)
+    ts: str
+
+
+class SSEVerdictRecheckCell(BaseModel):
+    dimension: str
+    competitor: str
+    support_verdict: str   # supported | partial | unsupported
+
+
+class SSEVerdictRecheckData(BaseModel):
+    """verdict_recheck event — qc 三级真算后回写矩阵三色 + StatusBar(spec §5.5)。
+    cell_verdicts=保留 cell 的三级;dropped=被剔除 cell 的结构化 {competitor,dimension}(codex #5);
+    downgraded=partial 子集;summary=计数。decision verdict 不在此(见 Task 10 Step 5 偏差说明)。"""
+    cell_verdicts: list[SSEVerdictRecheckCell] = Field(default_factory=list)
+    dropped: list[dict] = Field(default_factory=list)
+    downgraded: list[dict] = Field(default_factory=list)
+    summary: dict[str, int] = Field(default_factory=dict)
+    ts: str

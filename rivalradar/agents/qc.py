@@ -7,8 +7,8 @@ from pydantic import BaseModel
 
 from rivalradar.llm.structured import structured_call
 from rivalradar.schema.models import (
-    CONTROLLED_DIMENSIONS, CompetitorAnalysis, Decision, Evidence, EvidenceRef,
-    QCIssue, QCResult, QCVerdict,
+    CONTROLLED_DIMENSIONS, CompetitorAnalysis, ComparisonRow, Decision, Evidence,
+    EvidenceRef, QCIssue, QCResult, QCVerdict, SupportVerdict,
 )
 
 # 蕴含判定并行度:check_entailment / curate_decisions 逐结论独立调 LLM,线程池并发。
@@ -146,25 +146,27 @@ def check_coverage(
 
 
 class EntailmentVerdict(BaseModel):
-    supported: bool
+    verdict: SupportVerdict = "supported"
     reason: str = ""
 
 
-def check_entailment(
-    analysis: CompetitorAnalysis, evidence: list[Evidence],
-    *, dimensions: tuple[str, ...] | None = None, comparison_only: bool = False,
-    on_progress: Callable[[str], None] | None = None, client, model,
-) -> list[QCIssue]:
-    """LLM 蕴含判定:被引证据是否真支撑结论;不支撑 → hallucination。每条结论一次调用。
+_ENTAIL_PROMPT = (
+    "判断下列证据对结论的支撑程度,三选一:\n"
+    "- supported:证据直接、充分支撑结论。\n"
+    "- partial:证据相关但不充分(单一来源/旁证/只支撑部分)。\n"
+    "- unsupported:证据不支撑或与结论无关。\n\n"
+    "结论:{text}\n\n证据:\n{quotes}"
+)
 
-    dimensions:只对「请求维度」的结论做蕴含判定(None = 全判,向后兼容)。SWOT/persona
-    等越界综合产物不进这个 LLM 闸(见 _iter_conclusions docstring)。
-    comparison_only:阻断性 LLM 判定只严判 showcase 呈现的对比矩阵 cell,profile 的描述性
-    features/pricing/personas/SWOT 不进此闸(见 _iter_conclusions docstring)。
-    错误契约:本函数不吞错——structured_call 失败会上抛;"尽力/失败降级"由 Lane D 编排层
-    捕获后降级为仅确定性闸的 verdict(spec §5 尽力 + §8 trace)。"""
+
+def _judge_comparison_verdicts(
+    analysis: CompetitorAnalysis, evidence: list[Evidence],
+    *, dimensions: tuple[str, ...] | None = None, comparison_only: bool = True,
+    on_progress: Callable[[str], None] | None = None, client, model,
+) -> dict[tuple[str, str], EntailmentVerdict]:
+    """对每个有引用的 comparison cell 判三级蕴含,返回 {(competitor, dimension): EntailmentVerdict}。
+    每 cell 一次 LLM 调用(合并该 cell 全部 refs 一起判,不逐 ref),并行(GIL 下不同 key 写 dict 安全)。"""
     idx = {e.id: e for e in evidence}
-    # 只判挂引用的结论(空引用归 check_traceability);各结论独立 → 线程池并发判蕴含。
     conclusions = [
         (comp, dim, text, refs)
         for comp, dim, text, refs in _iter_conclusions(
@@ -172,32 +174,46 @@ def check_entailment(
         if refs
     ]
     if not conclusions:
-        return []
+        return {}
 
-    def _judge(item: tuple[str, str, str, list[EvidenceRef]]) -> QCIssue | None:
+    def _judge(item: tuple[str, str, str, list[EvidenceRef]]) -> tuple[tuple[str, str], EntailmentVerdict]:
         comp, dim, text, refs = item
         quotes = []
         for r in refs:
             src = idx[r.evidence_id].content if r.evidence_id in idx else ""
             quotes.append(f"- 引语:{r.quote}\n  证据原文:{src[:600]}")
-        msgs = [{"role": "user", "content":
-                 "判断下列证据是否支撑该结论。supported=true 表示证据确实支撑该结论;"
-                 "false 表示不支撑或无关。\n\n"
-                 f"结论:{text}\n\n证据:\n" + "\n".join(quotes)}]
-        verdict = structured_call(EntailmentVerdict, msgs, client=client, model=model)
+        msgs = [{"role": "user", "content": _ENTAIL_PROMPT.format(text=text, quotes="\n".join(quotes))}]
+        v = structured_call(EntailmentVerdict, msgs, client=client, model=model)
         if on_progress is not None:
-            on_progress(f"质检校验 {comp}·{dim}")  # 每格判完报一次(94s 静默段 → 逐格亮起)
-        if not verdict.supported:
-            return QCIssue(competitor=comp, dimension=dim,
-                           problem_type="hallucination",
-                           detail=f"证据不支撑结论({text}):{verdict.reason}")
-        return None
+            on_progress(f"质检校验 {comp}·{dim}")
+        return (comp, dim), v
 
-    # ex.map 保序(issue 顺序确定);任一 structured_call 上抛 → 迭代结果时重新抛出
-    # (错误契约不变:失败上抛,由 qc_node 捕获降级为机械门 fallback)。
     with cf.ThreadPoolExecutor(max_workers=min(_MAX_ENTAIL_WORKERS, len(conclusions))) as ex:
         results = list(ex.map(_judge, conclusions))
-    return [r for r in results if r is not None]
+    return dict(results)
+
+
+def check_entailment(
+    analysis: CompetitorAnalysis, evidence: list[Evidence],
+    *, dimensions: tuple[str, ...] | None = None, comparison_only: bool = False,
+    on_progress: Callable[[str], None] | None = None, client, model,
+) -> list[QCIssue]:
+    """LLM 三级蕴含 → 仅 unsupported 产 hallucination issue(partial 容忍,守策展人)。每 cell 一次调用。
+
+    dimensions:只对「请求维度」的结论做蕴含判定(None = 全判,向后兼容)。SWOT/persona
+    等越界综合产物不进这个 LLM 闸(见 _iter_conclusions docstring)。
+    comparison_only:阻断性 LLM 判定只严判 showcase 呈现的对比矩阵 cell,profile 的描述性
+    features/pricing/personas/SWOT 不进此闸(见 _iter_conclusions docstring)。
+    错误契约:本函数不吞错——structured_call 失败会上抛;"尽力/失败降级"由 Lane D 编排层
+    捕获后降级为仅确定性闸的 verdict(spec §5 尽力 + §8 trace)。"""
+    verdicts = _judge_comparison_verdicts(
+        analysis, evidence, dimensions=dimensions, comparison_only=comparison_only,
+        on_progress=on_progress, client=client, model=model)
+    return [
+        QCIssue(competitor=comp, dimension=dim, problem_type="hallucination",
+                detail=f"证据不支撑结论:{v.reason}")
+        for (comp, dim), v in verdicts.items() if v.verdict == "unsupported"
+    ]
 
 
 # ── Part B:QC 策展化(信任模型「否决闸」→「策展人」)─────────────────────────
@@ -209,24 +225,22 @@ def curate_analysis(
     analysis: CompetitorAnalysis, evidence: list[Evidence],
     *, dimensions: tuple[str, ...] | None = None,
     on_progress: Callable[[str], None] | None = None, client, model,
-) -> tuple[CompetitorAnalysis, list[str]]:
-    """策展对比矩阵:丢弃无引用/悬空引用(机械)+ 蕴含不支撑(LLM)的 cell,返回
-    (curated_analysis, dropped_labels)。只动 showcase 的对比矩阵(请求维度内);profile
-    描述性结论不在此(喂退役报告、不进驾驶舱)。错误契约同 check_entailment:structured_call
-    失败上抛,由 qc_node 捕获降级。"""
-    # Phase 1 机械门(免费、确定):丢弃无引用/悬空引用的 in-scope cell,空 row 消失。
-    # 先于 LLM 跑,保证悬空引用 cell 绝不进 check_entailment(不耗 LLM 预算)。
+) -> tuple[CompetitorAnalysis, list[dict]]:
+    """策展对比矩阵:机械门(无引用/悬空引用)+ 三级蕴含判定(LLM)。
+    unsupported → 丢弃(策展人,矩阵显「—」);supported/partial → 保留并把三级 verdict
+    回写到 cell.support_verdict(随 save_analysis 落库)。返回 (curated, dropped),
+    dropped 为结构化 list[dict{"competitor","dimension"}](codex #5,非拼接字符串)。
+    三级判定**不进** qc_result.issues(守策展人路由,§5.5)。错误契约同 check_entailment:
+    structured_call 失败上抛,由 qc_node 捕获降级。"""
+    # Phase 1 机械门(_curate_mechanical 也产结构化 dropped,见下)
     mech_analysis, dropped = _curate_mechanical(analysis, evidence, dimensions)
 
-    # Phase 2 LLM 门(贵):只对机械门幸存的 cell 判蕴含(已 scope comparison_only + 请求维度)。
-    unsupported = {
-        (i.competitor, i.dimension)
-        for i in check_entailment(mech_analysis, evidence, dimensions=dimensions,
-                                  comparison_only=True, on_progress=on_progress,
-                                  client=client, model=model)
-    }
+    # Phase 2 三级蕴含判定(per-cell verdict map)
+    verdicts = _judge_comparison_verdicts(
+        mech_analysis, evidence, dimensions=dimensions, comparison_only=True,
+        on_progress=on_progress, client=client, model=model)
 
-    # Phase 3 组装:丢弃蕴含不支撑的 cell;空 row 直接消失(coverage 发现缺口 → broaden 补搜环)。
+    # Phase 3 组装:unsupported 丢,其余回写 verdict
     final_rows: list[ComparisonRow] = []
     for row in mech_analysis.comparison:
         in_scope = dimensions is None or row.dimension in dimensions
@@ -235,10 +249,12 @@ def curate_analysis(
             continue
         kept = []
         for cell in row.cells:
-            if (cell.competitor, row.dimension) in unsupported:
-                dropped.append(f"{cell.competitor}/{row.dimension}")  # 蕴含:不支撑
+            v = verdicts.get((cell.competitor, row.dimension))
+            verdict = v.verdict if v is not None else "supported"  # 无判定(已过机械门)→ 默认 supported
+            if verdict == "unsupported":
+                dropped.append({"competitor": cell.competitor, "dimension": row.dimension})
                 continue
-            kept.append(cell)
+            kept.append(cell.model_copy(update={"support_verdict": verdict}))
         if kept:
             final_rows.append(row.model_copy(update={"cells": kept}))
     curated = analysis.model_copy(update={"comparison": final_rows})
@@ -248,12 +264,14 @@ def curate_analysis(
 def _curate_mechanical(
     analysis: CompetitorAnalysis, evidence: list[Evidence],
     dimensions: tuple[str, ...] | None,
-) -> tuple[CompetitorAnalysis, list[str]]:
+) -> tuple[CompetitorAnalysis, list[dict]]:
     """机械门策展(免 LLM):丢弃 in-scope 且无引用/悬空引用的对比 cell,空 row 消失,
-    out-of-scope row 原样保留。返回 (curated_analysis, dropped)。curate_analysis 的 Phase 1,
-    也是 qc_node 在 LLM 蕴含失败降级时的 fallback(不调 LLM 仍能给干净 showcase)。"""
+    out-of-scope row 原样保留。返回 (curated_analysis, dropped),dropped 为结构化
+    list[dict{"competitor","dimension"}](codex #5,与 curate_analysis 对齐)。
+    curate_analysis 的 Phase 1,也是 qc_node 在 LLM 蕴含失败降级时的 fallback(不调 LLM
+    仍能给干净 showcase)。"""
     valid = {e.id for e in evidence}
-    dropped: list[str] = []
+    dropped: list[dict] = []
     rows: list[ComparisonRow] = []
     for row in analysis.comparison:
         in_scope = dimensions is None or row.dimension in dimensions
@@ -263,7 +281,7 @@ def _curate_mechanical(
         kept = []
         for cell in row.cells:
             if not cell.evidence_refs or any(r.evidence_id not in valid for r in cell.evidence_refs):
-                dropped.append(f"{cell.competitor}/{row.dimension}")
+                dropped.append({"competitor": cell.competitor, "dimension": row.dimension})
                 continue
             kept.append(cell)
         if kept:
@@ -325,12 +343,12 @@ def check_decision_entailment(
             src = idx[r.evidence_id].content if r.evidence_id in idx else ""
             quotes.append(f"- 引语:{r.quote}\n  证据原文:{src[:600]}")
         msgs = [{"role": "user", "content":
-                 "判断下列证据是否支撑该决策建议。supported=true 表示证据确实支撑该建议的"
-                 "行动与理由;false 表示不支撑或无关。\n\n"
+                 "判断下列证据对该决策建议的支撑程度,三选一:supported(直接充分支撑行动与理由)/"
+                 "partial(相关但不充分)/unsupported(不支撑或无关)。\n\n"
                  f"决策(行动):{d.action}\n理由:{d.why}\n\n证据:\n" + "\n".join(quotes)}]
         verdict = structured_call(EntailmentVerdict, msgs, client=client, model=model)
         calls += 1
-        if not verdict.supported:
+        if verdict.verdict == "unsupported":
             issues.append(QCIssue(competitor="*", dimension="decision",
                                   problem_type="hallucination",
                                   detail=f"证据不支撑决策({d.action}):{verdict.reason}"))
@@ -340,48 +358,45 @@ def check_decision_entailment(
 def curate_decisions(
     decisions: list[Decision], evidence: list[Evidence], *, client, model,
     max_calls: int = 8,
-) -> tuple[list[Decision], list[str]]:
-    """策展决策:丢弃无引用/悬空引用(机械)+ 蕴含不支撑(LLM)的决策,返回
-    (kept, dropped_actions)。与 curate_analysis 对称——ungrounded 决策静默丢弃,而非
-    decision_degraded 标降级整批。cost guard 同 check_decision_entailment(封顶 max_calls,
-    超额不再调 LLM、视为保留)。错误契约:structured_call 失败上抛,由 decide 节点捕获。"""
+) -> tuple[list[Decision], list[dict]]:
+    """策展决策:unsupported 丢弃,supported/partial 保留并回写 decision.support_verdict。
+    返回 (kept, dropped),dropped 为结构化 list[dict{"action"}](codex #5,replay 安全)。"""
     idx = {e.id: e for e in evidence}
-    dropped: list[str] = []
-    # 机械门(免 LLM):无引用 / 任一悬空引用 → 丢弃;其余进 candidates(保序)。
+    dropped: list[dict] = []
     candidates: list[Decision] = []
     for d in decisions:
         if not d.evidence_refs or any(r.evidence_id not in idx for r in d.evidence_refs):
-            dropped.append(d.action)
+            dropped.append({"action": d.action})
         else:
             candidates.append(d)
-    # cost guard(Codex #4):仅前 max_calls 条判蕴含,超额保留不判(机械门已过)。
     to_judge = candidates[:max_calls]
 
-    def _supported(d: Decision) -> bool:
+    def _verdict(d: Decision) -> EntailmentVerdict:
         quotes = []
         for r in d.evidence_refs:
             src = idx[r.evidence_id].content if r.evidence_id in idx else ""
             quotes.append(f"- 引语:{r.quote}\n  证据原文:{src[:600]}")
         msgs = [{"role": "user", "content":
-                 "判断下列证据是否支撑该决策建议。supported=true 表示证据确实支撑该建议的"
-                 "行动与理由;false 表示不支撑或无关。\n\n"
+                 "判断下列证据对该决策建议的支撑程度,三选一:supported(直接充分支撑行动与理由)/"
+                 "partial(相关但不充分)/unsupported(不支撑或无关)。\n\n"
                  f"决策(行动):{d.action}\n理由:{d.why}\n\n证据:\n" + "\n".join(quotes)}]
-        return structured_call(EntailmentVerdict, msgs, client=client, model=model).supported
+        return structured_call(EntailmentVerdict, msgs, client=client, model=model)
 
-    # ex.map 保序对齐 to_judge;任一上抛 → 迭代时重新抛出(由 decide 节点捕获机械门 fallback)。
-    flags: list[bool] = []
+    verdicts: list[EntailmentVerdict] = []
     if to_judge:
         with cf.ThreadPoolExecutor(max_workers=min(_MAX_ENTAIL_WORKERS, len(to_judge))) as ex:
-            flags = list(ex.map(_supported, to_judge))
+            verdicts = list(ex.map(_verdict, to_judge))
 
     kept: list[Decision] = []
     for j, d in enumerate(candidates):
-        if j >= len(flags):
-            kept.append(d)            # cost guard 超额:保留不判
-        elif flags[j]:
-            kept.append(d)            # 蕴含支撑:保留
+        if j >= len(verdicts):
+            kept.append(d.model_copy(update={"support_verdict": "supported"}))  # cost guard 超额:保留默认
+            continue
+        v = verdicts[j].verdict
+        if v == "unsupported":
+            dropped.append({"action": d.action})
         else:
-            dropped.append(d.action)  # 蕴含不支撑:丢弃
+            kept.append(d.model_copy(update={"support_verdict": v}))
     return kept, dropped
 
 

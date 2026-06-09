@@ -19,8 +19,9 @@ from rivalradar.schema.models import (
     ReportInsight,
 )
 from rivalradar.storage.repository import (
-    append_trace, insert_evidence, mark_run_finalized, save_analysis,
-    save_decisions, save_insight, save_qc_result, save_report, update_run_degraded,
+    append_trace, insert_evidence, insert_queries, mark_run_finalized,
+    replace_curation_drops, save_analysis, save_decisions, save_insight,
+    save_qc_result, save_report, update_run_degraded,
 )
 
 logger = logging.getLogger(__name__)
@@ -89,6 +90,15 @@ def _make_ticker(
     return tick
 
 
+def _collect_round(state: dict) -> int:
+    """采集轮次(spec §5.1 codex [P1] 防造假):首轮 qc_result 为 None → 0;retry 轮由
+    qc_result 存在性推导(第一次 retry 时 retry_count 仍为 0,qc 节点首轮不 +1),故
+    round = retry_count + 1。不能直接用 retry_count(会把第一次 retry 误标 round 0)。"""
+    if state.get("qc_result") is None:
+        return 0
+    return int(state.get("retry_count", 0)) + 1
+
+
 def make_collect_node(*, conn, provider, official_domains, max_results: int = 5):
     """采集节点:首遍全量采;retry 时按 qc issues 只补缺口 + broaden 广搜。
     只 insert 真新增(对 state 已有 id 去重),证据 dict 由 reducer 累加去重。"""
@@ -98,6 +108,24 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
         t0 = time.monotonic()
         existing = {e["id"] for e in state.get("evidence", [])}
         qc_result = state.get("qc_result")
+        rnd = _collect_round(state)
+
+        # 真实查询词检索台:每 query 完成发 query + query_hit 事件(worker 线程,emit 经
+        # sse.py call_soon_threadsafe 线程安全),并收集 query 记录供主线程批量落库。
+        q_records: list[dict] = []
+        q_lock = threading.Lock()
+
+        def on_query(q, evs):
+            if emit is not None:
+                emit("query", {"competitor": q.competitor, "dimension": q.dimension,
+                               "query_text": q.query_text, "language": q.language, "round": rnd})
+                emit("query_hit", {"query_text": q.query_text,
+                                   "hit_count": len(evs), "round": rnd})
+            with q_lock:
+                q_records.append({"competitor": q.competitor, "dimension": q.dimension,
+                                  "language": q.language, "query_text": q.query_text,
+                                  "round": rnd, "hit_count": len(evs)})
+
         if qc_result is None:
             _emit_progress(
                 emit, "collector", "search",
@@ -108,7 +136,7 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
                                 len(state["competitors"]) * len(state["dimensions"]) * 2)
             evs = collect_evidence(state["competitors"], state["dimensions"],
                                    provider=provider, official_domains=official_domains,
-                                   max_results=max_results, on_progress=tick)
+                                   max_results=max_results, on_progress=tick, on_query=on_query)
             tgt_desc = "all"
         else:
             targets = extract_collect_targets(
@@ -124,19 +152,35 @@ def make_collect_node(*, conn, provider, official_domains, max_results: int = 5)
             for comp, dim in targets:
                 evs += collect_evidence([comp], [dim], provider=provider,
                                         official_domains=official_domains,
-                                        max_results=max_results, broaden=True, on_progress=tick)
+                                        max_results=max_results, broaden=True,
+                                        on_progress=tick, on_query=on_query)
             tgt_desc = f"{len(targets)} gaps"
+
         fresh = [e for e in evs if e.id not in existing]
         for e in fresh:
             insert_evidence(conn, run_id, e)
+            # 来源卡明细(spec §5.2):只发实际落库的新证据,不发 content 全文(点开走 REST)。
+            if emit is not None:
+                emit("source", {"evidence_id": e.id, "competitor": e.competitor,
+                                "dimension": e.dimension, "source_title": e.source_title,
+                                "source_url": e.source_url, "fetched_at": e.fetched_at,
+                                "language": e.language, "round": rnd})
+        # 真实查询词落库(主线程批量,worker 线程只收集,避免并发写 sqlite)。
+        insert_queries(conn, run_id, q_records)
+        # retry 增量(spec §5.4):本轮新增汇总,前端重试环显「第 N 轮 · 证据 X→Y」。
+        total_after = len(existing) + len(fresh)
+        if emit is not None:
+            emit("evidence_delta", {"round": rnd, "added_count": len(fresh),
+                                    "total_count": total_after,
+                                    "new_evidence_ids": [e.id for e in fresh]})
         _emit_progress(
             emit, "collector", "done",
-            f"找到 {len(fresh)} 条新证据,累计 {len(existing) + len(fresh)} 条",
-            metric={"current": len(fresh), "total": len(existing) + len(fresh)},
+            f"找到 {len(fresh)} 条新证据,累计 {total_after} 条",
+            metric={"current": len(fresh), "total": total_after},
         )
         append_trace(conn, run_id, "collect",
-                     input_summary=f"targets={tgt_desc}",
-                     output_summary=f"+{len(fresh)} (total {len(existing) + len(fresh)})",
+                     input_summary=f"targets={tgt_desc} round={rnd}",
+                     output_summary=f"+{len(fresh)} (total {total_after})",
                      latency_ms=int((time.monotonic() - t0) * 1000))
         return {"evidence": [e.model_dump() for e in fresh]}
     return collect_node
@@ -150,6 +194,16 @@ def make_analyze_node(*, conn, client, model):
         t0 = time.monotonic()
         evidence = [Evidence(**d) for d in state["evidence"]]
         dims = tuple(state.get("dimensions") or CONTROLLED_DIMENSIONS)
+
+        def on_cell_row(dimension, row, status):
+            if emit is None:
+                return
+            cells = [] if row is None else [
+                {"competitor": c.competitor, "value_type": c.value_type, "value": c.value,
+                 "evidence_refs": [{"evidence_id": r.evidence_id, "quote": r.quote}
+                                   for r in c.evidence_refs]}
+                for c in row.cells]
+            emit("cell_row", {"dimension": dimension, "status": status, "cells": cells})
         # 收集本轮 profile 抽取降级(单项 LLM 截断/失败优雅降级,见 analyst._safe_extract)。
         # 非空 → 置 run 级 degraded,保证「降级必可见」(否则整竞品 profile 半瘫却 done)。
         degraded_sink: list[str] = []
@@ -178,7 +232,7 @@ def make_analyze_node(*, conn, client, model):
             tick = _make_ticker(emit, "analyst", "thinking", len(dims))  # 只剩对比阶段进度
             comparison = build_comparison(profiles, evidence, dimensions=dims,
                                           degraded_sink=degraded_sink, on_progress=tick,
-                                          client=rc_client, model=model)
+                                          on_cell_row=on_cell_row, client=rc_client, model=model)
             analysis = CompetitorAnalysis(competitors=profiles, comparison=comparison)
         else:
             _emit_progress(
@@ -190,7 +244,7 @@ def make_analyze_node(*, conn, client, model):
             tick = _make_ticker(emit, "analyst", "thinking", len(state["competitors"]) * 4 + len(dims))
             analysis = analyze(evidence, state["competitors"], dimensions=dims,
                                degraded_sink=degraded_sink, on_progress=tick,
-                               client=rc_client, model=model)
+                               on_cell_row=on_cell_row, client=rc_client, model=model)
         save_analysis(conn, run_id, analysis)
         _emit_progress(
             emit, "analyst", "done",
@@ -205,7 +259,12 @@ def make_analyze_node(*, conn, client, model):
                                     f"{len(analysis.comparison)} rows{degraded_note}",
                      latency_ms=int((time.monotonic() - t0) * 1000))
         out: dict = {"analysis": analysis.model_dump()}
-        if degraded_sink:
+        # 仅"影响用户可见产出(对比矩阵 cell)"的降级才置 run 级 degraded。profile 辅助项
+        # (features/pricing/personas/swot)抽取失败只折进上面的 trace degraded_note(仍可见),
+        # **不**污染整 run —— 它们不进对比矩阵、不进决策、不是请求维度,用户界面根本看不到。
+        # [[qc-curator-not-judge]]:用户看不到的边角字段失败不该给整份报告盖降级章。真 run
+        # run_3073ba01facb 钓出:钉钉一个 SWOT 截断把 113 证据/满矩阵/QC pass 的健康 run 误标降级。
+        if any(d.startswith("comparison.") for d in degraded_sink):
             out["degraded"] = True  # qc_node read-then-OR 保 sticky 到 finalize
         return out
     return analyze_node
@@ -224,7 +283,8 @@ def make_write_node(*, conn, client, model, as_of):
             f"正在撰写 {len(analysis.competitors)} 个竞品的对比报告",
         )
         report, insight = write_report_with_insight(
-            analysis, evidence, as_of=as_of, client=_run_client(client, config), model=model)
+            analysis, evidence, as_of=as_of, client=_run_client(client, config), model=model,
+            emit=emit)
         save_report(conn, run_id, report)
         save_insight(conn, run_id, insight)  # Epic 2.4:结构化洞察持久化(/insight 端点)
         _emit_progress(
@@ -284,6 +344,26 @@ def make_qc_node(*, conn, client, model, as_of):
         # 持久化策展后的分析(showcase 只显示活下来的 cell),并经 state 传给 decide 节点
         # (decide 用 curated body 生成决策,不会基于已丢弃的 cell)。
         save_analysis(conn, run_id, curated)
+
+        # 三级真算结果:回写在 curated 的 cell.support_verdict 上(已随 save_analysis 落库);
+        # 这里派生 verdict_recheck 事件 + 结构化持久化剔除清单(replay 平价,§7.3)。
+        cell_verdicts = [
+            {"dimension": row.dimension, "competitor": cell.competitor,
+             "support_verdict": cell.support_verdict}
+            for row in curated.comparison for cell in row.cells]
+        downgraded = [cv for cv in cell_verdicts if cv["support_verdict"] == "partial"]
+        supported_n = sum(1 for cv in cell_verdicts if cv["support_verdict"] == "supported")
+        # dropped 已是 list[dict{competitor,dimension}](Task 5),直接作 replace items;
+        # REPLACE per (run_id,"cell") → qc 多轮重试每轮覆盖,无幽灵剔除(codex #2)。
+        replace_curation_drops(conn, run_id, "cell", dropped)
+        if emit is not None:
+            emit("verdict_recheck", {
+                "cell_verdicts": cell_verdicts,
+                "dropped": dropped,
+                "downgraded": downgraded,
+                "summary": {"supported": supported_n, "partial": len(downgraded),
+                            "dropped": len(dropped)},
+            })
 
         # 反幻觉收口(TODOS P2 + ship-time 对抗验证 MAJOR):report markdown 与 cockpit
         # 顶部 insight headline 都在 write 节点用**未策展** analysis 生成,被策展丢的 cell
@@ -375,7 +455,7 @@ def make_decide_node(*, conn, client, model, as_of):
         _emit_progress(emit, "decide", "deciding", "正在基于证据生成决策建议")
 
         decision_degraded = False
-        dropped: list[str] = []  # 被策展掉的 ungrounded 决策 action(可见性,非降级)
+        dropped: list[dict] = []  # 被策展掉的 ungrounded 决策(结构化 {"action"},可见性,非降级)
         try:
             decision_set = generate_decisions(body, decision_context,
                                               client=_run_client(client, config), model=model)
@@ -398,11 +478,15 @@ def make_decide_node(*, conn, client, model, as_of):
                 valid = {ev.id for ev in evidence}
                 kept = [d for d in decision_set.decisions
                         if d.evidence_refs and all(r.evidence_id in valid for r in d.evidence_refs)]
-                dropped = [d.action for d in decision_set.decisions if d not in kept]
+                dropped = [{"action": d.action} for d in decision_set.decisions if d not in kept]
                 decision_set = DecisionSet(decisions=kept)
                 decision_degraded = True
 
         save_decisions(conn, run_id, decision_set)
+        # decision 剔除结构化持久化(replay 平价,§7.3);REPLACE per (run_id,"decision") 防多轮幽灵。
+        # dropped 现统一 list[dict{"action"}](curate_decisions 正常路径 + 上方 fallback 均结构化)。
+        replace_curation_drops(conn, run_id, "decision",
+                               [{"detail": d["action"]} for d in dropped])
         # 策展丢弃 ungrounded 决策是**健康的策展路径,不是降级**(丢≠degrade,与 qc_node 同模型),
         # 但仍须**可见**(ship outside-voice C1:_dropped 静默吞掉违反「降级必可见」精神)——
         # 故把丢弃数记入 trace + emit,但**不**置 decision_degraded(那会回退到一票否决的病)。

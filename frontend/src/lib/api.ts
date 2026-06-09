@@ -6,12 +6,15 @@
  * this file only owns one-shot JSON requests.
  */
 import type {
+  AgentSkillRow,
   AnnotationCreate,
   AnnotationOut,
   CompetitorAnalysis,
+  CurationDrop,
   DecisionSet,
   DiscoverySet,
   Evidence,
+  QueryRecord,
   ReportInsight,
   RunDetail,
   RunSummary,
@@ -82,6 +85,20 @@ export const fetchInsight = (runId: string) => jsonFetch<ReportInsight>(`/insigh
 export const fetchQc = (runId: string) => jsonFetch<SanitizedQCResult>(`/qc/${runId}`)
 // 批量证据(GET /runs/:id/evidence)— evidenceStore 一次性 seed 防 per-pill N+1。
 export const fetchRunEvidence = (runId: string) => jsonFetch<Evidence[]>(`/runs/${runId}/evidence`)
+
+// ─── Plan C 检索台 / 策展剔除清单(GET /runs/:id/queries|curation-drops)──────
+// codex P1#4:jsonFetch 已自动前缀 /api → 路径不要再写 /api,否则 /api/api/...
+export const fetchQueries = (runId: string) => jsonFetch<QueryRecord[]>(`/runs/${runId}/queries`)
+export const fetchCurationDrops = (runId: string) =>
+  jsonFetch<CurationDrop[]>(`/runs/${runId}/curation-drops`)
+
+// ─── Plan C agent 技能(GET/PUT/DELETE /agent-skills,run 无关)──────────────
+// codex P1#4:jsonFetch 已前缀 /api → 勿写 /api。
+export const fetchAgentSkills = () => jsonFetch<AgentSkillRow[]>('/agent-skills')
+export const putAgentSkill = (body: { agent_id: string; skill_id: string; version: string; enabled: boolean }) =>
+  jsonFetch<{ ok: boolean }>('/agent-skills', { method: 'PUT', body: JSON.stringify(body) })
+export const deleteAgentSkill = (agentId: string, skillId: string) =>
+  jsonFetch<{ ok: boolean }>(`/agent-skills/${agentId}/${skillId}`, { method: 'DELETE' })
 
 // ─── Discover competitors (Epic 1.1 引导式 setup)──────────────────────────
 // LLM 不通 → 后端 503;调用方 catch 提示手动输入(非静默)。

@@ -2,6 +2,40 @@
 
 > 由 `/design-consultation` 生成(Claude + Codex 跨模型收敛),v4 经 `/plan-design-review` 锁定。任何视觉/UI 决策前先读本文件。
 > **v4 paradigm pivot(2026-05-30):证据驾驶舱(Evidence Cockpit)。** 本版废弃 v3 虚拟办公室/拟物动物/双气质叙事,统一到单一机构级分析台。视觉规格以 `docs/superpowers/plans/2026-05-30-rivalradar-v0.4-evidence-cockpit.md` §12 为唯一来源。
+> **v5 增量(2026-06-07):调研进行时过程可视化。** 在 v4 之上深化(非推翻):右栏「实时分析流程」升级为**研究员工作台**;新增 agent 人格层(工牌/头像)+ 技能子系统;`support_verdict` 三色**真算落地**(v4 钦定但后端未实现);insight **两步化真字符流**(报告台逐字)。完整实现规格以 `docs/superpowers/specs/2026-06-07-process-viz-redesign-design.md` 为唯一来源;本文件只记设计系统层增量(见下「v5 设计系统增量」节)。
+
+## v5 设计系统增量(2026-06-07)
+
+### 研究员工作台(右栏升级)
+v4 的右栏「等宽时间线日志」升级为 Kimi 式**研究员工作台**,展示真实的活儿(数据真,非状态计数):
+- **检索台**:真实查询词逐字(前端打字机,数据=模板生成完整串)+ 命中「+N 源」。
+- **来源卡**:真实标题/域名/来源类型/采集日期 + support_verdict 三色;可点开原文。
+- **逐格依据**:矩阵格证据徽章携 evidence id;点决策→矩阵交叉高亮(承 v4 因果桥)。
+- **执行时间轴**:绝对时间 HH:MM + 角色 + 「→ 导致变化」(每节点必产可见变化,防 agent theater)。
+- **重试环**:唯一签名动画(青绿单回环 700–1100ms 单次,承 v4);真实「第 N 轮 · 证据 X→Y」。
+- **报告台**:撰写员 insight **两步化** —— 流式草稿逐字(`chunk` 事件)→ 再结构化为 ReportInsight 三段(标「AI 综合判断」)。typing 是 best-effort,结构化产物有契约保证。
+- **计划勾选**:研究计划 rail 随 SSE 事件 doing→done/reopen(边做边勾)。
+- **done 态**:右栏收窄为「查看工作 ↗」摘要条(承 v4 done 态),左决策面成焦点。
+
+### agent 人格层(工牌 / 头像)
+4 角色仍直白命名(采集员/分析员/撰写员/质检员,承 v4 命名规范,严禁花哨代号)。新增可见身份层:
+- **工牌**:头像(身份色描边)+ 职能名 + 工号(RR-C01 等)+ 状态灯(待命灰/执行身份色/完成绿)+ 当前任务 + retry 角标。点工牌→ agent 抽屉(信息 + 技能管理)。
+- **头像**:克制**插画肖像**(统一风格、低饱和身份色描边);当前 lorelei 占位,终稿可换定制插画。
+- **立场(写死,防回退 v3 office)**:工牌 = 机构级**持证专家身份**(像研报分析师署名),**不是**卡通动物/虚拟工位/speech bubble。严禁 office 工位语义、拟物动物、气泡对话。
+- **身份色(低饱和)**:采集青 `#2C6E63` / 分析赭 `#9A6312` / 撰写蓝 `#3A6489` / 质检紫 `#7A5C8A`。
+
+### 技能子系统(框架真 · 行为接入二期)
+- **技能卡 UI(干净版)**:name(核心 skill 带低调「核心」标)+ 一行描述 + 版本(v1,mono tabular-nums)+ 状态(启用/停用)+ 开关 + 删除。**不展示** why_preset/boundary(设计内部依据,UI 不上墙)。
+- **状态**:单一 `skillState = {'<id>':{version, enabled}}`,本期后端持久化(为后续迭代测效果打底)。
+- **技能市场**:每 agent 可装的正交 skill;只列真实/正交能力,**排除**未实现的情感打分/趋势监控。
+- **诚实标注**:本期装/删/开关**不改变** agent 运行时行为,标「行为接入下一期」。不假装已生效。
+
+### support_verdict 三色 — 真算落地(更新下方 v4 §support_verdict tokens)
+v4 把三色定为唯一信任信号但后端从未计算(默认恒 supported)。v5 真算:
+- QC 蕴含判定升三级(充分/部分/不足),**回写 cell/decision 级** `support_verdict`(新增字段;**不**回写 per-ref,防伪造每条 quote 支持度)。
+- `unsupported` 仍按**策展人**丢弃(矩阵显「—」,承 [[qc-curator-not-judge]] 不回退);三级判定**独立于重试路由**(不进 qc_result.issues)。
+- **StatusBar 三色语义**:充分 X(绿●)· 部分 Y(琥珀◐)· **已剔除 Z**(红○ = 策展剔除计数,点开看清单)。红○ 不再是矩阵格里的假数据。
+- 真算后**移除所有「原型态·待后端实现」角标**。色盲双编码(色+形状 ●◐○)不变。
 
 ## Product Context
 - **What this is:** AI 多 Agent 竞品分析系统 —— 不只产出报告,还给出**下一步该做什么的决策建议**、每条建议的**证据收据**、以及它**可能错在哪**。
@@ -52,6 +86,8 @@ RivalRadar **不是**"更精致的竞品报告生成器"——那会和 ChatGPT 
 - **浮层阴影(仅证据原文卡 / slide-over):** `--shadow-panel:0 16px 40px rgba(20,24,23,.18)`
 
 ### support_verdict tokens(v4 新增 —— 唯一信任信号)
+> **v5 更新(2026-06-07):三色已真算落地** —— 后端 QC 蕴含三级回写 cell/decision 级字段;unsupported 策展丢弃;StatusBar 红○=剔除计数;移除原型态角标。详见上「v5 设计系统增量 → support_verdict 三色真算落地」。以下 v4 token 定义不变。
+
 证据对结论的支持度是产品**唯一的信任信号**:三色 supported / partial / unsupported。**没有数字 confidence,没有 provider 字段**(二者在初稿中是虚构的,已删)。token 语义解耦于状态色(success/warning/error 是"操作状态",verdict 是"证据支持度"),用 alias 复用色相 + 自动跟随 dark:
 ```css
 /* Light & Dark 自动跟随基础色板 */
@@ -163,3 +199,4 @@ RivalRadar **不是**"更精致的竞品报告生成器"——那会和 ChatGPT 
 | 2026-05-21 | 初版设计系统 | `/design-consultation` 生成;记忆点=可信/溯源;Claude+Codex 跨模型收敛于"暖纸白+机构青绿+研报控制台+把溯源/打回做成视觉主角";字体取 IBM Plex 超级家族 |
 | 2026-05-27 | v3 paradigm pivot:虚拟办公室 + 拟物动物 + 实时 streaming | 触发 = Task 6.5 spike user 反馈 DAG 节点过于工程师视角;**v4 已废弃此方向**(见下) |
 | 2026-05-30 | **v4 paradigm pivot:证据驾驶舱(Evidence Cockpit)** | 触发 = user "跟 ChatGPT 没区别 / 要原子弹震撼";根因 = 输出 paradigm 同档(plain markdown 容器),4-agent 工程深度被扁平化。决策 = 从 report generator(同 category)跳到 **decision infrastructure**(different category):单一 Manus 分屏 cockpit(左决策流 / 右实时执行流)+ 证据常驻可溯源 + 重试环可见 + 自我攻击反证。**保留** = 字体 100% + 24 色板 100% + spacing 100% + Signature #1/#2;**废弃** = 双气质叙事 / office / 拟物动物 / 夜枭灵犀灵巧镜湖代号 / DAG 作 paradigm / 虚拟办公室 layout / office 组件与动效 / ReportSheet drawer;**新增** = support_verdict 三色 token + 决策流骨架 + Manus 执行流 + 重试环 motion + 响应式断点 + 状态覆盖矩阵 + 命名规范。评审 = `/plan-eng-review` + `/plan-design-review` + Codex outside-voice 双 CLEARED(见 `docs/superpowers/plans/2026-05-30-rivalradar-v0.4-evidence-cockpit.md` §12)|
+| 2026-06-07 | **v5 增量:调研进行时过程可视化** | 触发 = user「报告生成过程可视化太差」(标杆 Kimi:看得见真实活儿 / 计划边做边勾 / 产物边生成边长 / 研究员叙事感)。在 v4 证据驾驶舱上深化:右栏→**研究员工作台**(真查询词 / 来源卡 / 逐格 / 重试环 / 报告台 typing / 计划勾选)+ agent **人格工牌**(机构级持证,非回退 office)+ **技能子系统**(框架真 / 行为接入二期)+ **support_verdict 三色真算**(cell/decision 级回写,unsupported 策展丢弃,红○=剔除计数)+ insight **两步化字符流**(spike gated)。评审 = brainstorming spec + Codex outside-voice(14 findings 全采纳,抓出 2 处后端字段虚构:cell/decision 缺 verdict 字段、insight 非自由文本)。**保留** v4 字体/色板/spacing/Signature/命名规范/状态覆盖/a11y;规格见 `docs/superpowers/specs/2026-06-07-process-viz-redesign-design.md`。|

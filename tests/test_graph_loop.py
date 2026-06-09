@@ -6,7 +6,7 @@ from rivalradar.agents import qc
 from rivalradar.graph.build import run_research
 from rivalradar.schema.models import (
     CONTROLLED_DIMENSIONS, CompetitorAnalysis, CompetitorProfile, PricingModel,
-    SWOT, ComparisonRow, ComparisonCell, EvidenceRef, QCIssue, ReportInsight,
+    SWOT, ComparisonRow, ComparisonCell, EvidenceRef, ReportInsight,
 )
 from rivalradar.search.base import SearchResult
 from rivalradar.storage import repository as repo
@@ -64,7 +64,7 @@ class _CoversAllProvider:
         return [SearchResult(url=url, title="t", content="s", raw_content="body for " + query)]
 
 
-def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, client, model):
+def _fake_analyze(evidence, competitors, *, dimensions=None, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
     """按证据已覆盖的维度产出分析:覆盖 dims_present 的对比行,引用真实证据 id。
     pricing profile 挂合法引用 → 确定性 traceability 过;无 features/personas/swot(空,不被遍历)。"""
     dims_present = {e.dimension for e in evidence}
@@ -99,6 +99,9 @@ def _stub_agents(monkeypatch):
                          ReportInsight(market_context="m", differentiation_thesis="d",
                                        actionable_takeaway="a")))
     monkeypatch.setattr(qc, "check_entailment", lambda *a, **k: [])
+    # curate 路径走 _judge_comparison_verdicts(策展人模型,Plan B Task 5):空 verdict map →
+    # 无 cell 判 unsupported → 不丢任何 cell(等价于旧 check_entailment 返 [])。
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", lambda *a, **k: {})
 
 
 def test_real_feedback_loop_improves_to_pass(conn):
@@ -113,8 +116,8 @@ def test_real_feedback_loop_improves_to_pass(conn):
 
     # 1) 恰好打回重采一次(collect 跑 2 次:首遍全量 + 一次补缺口),pass 后无多余循环
     assert len(collects) == 2
-    assert collects[0]["input_summary"] == "targets=all"        # 首遍全量
-    assert collects[1]["input_summary"] == "targets=5 gaps"     # retry 只补 5 个缺口维(白盒锁死)
+    assert collects[0]["input_summary"] == "targets=all round=0"        # 首遍全量(round 0)
+    assert collects[1]["input_summary"] == "targets=5 gaps round=1"     # retry 只补 5 个缺口维(round 1,白盒锁死)
 
     # 2) 第一遍确实因覆盖不足被打回(可证伪:证明不是碰巧两次 collect)
     assert "verdict=retry_collect" in qcs[0]["output_summary"]
@@ -161,10 +164,11 @@ def test_curated_out_dim_with_evidence_does_not_retry(conn, monkeypatch):
     旧逻辑会因缺 cell 报 low_coverage → retry_collect 耗尽(2 次重采、3 轮空转,~2 轮真 run
     wall-clock 纯亏)。本测试在旧代码上必失败(collects==3 / retry_count==2),钉死修复。"""
     # 蕴含判定丢掉 Notion/core_workflows 这个 cell(模拟"采到了但结论站不住"):
+    # curate 路径走 _judge_comparison_verdicts(Plan B Task 5),core_workflows 判 unsupported
+    # → 被策展丢;pricing 无判定 → 默认 supported → 保留。
     def _drop_core(analysis, evidence, **kwargs):
-        return [QCIssue(competitor="Notion", dimension="core_workflows",
-                        problem_type="hallucination", detail="证据不支撑")]
-    monkeypatch.setattr(qc, "check_entailment", _drop_core)
+        return {("Notion", "core_workflows"): qc.EntailmentVerdict(verdict="unsupported")}
+    monkeypatch.setattr(qc, "_judge_comparison_verdicts", _drop_core)
 
     run_id, final = run_research(
         ["Notion"], ["pricing", "core_workflows"],

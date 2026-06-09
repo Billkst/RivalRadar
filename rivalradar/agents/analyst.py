@@ -115,6 +115,20 @@ _REFS_RULE = (
     "找不到对应字样的项一律删掉。宁可粗粒度但每条都站得住,不要细粒度而被质检判为不支撑。"
 )
 
+# 对比 cell 专用纪律(真 run 钓出:LLM 把单格写成超出证据的复合大 claim → 质检逐格判 partial/
+# 剔除。例:WPS 定价格混 365 企业版¥ 与 Office 消费版$ 两个产品 + 塞「不到平均价 31%」「整体
+# 采购价仅为 A+B+C」等派生营销数字 → 证据只支撑部分 → partial)。收紧上游让 claim 落在证据能
+# 全撑的范围内,supported 升、剔除降、矩阵更准更可比。**不动质检防虚构闸**(红线)。
+_COMPARE_RULE = (
+    "对比 cell 写作纪律(让每格都站得住、可横向比):\n"
+    "1. 每格围绕【同一产品/版本线】写一个聚焦、可横向对比的核心事实;证据里若混了同品牌多个"
+    "产品(如企业版 vs 消费版、国内版 vs 海外版、按年 vs 按月),只取与本竞品对比最相关的一种,"
+    "**绝不把多个产品/口径混进同一格**(混写必被质检判只支撑部分)。\n"
+    "2. **只**陈述证据原文直接给出的事实;严禁写证据未明示的派生/推断数字或营销话术——"
+    "如「不到同类平均价的 X%」「整体采购价仅为 A+B+C」「性价比最高」「行业领先」等,一律删。\n"
+    "3. value 简洁、同口径、可比(一句话或一组同单位数字),不要把多条事实堆成长段。"
+)
+
 
 def extract_features(evidence: list[Evidence], competitor: str, *, client, model) -> list[FeatureItem]:
     """从证据抽取竞品功能项,每条挂 evidence_refs。"""
@@ -213,7 +227,7 @@ def _compare_one_dimension(
         return None  # 该维无证据 → 不产该行(下游显「—」+ 覆盖说明)
     block = build_evidence_block(dim_ev)
     msgs = [{"role": "user", "content":
-             f"{_REFS_RULE}\n\n对竞品 [{names}] **只在维度「{dimension}」上**做横向对比。"
+             f"{_REFS_RULE}\n\n{_COMPARE_RULE}\n\n对竞品 [{names}] **只在维度「{dimension}」上**做横向对比。"
              f"为每个竞品产一个 cell,标 value_type(bool/enum/number/quote_text)与 value,挂 evidence_refs。"
              f"\n\n证据:\n{block}"}]
     rows = structured_call(ComparisonExtraction, msgs, client=client, model=model).rows
@@ -224,18 +238,13 @@ def build_comparison(
     profiles: list[CompetitorProfile], evidence: list[Evidence],
     *, dimensions: tuple[str, ...] = CONTROLLED_DIMENSIONS,
     degraded_sink: list[str] | None = None,
-    on_progress: Callable[[str], None] | None = None, client, model,
+    on_progress: Callable[[str], None] | None = None,
+    on_cell_row: "Callable[[str, ComparisonRow | None, str], None] | None" = None,
+    client, model,
 ) -> list[ComparisonRow]:
-    """收尾产出跨竞品对比(受控本体 + 类型化值 + evidence_refs,spec D5 / §6)。
-
-    **只在用户请求的 `dimensions` 上对比**(默认全受控本体,兼容直接调用)。
-
-    **按维度拆分(post-real-run-6)**:原先一次产 N 竞品 × M 维的巨型矩阵,喂全量证据
-    (真 run 273 条 ≈ 247K char,逼近端点 256K 上下文)→ Doubao 偶发吐坏 JSON / 只产 2/6 维。
-    改成每维一次小调用(只喂该维证据 ≈ 30-54K、只产 N 个 cell),并行跑:输入骤减、输出简单、
-    维度齐全、**单维失败隔离**——某维(如评价类满是嵌套引号的 quote_text)即使重试封顶仍败,
-    也只丢该维并记入 degraded_sink(降级必可见),其余维照常产出,绝不让一个脆维度杀整个对比。
-    """
+    """并行逐维对比。on_cell_row(dimension, row, status):每维算完报一次(worker 线程,乱序到达)。
+    成功有 cells → status="ok";单维抛错 → status="failed";无证据(row None,无异常)→ status="empty"
+    (前端据此区分 pending / 已知空 / 失败,不会把无证据维误当还在跑)。"""
     names = ", ".join(p.name for p in profiles)
     results: dict[str, ComparisonRow] = {}
 
@@ -247,6 +256,10 @@ def build_comparison(
             row = _compare_one_dimension(dimension, names, evidence, client=client, model=model)
             if row is not None:
                 results[dimension] = row  # 不同 key 并发写,CPython 原子,无需锁
+                if on_cell_row is not None:
+                    on_cell_row(dimension, row, "ok")
+            elif on_cell_row is not None:
+                on_cell_row(dimension, None, "empty")   # 无证据维:已知空,非 pending
         except RunAborted:
             raise  # 取消/超时穿透降级,停掉整轮对比(剩余维度也会快速抛 RunAborted)
         except Exception as e:  # noqa: BLE001 — 单维任何失败都降级该维,绝不杀整轮对比
@@ -254,6 +267,8 @@ def build_comparison(
                            dimension, type(e).__name__)
             if degraded_sink is not None:
                 degraded_sink.append(f"comparison.{dimension}")
+            if on_cell_row is not None:
+                on_cell_row(dimension, None, "failed")
         finally:
             if on_progress is not None:
                 on_progress(f"对比·{_DIM_ZH.get(dimension, dimension)}")
@@ -271,7 +286,9 @@ def analyze(
     evidence: list[Evidence], competitors: list[str],
     *, dimensions: tuple[str, ...] = CONTROLLED_DIMENSIONS,
     degraded_sink: list[str] | None = None,
-    on_progress: Callable[[str], None] | None = None, client, model,
+    on_progress: Callable[[str], None] | None = None,
+    on_cell_row: "Callable[[str, ComparisonRow | None, str], None] | None" = None,
+    client, model,
 ) -> CompetitorAnalysis:
     """分析 Agent 入口:证据 → 结构化分析(逐竞品 profile + 跨竞品对比)。
 
@@ -294,5 +311,5 @@ def analyze(
         profiles = [f.result() for f in futures]
     comparison = build_comparison(
         profiles, evidence, dimensions=dimensions, degraded_sink=degraded_sink,
-        on_progress=on_progress, client=client, model=model)
+        on_progress=on_progress, on_cell_row=on_cell_row, client=client, model=model)
     return CompetitorAnalysis(competitors=profiles, comparison=comparison)

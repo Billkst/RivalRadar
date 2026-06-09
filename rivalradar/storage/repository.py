@@ -268,6 +268,87 @@ def list_trace(conn: sqlite3.Connection, run_id: str) -> list[dict]:
     return [dict(r) for r in rows]
 
 
+# ---- queries(Plan A:真实查询词检索台)----
+def insert_queries(conn: sqlite3.Connection, run_id: str,
+                   records: list[dict]) -> None:
+    """批量插入真实查询词记录。records 每项:
+    {competitor, dimension, language, query_text, round, hit_count}。
+    在 collect_node 主线程一次性写(worker 线程只 emit + 收集,不并发写 sqlite)。"""
+    if not records:
+        return
+    now = _now()
+    conn.executemany(
+        "INSERT INTO queries (run_id, competitor, dimension, language, "
+        "query_text, round, hit_count, created_at) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
+        [(run_id, r["competitor"], r["dimension"], r["language"],
+          r["query_text"], int(r.get("round", 0)), int(r.get("hit_count", 0)), now)
+         for r in records],
+    )
+    conn.commit()
+
+
+def list_queries(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT competitor, dimension, language, query_text, round, hit_count, created_at "
+        "FROM queries WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---- curation_drops(Plan B:策展剔除清单,REPLACE per scope)----
+def replace_curation_drops(conn: sqlite3.Connection, run_id: str, scope: str,
+                           items: list[dict]) -> None:
+    """替换某 run+scope 的策展剔除清单(codex #2:qc/decide 每轮调,先删后插,绝不 append →
+    多轮重试后被补回的 cell/decision 不留幽灵)。items:cell → {"competitor","dimension"};
+    decision → {"detail"}。空列表 = 清空该 scope。在 qc_node(cell)/decide_node(decision)主线程调。"""
+    now = _now()
+    conn.execute("DELETE FROM curation_drops WHERE run_id=? AND scope=?", (run_id, scope))
+    if items:
+        conn.executemany(
+            "INSERT INTO curation_drops (run_id, scope, competitor, dimension, detail, created_at) "
+            "VALUES (?, ?, ?, ?, ?, ?)",
+            [(run_id, scope, it.get("competitor", ""), it.get("dimension", ""),
+              it.get("detail", ""), now) for it in items],
+        )
+    conn.commit()
+
+
+def list_curation_drops(conn: sqlite3.Connection, run_id: str) -> list[dict]:
+    rows = conn.execute(
+        "SELECT scope, competitor, dimension, detail, created_at FROM curation_drops "
+        "WHERE run_id=? ORDER BY id", (run_id,)).fetchall()
+    return [dict(r) for r in rows]
+
+
+# ---- agent_skills(Plan C:run 无关的 agent 技能配置,upsert per (agent_id, skill_id))----
+def upsert_agent_skill(conn: sqlite3.Connection, agent_id: str, skill_id: str,
+                       version: str, enabled: bool) -> None:
+    conn.execute(
+        "INSERT INTO agent_skills (agent_id, skill_id, version, enabled, installed_at) "
+        "VALUES (?, ?, ?, ?, ?) "
+        "ON CONFLICT(agent_id, skill_id) DO UPDATE SET "
+        "version=excluded.version, enabled=excluded.enabled",
+        (agent_id, skill_id, version, 1 if enabled else 0, _now()),
+    )
+    conn.commit()
+
+
+def list_agent_skills(conn: sqlite3.Connection) -> list[dict]:
+    rows = conn.execute(
+        "SELECT agent_id, skill_id, version, enabled, installed_at FROM agent_skills "
+        "ORDER BY agent_id, installed_at").fetchall()
+    return [
+        {"agent_id": r[0], "skill_id": r[1], "version": r[2],
+         "enabled": bool(r[3]), "installed_at": r[4]}
+        for r in rows
+    ]
+
+
+def delete_agent_skill(conn: sqlite3.Connection, agent_id: str, skill_id: str) -> None:
+    conn.execute("DELETE FROM agent_skills WHERE agent_id=? AND skill_id=?",
+                 (agent_id, skill_id))
+    conn.commit()
+
+
 # ---- runs list ----
 def list_runs(conn: sqlite3.Connection, *, limit: int = 50) -> list[dict]:
     rows = conn.execute(

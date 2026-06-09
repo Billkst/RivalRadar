@@ -16,45 +16,33 @@
  */
 import type { AgentDescriptor, AgentId } from '@/types/agents'
 
-// D19 polish #1 spike 决:agent 名字采用职责命名(user 反馈 — 拟人名字过于抽象,
-// 评委 5 秒看到"夜枭"不知道在做什么)。拟物动物 vision 通过 persona 字段 emoji 保留
-// (P0-1 "拟物动物 + 真实可爱"不放弃,只是 name 字段 = 职责名,emoji 移 persona)。
+// agent 名字采用职责命名(评委 5 秒看到职责名即知在做什么)。
+// Plan C(DESIGN.md v5):去除 v3 office emoji 动物 persona / sprite avatar /
+// workspace_seat 工位语义(机构级工牌身份见 lib/agentRoles.ts ROLES)。
 export const AGENTS: readonly AgentDescriptor[] = [
   {
     id: 'collector',
     name: '采集员',
     role: '采集员',
-    avatar: '/agents/owl',
-    persona: '🦉 视野广 · 24h 不睡 · 全网搜证据',
     capabilities: ['web_search'],
-    workspace_seat: [0, 1],
   },
   {
     id: 'analyst',
     name: '分析员',
     role: '分析员',
-    avatar: '/agents/fox',
-    persona: '🦊 聪明 · 看穿本质 · 提取关键',
     capabilities: ['extract_features', 'extract_pricing', 'compare'],
-    workspace_seat: [0, 0],
   },
   {
     id: 'writer',
     name: '撰写员',
     role: '撰写员',
-    avatar: '/agents/raccoon',
-    persona: '🦝 灵巧 · 文笔老练 · 句句有据',
     capabilities: ['narrative_write'],
-    workspace_seat: [1, 0],
   },
   {
     id: 'qc',
     name: '质检员',
     role: '质检员',
-    avatar: '/agents/turtle',
-    persona: '🐢 稳健 · 细致 · 慢工出细活',
     capabilities: ['entailment_check', 'controlled_check'],
-    workspace_seat: [1, 1],
   },
 ] as const
 

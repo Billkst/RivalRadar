@@ -23,7 +23,15 @@
 import { create } from 'zustand'
 import { useTypingStore } from '@/stores/typingStore'
 import type { AgentId } from '@/types/agents'
-import type { QCVerdict, SSEEvent } from '@/types/api'
+import type {
+  QCVerdict,
+  SSEEvent,
+  SupportVerdict,
+  SSEQueryData,
+  SSESourceData,
+  SSECellRowData,
+  SSEEvidenceDeltaData,
+} from '@/types/api'
 
 export type NodeState = 'idle' | 'running' | 'done' | 'failed' | 'retrying'
 export type NodeName = 'collect' | 'analyze' | 'write' | 'qc'
@@ -98,6 +106,8 @@ interface RunStore {
   perAgentNarrative: Record<string, string[]>      // agent_id → progress summaries
   nodeStartTs: Partial<Record<NodeName, string>>   // node → 第一次 progress event ts
   nodeEndTs: Partial<Record<NodeName, string>>     // node → 最后一次 node event ts
+  runStartTs: string | null                        // run 开始时刻(SSE start.ts)— StatusBar 计时器
+  runEndTs: string | null                          // run 结束时刻(SSE done.ts)— 终态显总耗时
 
   // v3 招牌时刻 #3(Epic 4.5):forward handoff queue。
   // node done 时入队 → VirtualOfficeView 渲染队头 → onComplete 调 dequeueHandoff。
@@ -107,6 +117,15 @@ interface RunStore {
   // 不被 typingStore.clear(progress event 触发)影响 —— ReportSheet 永远
   // 显示完整 writer 输出,不会因为 progress 'done' 而失去内容。
   writerReport: string
+
+  // Plan C 工作台切片(SSE 派生)。消费在 Epic 5;此处仅承接数据。
+  queries: SSEQueryData[]                          // 检索台:逐条查询词(prepend 最新在前)
+  sources: SSESourceData[]                         // 来源卡(到达序)
+  cellRows: Record<string, SSECellRowData>         // dimension → 该维 cell_row(逐维填,乱序安全)
+  evidenceDeltas: SSEEvidenceDeltaData[]           // retry 增量(重试环)
+  cellVerdicts: Record<string, SupportVerdict>     // `${dimension}|${competitor}` → 真三色(verdict_recheck 刷)
+  droppedCells: string[]                            // 被策展剔除的格 `${dimension}|${competitor}`(cell_verdicts 只含保留格,dropped 另存)
+  verdictSummary: { supported: number; partial: number; dropped: number } | null
 
   startRun: (runId: string) => void
   handleEvent: (ev: SSEEvent) => void
@@ -127,6 +146,17 @@ const initialNodes = (): Record<NodeName, NodeState> => ({
 
 const initialPerAgentNarrative = (): Record<string, string[]> => ({})
 const initialNodeTs = (): Partial<Record<NodeName, string>> => ({})
+
+/** Plan C 工作台切片初值(每次 reset / start 前清,防跨 run 污染)。 */
+const initialPlanCSlices = () => ({
+  queries: [] as SSEQueryData[],
+  sources: [] as SSESourceData[],
+  cellRows: {} as Record<string, SSECellRowData>,
+  evidenceDeltas: [] as SSEEvidenceDeltaData[],
+  cellVerdicts: {} as Record<string, SupportVerdict>,
+  droppedCells: [] as string[],
+  verdictSummary: null as { supported: number; partial: number; dropped: number } | null,
+})
 
 const isKnownNode = (name: string): name is NodeName =>
   (NODE_NAMES as readonly string[]).includes(name)
@@ -155,8 +185,11 @@ export const useRunStore = create<RunStore>((set, get) => ({
   perAgentNarrative: initialPerAgentNarrative(),
   nodeStartTs: initialNodeTs(),
   nodeEndTs: initialNodeTs(),
+  runStartTs: null,
+  runEndTs: null,
   handoffQueue: [],
   writerReport: '',
+  ...initialPlanCSlices(),
 
   startRun: (runId) =>
     set({
@@ -173,8 +206,11 @@ export const useRunStore = create<RunStore>((set, get) => ({
       perAgentNarrative: initialPerAgentNarrative(),
       nodeStartTs: initialNodeTs(),
       nodeEndTs: initialNodeTs(),
+      runStartTs: null,
+      runEndTs: null,
       handoffQueue: [],
       writerReport: '',
+      ...initialPlanCSlices(),
     }),
 
   handleEvent: (ev) => {
@@ -192,6 +228,50 @@ export const useRunStore = create<RunStore>((set, get) => ({
       if (ev.data.agent_id === 'writer') {
         set((s) => ({ writerReport: s.writerReport + ev.data.delta }))
       }
+      return
+    }
+
+    // ── Plan C 工作台事件(codex P1#1:if-chain 非 switch,这些事件无 node 字段,
+    //    必须在读 ev.data.node 的 fall-through 之前早 return,否则崩)。
+    //    高频事件不进 events[](同 chunk),只更新派生切片。──────────────────────
+    if (ev.type === 'query') {
+      const q = ev.data
+      set((s) => ({ queries: [q, ...s.queries].slice(0, 200) })) // 上限 200 防爆
+      return
+    }
+    if (ev.type === 'query_hit') {
+      // per-query 命中数的唯一消费者(SearchStation)已随实时引擎重构删除 → 直接丢弃。
+      // 仍需早 return:query_hit 是高频事件,不可落入 events[](同 query/chunk 设计)。
+      return
+    }
+    if (ev.type === 'source') {
+      // source 不含 content;来源卡点击走 openEvidence → REST 拉全文(此处不 seed)。
+      set((s) => ({ sources: [...s.sources, ev.data] }))
+      return
+    }
+    if (ev.type === 'evidence_delta') {
+      set((s) => ({ evidenceDeltas: [...s.evidenceDeltas, ev.data] }))
+      return
+    }
+    if (ev.type === 'cell_row') {
+      const cr = ev.data
+      set((s) => ({ cellRows: { ...s.cellRows, [cr.dimension]: cr } })) // 按 dimension 落位(乱序安全)
+      return
+    }
+    if (ev.type === 'verdict_recheck') {
+      const vr = ev.data
+      const map: Record<string, SupportVerdict> = {}
+      for (const cv of vr.cell_verdicts) map[`${cv.dimension}|${cv.competitor}`] = cv.support_verdict
+      const dropKeys = vr.dropped.map((d) => `${d.dimension}|${d.competitor}`) // codex P2#12:dropped 另存
+      set((s) => ({
+        cellVerdicts: { ...s.cellVerdicts, ...map },
+        droppedCells: [...new Set([...s.droppedCells, ...dropKeys])],
+        verdictSummary: {
+          supported: vr.summary.supported ?? 0,
+          partial: vr.summary.partial ?? 0,
+          dropped: vr.summary.dropped ?? 0,
+        },
+      }))
       return
     }
 
@@ -213,11 +293,16 @@ export const useRunStore = create<RunStore>((set, get) => ({
         perAgentNarrative: initialPerAgentNarrative(),
         nodeStartTs: initialNodeTs(),
         nodeEndTs: initialNodeTs(),
+        // 计时器起点(start event 权威)。replay 的 start/done 都是服务端 _now()(非真实历史
+        // 时长,仅相差回放秒级)→ runStartTs 置 null,终态不显「总耗时」(显错数字不如不显)。
+        runStartTs: ev.data.replay ? null : ev.data.ts,
+        runEndTs: null,
         // Epic 4.5 漏了 handoffQueue reset(start event handler 与 startRun
         // 是两套 reset 路径,startRun 在 SSE 连前调,start event 在第一个 SSE
         // 包到达时调 — 都该清 queue 防 stale state)。同时加 writerReport reset。
         handoffQueue: [],
         writerReport: '',
+        ...initialPlanCSlices(),
       })
       return
     }
@@ -279,6 +364,7 @@ export const useRunStore = create<RunStore>((set, get) => ({
         events,
         status: finalStatus,
         degraded: state.degraded || finalStatus === 'degraded',
+        runEndTs: ev.data.ts,   // 计时器终点 → StatusBar 显总耗时
       })
       return
     }
@@ -400,7 +486,10 @@ export const useRunStore = create<RunStore>((set, get) => ({
       perAgentNarrative: initialPerAgentNarrative(),
       nodeStartTs: initialNodeTs(),
       nodeEndTs: initialNodeTs(),
+      runStartTs: null,
+      runEndTs: null,
       handoffQueue: [],
       writerReport: '',
+      ...initialPlanCSlices(),
     }),
 }))

@@ -139,3 +139,23 @@ def test_collect_graceful_skip_on_single_query_failure(caplog):
     assert {e.dimension for e in evs} != {"pricing", "integrations", "deployment"}  # 缺 1 维
     # warning 日志记录失败 query 上下文
     assert any("query failed" in r.message for r in caplog.records)
+
+
+def test_collect_on_query_callback():
+    """on_query 每 query 完成报一次,带 Query 对象 + 该 query 产出的 evidence。
+    worker 线程并发调,用锁汇聚。"""
+    provider = _MockProvider()
+    seen = []
+    lock = threading.Lock()
+
+    def on_q(q, evs):
+        with lock:
+            seen.append((q.competitor, q.dimension, q.language, q.query_text, len(evs)))
+
+    collect(["Notion"], ["pricing", "integrations"], provider=provider,
+            languages=("en",), max_workers=4, on_query=on_q)
+    assert len(seen) == 2  # 1 竞品 × 2 维 × 1 语
+    dims = {s[1] for s in seen}
+    assert dims == {"pricing", "integrations"}
+    assert all(s[4] == 1 for s in seen)        # _MockProvider 每 query 回 1 条
+    assert all(s[3] for s in seen)             # query_text 非空

@@ -1,16 +1,15 @@
 import * as React from 'react'
 import { Link, Outlet, useParams } from 'react-router-dom'
-import { cn } from '@/lib/utils'
 import { useThemeStore } from '@/stores/themeStore'
 import { ThemeToggle } from './ThemeToggle'
 
 /**
  * RivalRadar 应用外壳(v0.4 证据驾驶舱)。
- *   ┌ 顶栏: 项目名 / 副标 / run_id / ThemeToggle / disabled "EN" ┐
- *   └ run 页:cockpit 全宽(CockpitLayout 自带分屏);列表页:左 rail(208px)+ 主区 ┘
+ *   ┌ 顶栏: 项目名 / 副标 / run_id / ThemeToggle / "EN"(即将支持) ┐
+ *   └ 所有页面:主区全宽(run 页 cockpit 自带分屏;列表/报告页自带布局) ┘
  *
- * v0.4:run 页退役 office AgentTeamRoster 左轨(卡通动物违背机构级 cockpit 美学),
- * cockpit(StatusBar + 决策面 + 实时分析流程)占满主区。列表页保留轻量 rail 占位。
+ * v0.4:run 页退役 office AgentTeamRoster 左轨(卡通动物违背机构级 cockpit 美学)。
+ * 列表页原有的「证据驾驶舱」空占位左轨(只有引导文案、无内容)已移除 —— RunsPage 全宽。
  *
  * themeStore.init() 在 mount 时挂载 matchMedia listener;cleanup 在 unmount/strict-mode
  * re-effect 时移除,防 listener leak (CQ4).
@@ -39,31 +38,18 @@ export function Layout() {
         </div>
         <div className="flex items-center gap-2">
           <ThemeToggle />
-          <span
+          <button
+            type="button"
+            disabled
             className="cursor-not-allowed rounded-md border border-border px-2 py-1 text-xs text-text-muted opacity-50"
-            title="EN 切换 — Day-4 stretch"
+            title="中英文切换 · 即将支持(本轮暂未实装)"
+            aria-label="中英文切换,即将支持"
           >
             EN
-          </span>
+          </button>
         </div>
       </header>
       <div className="flex flex-1 overflow-hidden">
-        {/* run 页:cockpit 全宽(无 office 左轨);列表/其它页:保留轻量 rail 占位 */}
-        {!run_id && (
-          <aside
-            className={cn(
-              'flex flex-shrink-0 flex-col border-r border-border bg-surface-subtle p-4',
-              'w-rail',
-            )}
-          >
-            <div className="text-xs font-semibold uppercase tracking-wide text-text-muted">
-              证据驾驶舱
-            </div>
-            <div className="mt-2 text-xs italic text-text-muted">
-              选一个 run 看决策面板 + 实时分析流程
-            </div>
-          </aside>
-        )}
         {/* relative:成为绝对定位后代(如 VerdictDot 的 sr-only span)的包含块,
             否则它们绕过本容器的 overflow 裁剪、撑高 html → 凭空多一条整页滚动条(Q6 修复)。 */}
         <main className="relative flex-1 overflow-auto p-6">

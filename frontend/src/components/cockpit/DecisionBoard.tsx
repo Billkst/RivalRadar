@@ -11,17 +11,20 @@
  *    最弱证据 verdict + 决策后果(可逆/成本),framing 为结构性警示,**不虚构后端字段**。
  *    (未来可在 Decision 加 LLM 生成的 counterargument;见交付说明。)
  *
- * 状态(§12.4):loading skeleton / 0 决策解释性空卡 / degraded 每条 caveat /
+ * 状态(§12.4):loading skeleton / 0 决策解释性空卡 / 每条 caveat 按各自 support_verdict /
  *              通用浏览 收敛语气 banner。insufficient_evidence 处境卡在 DecisionSurface 处理。
  */
+import * as React from 'react'
 import { useEvidence } from '@/stores/evidenceStore'
+import { useCockpitStore } from '@/stores/cockpitStore'
 import { ageDays, isStale } from '@/lib/freshness'
 import { formatBeijingDate } from '@/lib/time'
 import { SectionTitle, PanelSkeleton, EmptyNote, ErrorNote } from '@/components/cockpit/parts'
 import { VerdictDot } from '@/components/cockpit/VerdictDot'
 import { EvidencePill } from '@/components/cockpit/EvidencePill'
+import { VERDICT_META } from '@/lib/verdict'
 import type { LoadState } from '@/stores/cockpitStore'
-import type { Decision, EvidenceRef, Stance, SupportVerdict } from '@/types/api'
+import type { CompetitorAnalysis, Decision, EvidenceRef, Stance, SupportVerdict } from '@/types/api'
 
 const STANCE_STYLE: Record<Stance, string> = {
   建议采用: 'bg-accent-soft text-accent',
@@ -35,6 +38,23 @@ const SEVERITY: Record<SupportVerdict, number> = { unsupported: 2, partial: 1, s
 function bestRef(refs: EvidenceRef[]): EvidenceRef | null {
   if (refs.length === 0) return null
   return refs.find((r) => r.support_verdict === 'supported') ?? refs[0]
+}
+
+/** 因果桥:决策 evidence_refs 的 id 集合 ∩ 各 cell 的 evidence ids 求交,命中 → 高亮格
+ *  `${dim}|${comp}`(DESIGN.md §对比矩阵 #146)。analysis 缺失 → 空集合。 */
+function computeHighlightedCells(decision: Decision, analysis: CompetitorAnalysis | null): Set<string> {
+  const set = new Set<string>()
+  if (!analysis) return set
+  const refIds = new Set(decision.evidence_refs.map((r) => r.evidence_id))
+  if (refIds.size === 0) return set
+  for (const row of analysis.comparison) {
+    for (const cell of row.cells) {
+      if (cell.evidence_refs.some((r) => refIds.has(r.evidence_id))) {
+        set.add(`${row.dimension}|${cell.competitor}`)
+      }
+    }
+  }
+  return set
 }
 
 /** 派生"哪里可能错":最弱证据 verdict + 决策后果 → 对结论的攻击 + 收敛建议。 */
@@ -86,22 +106,23 @@ function EvidenceLine({ refItem }: { refItem: EvidenceRef }) {
 function DecisionCard({
   decision,
   index,
-  degraded,
   selected,
   onToggle,
 }: {
   decision: Decision
   index: number
-  degraded: boolean
   selected: boolean
   onToggle: () => void
 }) {
   const best = bestRef(decision.evidence_refs)
+  // caveat / 视觉淡化按**这条决策自己**的 support_verdict 分级,不再吃 run 级 degraded
+  // (真 run 钓出:run 级 degraded 一刀切盖到 supported 决策 →「佐证充分却说证据未达标」自相矛盾)。
+  const weak = decision.support_verdict !== 'supported'
   return (
     <article
       className={`rounded-lg border bg-surface p-4 ${
         selected ? 'border-accent ring-1 ring-accent' : 'border-border'
-      } ${degraded ? 'opacity-90' : ''}`}
+      } ${weak ? 'opacity-90' : ''}`}
     >
       {/* 做什么 */}
       <div className="flex flex-wrap items-start justify-between gap-2">
@@ -119,10 +140,22 @@ function DecisionCard({
         <span className="rounded bg-surface-subtle px-2 py-0.5 font-mono text-text-muted">
           {decision.risk_reversibility} · 成本{decision.risk_cost}
         </span>
+        {/* 决策级真三色(C-D6:读 decision.support_verdict,非 ref 级)。 */}
+        <span
+          className="inline-flex items-center gap-1 rounded bg-surface-subtle px-2 py-0.5"
+          title={`证据支持度:${VERDICT_META[decision.support_verdict].label}`}
+        >
+          <VerdictDot verdict={decision.support_verdict} showLabel />
+        </span>
       </div>
 
-      {degraded ? (
-        <p className="mt-2 text-[12px] text-warning">⚠ 本轮证据未完全达标,此建议置信度下降,请谨慎参考。</p>
+      {weak ? (
+        <p className="mt-2 text-[12px] text-warning">
+          ⚠{' '}
+          {decision.support_verdict === 'partial'
+            ? '这条建议部分依据只拿到部分佐证,请结合其他因素判断。'
+            : '这条建议关键依据佐证不足,建议补足证据后再决定。'}
+        </p>
       ) : null}
 
       {/* 为什么 */}
@@ -192,21 +225,47 @@ function DecisionCard({
 
 export function DecisionBoard({
   decisions,
+  analysis,
   state,
-  degraded,
   genericContext,
   evidenceCount,
   selectedIdx,
   onSelect,
 }: {
   decisions: Decision[]
+  /** 对比矩阵 analysis(因果桥求交需要 cell evidence ids;running 未就绪 → null)。 */
+  analysis: CompetitorAnalysis | null
   state: LoadState
-  degraded: boolean
   genericContext: boolean
   evidenceCount: number
   selectedIdx: number | null
   onSelect: (idx: number | null) => void
 }) {
+  const setHighlightedCells = useCockpitStore((s) => s.setHighlightedCells)
+
+  // 因果桥:选中决策 → 算高亮格写共享 store + 滚到第一个;取消 / 切 run / analysis 变 → 清。
+  // selectedIdx 由 DecisionSurface 持有(切 run reset);此 effect 在 selection / analysis
+  // 变化时同步共享高亮,并把第一个命中格滚入视口。
+  React.useEffect(() => {
+    if (selectedIdx === null || selectedIdx >= decisions.length) {
+      setHighlightedCells(null)
+      return
+    }
+    const cells = computeHighlightedCells(decisions[selectedIdx], analysis)
+    setHighlightedCells(cells)
+    if (cells.size > 0) {
+      const first = cells.values().next().value
+      if (first) {
+        // 等高亮 className 落地后再滚(下一帧)。
+        requestAnimationFrame(() => {
+          const el = document.querySelector(`[data-cell="${CSS.escape(first)}"]`)
+          el?.scrollIntoView({ behavior: 'smooth', block: 'center' })
+        })
+      }
+    }
+    // 卸载 / 重算前不显式清(下一次 effect 会覆盖);组件整体卸载由 DecisionSurface 切 run 清。
+  }, [selectedIdx, decisions, analysis, setHighlightedCells])
+
   return (
     <section className="space-y-3" aria-label="决策流">
       <SectionTitle>下一步怎么做</SectionTitle>
@@ -237,7 +296,6 @@ export function DecisionBoard({
               key={idx}
               decision={d}
               index={idx + 1}
-              degraded={degraded}
               selected={selectedIdx === idx}
               onToggle={() => onSelect(selectedIdx === idx ? null : idx)}
             />

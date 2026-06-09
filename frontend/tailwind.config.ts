@@ -41,6 +41,33 @@ export default {
         'seat-2': 'var(--seat-2)',
         'seat-3': 'var(--seat-3)',
         'seat-4': 'var(--seat-4)',
+        // Plan C: agent 身份色(DESIGN.md v5)。身份色多为运行时按 agent 动态切换
+        // (内联 style + var(--idc)),Tailwind token 主要给静态用法,两种都保留。
+        'id-collector': 'var(--id-collector)',
+        'id-collector-line': 'var(--id-collector-line)',
+        'id-collector-soft': 'var(--id-collector-soft)',
+        'id-analyst': 'var(--id-analyst)',
+        'id-analyst-line': 'var(--id-analyst-line)',
+        'id-analyst-soft': 'var(--id-analyst-soft)',
+        'id-writer': 'var(--id-writer)',
+        'id-writer-line': 'var(--id-writer-line)',
+        'id-writer-soft': 'var(--id-writer-soft)',
+        'id-qc': 'var(--id-qc)',
+        'id-qc-line': 'var(--id-qc-line)',
+        'id-qc-soft': 'var(--id-qc-soft)',
+        // Plan C: 2e 缺口 token
+        'surface-sink': 'var(--surface-sink)',
+        'border-strong': 'var(--border-strong)',
+        ink: 'var(--ink)',
+        'text-faint': 'var(--text-faint)',
+        'accent-deep': 'var(--accent-deep)',
+        'accent-line': 'var(--accent-line)',
+        'v-sup': 'var(--v-sup)',
+        'v-par': 'var(--v-par)',
+        'v-uns': 'var(--v-uns)',
+        'v-sup-soft': 'var(--v-sup-soft)',
+        'v-par-soft': 'var(--v-par-soft)',
+        'v-uns-soft': 'var(--v-uns-soft)',
       },
       fontFamily: {
         sans: [

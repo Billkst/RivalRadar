@@ -262,6 +262,19 @@ def test_build_comparison_returns_rows():
     assert rows[0].dimension == "pricing"
 
 
+def test_compare_one_dimension_injects_compare_and_refs_rules():
+    """对比 prompt 必须注入 _COMPARE_RULE(收紧 claim,治真 run「全 partial+空格」)与 _REFS_RULE。
+    两条规则只在 prompt 字符串里 —— 把注入删掉(回退本次收紧)不会让任何打桩 LLM 的测试变红,
+    属 symbol-level silent(真打真 run 才暴露)。这条锁住 prompt 拼接不被静默回退。"""
+    from rivalradar.agents.analyst import _compare_one_dimension, _COMPARE_RULE, _REFS_RULE
+    client = _FakeClient([json.dumps({"rows": []})])
+    _compare_one_dimension("pricing", "Notion, 飞书",
+                           [_ev("e1", "Notion", "pricing")], client=client, model="m")
+    content = client.chat.completions.last_kwargs["messages"][0]["content"]
+    assert _COMPARE_RULE in content   # 本次收紧规则被拼进
+    assert _REFS_RULE in content      # 既有引用纪律未被挤掉
+
+
 def test_build_comparison_degrades_single_dimension_into_sink(monkeypatch):
     """单维对比脆败隔离(post-real-run-6/7 核心卖点):某维 _compare_one_dimension 抛(非
     RunAborted)→ 该维记入 degraded_sink('comparison.{dim}')且被丢弃,其余维照常产出,
@@ -300,7 +313,7 @@ def test_analyze_threads_requested_dimensions_into_comparison(monkeypatch):
     不再硬编码全 6 受控本体(否则分析员超范围产出 → 越界 hallucination + 质检覆盖死循环)。"""
     captured = {}
 
-    def spy(profiles, evidence, *, dimensions, degraded_sink=None, on_progress=None, client, model):
+    def spy(profiles, evidence, *, dimensions, degraded_sink=None, on_progress=None, on_cell_row=None, client, model):
         captured["dims"] = dimensions
         return []
 
@@ -322,3 +335,31 @@ def test_analyze_two_competitors_aggregates_and_compares():
     assert [c.name for c in out.competitors] == ["Notion", "飞书"]
     assert client.chat.completions.calls == 9
     assert out.comparison[0].dimension == "pricing"
+
+
+def test_build_comparison_calls_on_cell_row_per_dimension(monkeypatch):
+    import threading
+    from rivalradar.agents import analyst as amod
+    from rivalradar.schema.models import ComparisonRow, ComparisonCell, CompetitorProfile, PricingModel, SWOT
+
+    seen = []
+    lock = threading.Lock()
+    def on_cell_row(dimension, row, status):
+        with lock:
+            seen.append((dimension, status, None if row is None else len(row.cells)))
+
+    def fake_one(dimension, names, evidence, *, client, model):
+        if dimension == "pricing":
+            return ComparisonRow(dimension="pricing", cells=[
+                ComparisonCell(competitor="Notion", value_type="enum", value="v")])
+        raise ValueError("boom")     # core_workflows 维失败
+
+    monkeypatch.setattr(amod, "_compare_one_dimension", fake_one)
+    profiles = [CompetitorProfile(name="Notion", pricing=PricingModel(model_type="x"), swot=SWOT())]
+    sink = []
+    amod.build_comparison(profiles, [_ev("e1", "Notion", "pricing")],
+                          dimensions=("pricing", "core_workflows"),
+                          degraded_sink=sink, on_cell_row=on_cell_row, client=None, model="m")
+    by_dim = {d: (s, n) for d, s, n in seen}
+    assert by_dim["pricing"] == ("ok", 1)            # 成功维带 cells
+    assert by_dim["core_workflows"][0] == "failed"   # 失败维标 failed(乱序到达,按 dim 落位)
