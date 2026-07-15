@@ -1,7 +1,7 @@
 """RivalRadar API server entry. 启动:.venv/bin/python main.py
 
 环境变量:
-  ARK_API_KEY=...        必填,Doubao key
+  ARK_API_KEY=...        可选,Doubao key(未设时走 BYOK:请求自带 X-LLM-* 三头)
   TAVILY_API_KEY=...     必填(或 EXA_API_KEY)
   RIVALRADAR_DB=...      可选,默认 rivalradar.db
   RIVALRADAR_PORT=8000   可选
@@ -33,21 +33,41 @@ def _build_provider():
     return FallbackSearch(providers)
 
 
-def main():
-    # WSL2 + Clash 兜底:启动即清代理 env,确保 Doubao(ark.cn-beijing.volces.com)/ Tavily 走直连,
-    # 不被 Clash fake-ip 路由海外卡死(60-120s);localhost 自调用也不过代理。无论 Clash 开/关、
-    # 无论走 scripts/dev-backend.sh 还是裸 `python main.py` 都成立(client 在下面 create_app 时才建,
-    # 此时 env 已清)。codex / DiceBear 那类需代理的是独立 CLI/一次性抓取,不在后端进程内。
-    for _k in ("http_proxy", "https_proxy", "HTTP_PROXY", "HTTPS_PROXY", "ALL_PROXY", "all_proxy"):
-        os.environ.pop(_k, None)
-    os.environ.setdefault("NO_PROXY", "localhost,127.0.0.1,ark.cn-beijing.volces.com,api.tavily.com")
-    os.environ.setdefault("no_proxy", os.environ["NO_PROXY"])
+def _ensure_localhost_bypasses_proxy() -> None:
+    """只做一件事:保证**自调用**(localhost)不过代理。代理策略本身交给环境变量。
 
-    if not cfg.ark_api_key():
-        raise RuntimeError("ARK_API_KEY 未设置(放进 .env)")
+    **曾经的做法是启动即清空所有代理 env**,理由是让豆包端点(ark.cn-beijing.volces.com,
+    境内地址)直连,不被 Clash fake-ip 路由到海外卡死 60-120s。那在「只有豆包一个厂商」的
+    年代是对的,注释也言之成理 —— 但它把「哪些主机走代理」这个**运维决策焊死进了应用代码**。
+
+    BYOK 之后 LLM 端点变成任意厂商,这个硬编码立刻反噬:
+      - api.deepseek.com 在本机**直连不通**(实测 12s 超时),走代理 0.14s 就通 —— 清了代理
+        它就永远连不上,SDK 还默认重试 2 次,一次连通性测试要卡 46s 才报 timeout,
+        看起来像「厂商挂了」;
+      - 更讽刺的是,**豆包自己现在也直连不通了**(实测同样超时,走代理 0.28s 通)——
+        网络环境早变了,而这行「网络常识」还留在代码里,因为它当初是对的,没人会去质疑。
+
+    结论:应用不该假装自己懂网络拓扑。尊重 http_proxy / https_proxy / NO_PROXY 的标准契约,
+    由开发机 / Render / Docker 各自决定。唯一必须由应用兜底的是 localhost —— 自调用走代理
+    必然 502,且这跟部署在哪无关。
+    """
+    hosts = ["localhost", "127.0.0.1"]
+    existing = os.environ.get("NO_PROXY") or os.environ.get("no_proxy") or ""
+    # merge 而非 setdefault:环境已设了 NO_PROXY 时 setdefault 是空操作,localhost 就漏了。
+    merged = ",".join(dict.fromkeys(
+        [h for h in (p.strip() for p in existing.split(",")) if h] + hosts))
+    os.environ["NO_PROXY"] = merged
+    os.environ["no_proxy"] = merged
+
+
+def main():
+    _ensure_localhost_bypasses_proxy()
+
+    # BYOK:env key 可选。未配 ARK_API_KEY 时 doubao_client=None,
+    # 请求必须自带 X-LLM-* 三头(否则 503 指引前端「模型设置」)。
     app = create_app(
         db_path=cfg.db_path(),
-        doubao_client=cfg.get_doubao_client(),
+        doubao_client=cfg.get_doubao_client() if cfg.ark_api_key() else None,
         provider=_build_provider(),
     )
     # 云平台(Render/Railway 等)注入 $PORT;本地无 $PORT 时回退 RIVALRADAR_PORT。
@@ -57,6 +77,7 @@ def main():
     # 云平台注入 $PORT 时必须绑 0.0.0.0 平台才路由得进来,据此切默认值。仍可被 RIVALRADAR_HOST 覆盖。
     host = os.getenv("RIVALRADAR_HOST", "0.0.0.0" if _cloud_port else "127.0.0.1")
     print(f"[RivalRadar] starting on http://{host}:{port}  (key configured: {bool(cfg.ark_api_key())})")
+    print("[RivalRadar] BYOK 已启用:请求可自带 X-LLM-Base-URL / X-LLM-API-Key / X-LLM-Model 三头覆盖模型配置")
     uvicorn.run(app, host=host, port=port, log_level="info")
 
 

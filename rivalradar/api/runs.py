@@ -2,21 +2,23 @@
 from __future__ import annotations
 
 import sqlite3
+import time
 import uuid
 
-from fastapi import APIRouter, Depends, HTTPException
+import openai
+from fastapi import APIRouter, Depends, HTTPException, Request
 from sse_starlette.sse import EventSourceResponse
 
 from rivalradar.agents.discover import DiscoverySet, discover_competitors
 from rivalradar.api.deps import (
-    get_db_conn, get_doubao_client, get_provider, get_as_of, get_max_retries,
+    LLMSettings, get_db_conn, get_llm, get_provider, get_as_of, get_max_retries,
 )
 from rivalradar.api.schemas import DiscoverRequest, RunDetail, RunRequest, RunSummary
 from rivalradar.api.sse import (
     _ACTIVE_RUN_CONTROLS, _ACTIVE_RUN_TASKS, _replay_from_trace, graph_event_stream,
 )
-from rivalradar.config import doubao_model
-from rivalradar.llm.structured import StructuredCallError
+from rivalradar.llm.redact import redact
+from rivalradar.llm.structured import _DEFAULT_MAX_TOKENS, StructuredCallError
 from rivalradar.graph.build import build_research_graph
 from rivalradar.storage import repository as repo
 from rivalradar.storage.repository import create_run
@@ -29,7 +31,7 @@ router = APIRouter(tags=["runs"])
 def post_run(
     req: RunRequest,
     conn: sqlite3.Connection = Depends(get_db_conn),
-    client=Depends(get_doubao_client),
+    llm: LLMSettings = Depends(get_llm),
     provider=Depends(get_provider),
     as_of: str = Depends(get_as_of),
     max_retries: int = Depends(get_max_retries),
@@ -39,7 +41,7 @@ def post_run(
     create_run(conn, run_id, req.competitors, req.dimensions,
                decision_context=req.decision_context)
     graph = build_research_graph(
-        conn=conn, client=client, model=doubao_model(), provider=provider,
+        conn=conn, client=llm.client, model=llm.model, provider=provider,
         as_of=as_of, max_retries=max_retries,
     )
     initial = {
@@ -59,7 +61,7 @@ def post_run(
 @router.post("/discover-competitors", response_model=DiscoverySet)
 def post_discover(
     req: DiscoverRequest,
-    client=Depends(get_doubao_client),
+    llm: LLMSettings = Depends(get_llm),
 ) -> DiscoverySet:
     """引导式 setup 第①步(Epic 1.1):种子产品 → LLM 建议直接竞品 + 一句话理由。
 
@@ -68,9 +70,87 @@ def post_discover(
     """
     try:
         return discover_competitors(
-            req.seed, req.industry_hint, client=client, model=doubao_model())
-    except StructuredCallError:
+            req.seed, req.industry_hint, client=llm.client, model=llm.model)
+    except StructuredCallError as err:
+        if llm.source == "byok":
+            # BYOK:err 文本在 structured_call 内已按本次 client 的 key 脱敏,可回显。
+            # 曾只回一句「检查 base_url / API Key / 模型名」—— 三样全对时(ping 通、
+            # 真调被厂商 400 拒)用户被指去检查根本没错的东西,真实拒因被吞在这里。
+            # 「竞品发现失败:」前缀由前端加(RunsPage),这里只回拒因本身,防双重前缀。
+            raise HTTPException(503, str(err)[:300])
+        # env fallback:err 可能含 DOUBAO_MODEL endpoint ID(视同 KEY 敏感),保持笼统。
         raise HTTPException(503, "竞品发现暂时不可用,请手动输入竞品名")
+
+
+# ── BYOK 连通性测试 ─────────────────────────────────────────────────────────
+def _llm_secrets(request: Request, llm: LLMSettings) -> tuple[str | None, ...]:
+    """本次调用需从错误文本里打掉的敏感值:
+
+    - BYOK 头里的 key + 实际 client 的 key(火山方舟 UUID 形态,sk- 正则打不到);
+    - env fallback 时 model 即 DOUBAO_MODEL endpoint ID(项目纪律视同 KEY 敏感,
+      见 [[api-key-no-leak]]);BYOK 用户自己的模型名不敏感,回显助排错,不打。
+    """
+    secrets = [request.headers.get("X-LLM-API-Key"),
+               getattr(llm.client, "api_key", None)]
+    if llm.source == "env":
+        secrets.append(llm.model)
+    return tuple(secrets)
+
+
+@router.post("/llm/ping")
+def llm_ping(request: Request) -> dict:
+    """BYOK 连通性测试:恒 HTTP 200,ok/error_type 给前端「模型设置」测试按钮消费。
+
+    头解析与其他端点一致(缺头/坏 base_url 照常 422);唯独"完全未配置"
+    返 200 分类结果 unconfigured 而非 503,前端测试按钮统一按分类渲染。
+
+    **max_tokens 必须发真 run 会发的那个值,而不是 1。** 原先发 1 → 任何厂商都必过 →
+    「测试通过、真跑就死」:真 run 的 structured_call 按 131072 要额度(方舟端点的实测硬
+    上限),换到 DeepSeek/OpenAI 一律 400。一个不测真参数的连通性测试只是自我安慰。
+    经 cap_client 钳制后这里实际发出的是 min(131072, 用户声明的厂商上限) —— 与真 run
+    逐字节一致。上限填错了,点一下按钮当场 400,而不是花几分钟跑一个必死的 run。
+    """
+    try:
+        llm = get_llm(request)
+    except HTTPException as e:
+        if e.status_code == 503:  # 无头 + 无 env fallback → 分类结果而非报错
+            return {"ok": False, "error_type": "unconfigured",
+                    "detail": str(e.detail)[:200]}
+        raise
+    secrets = _llm_secrets(request, llm)
+    t0 = time.perf_counter()
+    try:
+        resp = llm.client.chat.completions.create(
+            model=llm.model,
+            messages=[{"role": "user", "content": "ping"}],
+            # 只是上限;但「prompt 短 = 只吐几个 token」对默认开 thinking 的模型(如
+            # DeepSeek V4 系)不成立 —— 思考 token 计入输出、是延迟主因。所以成功时把
+            # completion_tokens 一并返回,让「XXXms」可归因(慢在思考,还是慢在网络)。
+            max_tokens=_DEFAULT_MAX_TOKENS,
+            timeout=15,
+        )
+    except openai.AuthenticationError as e:
+        return {"ok": False, "error_type": "auth", "detail": redact(str(e), *secrets)[:200]}
+    except openai.NotFoundError as e:
+        return {"ok": False, "error_type": "not_found", "detail": redact(str(e), *secrets)[:200]}
+    except openai.BadRequestError as e:
+        # 400:参数被厂商拒。BYOK 换厂商时最常见的一条 —— 多半是输出上限没声明/填太大。
+        return {"ok": False, "error_type": "bad_request",
+                "detail": redact(str(e), *secrets)[:200]}
+    except openai.APITimeoutError as e:  # 必须先于 APIConnectionError(是其子类)
+        return {"ok": False, "error_type": "timeout", "detail": redact(str(e), *secrets)[:200]}
+    except openai.APIConnectionError as e:
+        return {"ok": False, "error_type": "connection", "detail": redact(str(e), *secrets)[:200]}
+    except Exception as e:  # noqa: BLE001 — 分类兜底,detail 已脱敏
+        return {"ok": False, "error_type": "other", "detail": redact(str(e), *secrets)[:200]}
+    out: dict = {"ok": True, "latency_ms": int((time.perf_counter() - t0) * 1000)}
+    usage = getattr(resp, "usage", None)
+    if usage is not None and getattr(usage, "completion_tokens", None) is not None:
+        out["completion_tokens"] = usage.completion_tokens
+    choices = getattr(resp, "choices", None)
+    if choices and getattr(choices[0].message, "reasoning_content", None):
+        out["thinking"] = True  # 只回布尔,不回思考内容(KEY 纪律:响应体不带模型输出)
+    return out
 
 
 @router.get("/stream/{run_id}")

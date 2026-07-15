@@ -17,6 +17,7 @@ import * as React from 'react'
 import { fetchEventSource } from '@microsoft/fetch-event-source'
 import { useRunStore } from '@/stores/runStore'
 import { API_BASE } from '@/lib/api'
+import { llmHeaders } from '@/lib/llmConfig'
 import type {
   RunRequest,
   SSEEvent,
@@ -42,8 +43,15 @@ export interface StartReplayOpts {
 
 export type StartOpts = StartLiveOpts | StartReplayOpts
 
-class StreamError extends Error {
+// 带 HTTP status(0 = 非 HTTP 层错误),供 caller 分流(如 503 未配置模型 → 引导打开模型设置)。
+// `erasableSyntaxOnly` 禁 parameter properties → 显式声明 + 赋值(同 api.ts ApiError)。
+export class StreamError extends Error {
   name = 'StreamError'
+  status: number
+  constructor(message: string, status = 0) {
+    super(message)
+    this.status = status
+  }
 }
 
 function parseSSE(msg: { event: string; data: string }): SSEEvent | null {
@@ -121,15 +129,26 @@ async function startStream(opts: StartOpts): Promise<{ runId: string }> {
       headers: {
         'Content-Type': 'application/json',
         Accept: 'text/event-stream',
+        // BYOK:仅 live(POST /run)带用户模型三头;GET replay 读历史,不带。
+        ...(isLive ? llmHeaders() : {}),
       },
       body: isLive ? JSON.stringify(opts.request) : undefined,
       signal: ctrl.signal,
       openWhenHidden: true,
       async onopen(response) {
         if (!response.ok) {
-          const msg = `HTTP ${response.status}`
-          doReject(new StreamError(msg))
-          throw new StreamError(msg)
+          // 读 body.detail(如 503「未配置模型…」)透传给 caller;非 JSON 则退回状态码文案。
+          // FastAPI 的请求校验 422 会把 detail 给成对象数组 —— 只透传字符串形态,
+          // 否则用户看到的是 "[object Object]"(评审抓出)。
+          let msg = `HTTP ${response.status}`
+          try {
+            const body = (await response.json()) as { detail?: unknown }
+            if (typeof body.detail === 'string' && body.detail) msg = body.detail
+          } catch {
+            /* body 非 JSON — 保留 HTTP 状态码文案 */
+          }
+          doReject(new StreamError(msg, response.status))
+          throw new StreamError(msg, response.status)
         }
         const ct = response.headers.get('content-type') ?? ''
         if (!ct.includes('text/event-stream')) {

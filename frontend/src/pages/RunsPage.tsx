@@ -1,11 +1,12 @@
 import * as React from 'react'
 import { Link, useNavigate } from 'react-router-dom'
 import { Loader2, Play, Plus, Search, Trash2 } from 'lucide-react'
-import { deleteRun, discoverCompetitors, fetchRuns } from '@/lib/api'
+import { ApiError, deleteRun, discoverCompetitors, fetchRuns } from '@/lib/api'
 import { dimensionLabel } from '@/lib/dimensions'
 import { formatBeijing } from '@/lib/time'
 import { DEMO_RUN_ID } from '@/lib/demoFixture'
-import { useSSE } from '@/hooks/useSSE'
+import { StreamError, useSSE } from '@/hooks/useSSE'
+import { useLLMSettingsStore } from '@/stores/llmSettingsStore'
 import { CONTROLLED_DIMENSIONS, type DiscoveredCompetitor, type RunSummary } from '@/types/api'
 import { Button } from '@/components/ui/button'
 import { Card, CardContent, CardDescription, CardHeader, CardTitle } from '@/components/ui/card'
@@ -104,6 +105,14 @@ function PhilosophyCard() {
   )
 }
 
+// BYOK 未配置引导:后端无 env 模型且用户没配 BYOK → 503 detail 含「未配置模型」
+// (discoverCompetitors 抛 ApiError;sse.start 抛 StreamError,onopen 已透传 detail)
+// → 自动打开「模型设置」抽屉引导配置。
+const isLLMUnconfigured = (err: unknown): boolean =>
+  (err instanceof ApiError || err instanceof StreamError) &&
+  err.status === 503 &&
+  err.message.includes('未配置模型')
+
 // 决策处境卡片(Epic 1.2/1.3 / D8):必选一张,决定下游决策面语气 + 行动建议。
 // context 字面值进 RunRequest.decision_context;"通用浏览" → 决策面收敛语气。
 const PERSONA_CARDS = [
@@ -159,6 +168,7 @@ function CreateRunForm() {
       if (res.competitors.length === 0) setDiscoverError('未发现明确竞品,请在下方手动添加。')
     } catch (err) {
       // 后端 503 的 detail 已含"请手动输入竞品名",直接透传避免文案重复;网络错则给原因。
+      if (isLLMUnconfigured(err)) useLLMSettingsStore.getState().open()
       setDiscoverError(`竞品发现失败:${err instanceof Error ? err.message : String(err)}`)
     } finally {
       setDiscovering(false)
@@ -191,6 +201,7 @@ function CreateRunForm() {
       navigate(`/run/${runId}`)
       // NB: stream continues in module-level controller; RunPage reads runStore.
     } catch (err) {
+      if (isLLMUnconfigured(err)) useLLMSettingsStore.getState().open()
       setError(`启动失败 — ${err instanceof Error ? err.message : String(err)}`)
       setSubmitting(false)
     }
