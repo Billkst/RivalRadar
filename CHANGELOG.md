@@ -28,6 +28,10 @@ Versioning follows 4-digit semver `MAJOR.MINOR.PATCH.MICRO`(< 1.0 表 API 未稳
 - **PG 迁移每请求拿排它锁**(`db.py`;评审 CRITICAL)— `init_db` 每请求被调,PG 的 `ALTER TABLE`(即便 no-op)也拿 `ACCESS EXCLUSIVE` 锁,遇 SSE 回放长事务成锁车队冻结全 API。改为进程内双检锁只跑一次。
 - **流中断静默漏计**(`usage.py`;评审)— `_tee` 只在整流走完才记未计量,流中途断/提前弃流时这次真实计费的调用连痕迹都不留。改 try/finally 保证弃流也留未计量痕迹。
 - **前端上限校验 silent 截断**(`LLMSettingsSheet.tsx`;评审)— `parseInt("32,768")===32` 会把粘贴的上限静默截成 32,ping 照过真 run 必因 JSON 截断而死。改全串数字校验 + 上界镜像后端 1048576;修 `max_tokens=0` 锁死保存、模型下拉 label a11y 悬空、useSSE 非字符串 detail 显示 `[object Object]`、「测试连接」竞态旧结果覆盖新配置。
+- **`/llm/ping` 线程池拖停**(`runs.py`;对抗评审)— 无鉴权 sync 端点,黑洞域名 15s/请求 × 线程池宽度可拖停全站。加进程内并发闸(满 4 并发立即回 `busy` 分类,不排队不占线程);per-IP 限流留 TODOS 投产项。
+- **BYOK client 连接泄漏**(`deps.py` + `runs.py`;对抗评审)— 每请求新建的 OpenAI(+自定义 httpx 连接池)从不关闭,SDK 的自动回收只覆盖它自建的 client。ping / discover 两个一次性端点改为用完即关(env 单例绝不关;run 路径由并发 run 数天然限界)。
+- **流式 400 盲目重发**(`usage.py`;对抗评审)— 任何 400 都被当成「厂商不认 stream_options」而去掉参数重发一次;与该参数无关的 400(如上限超限)是注定同样失败的浪费。改为 400 文案点名 `stream_options`/`include_usage` 才回退。
+- **env 模式日志可能回显 endpoint id**(`structured.py`;对抗评审)— 厂商错误体若回显 `model=`,env 模式下即 DOUBAO_MODEL endpoint id(纪律视同 KEY)进日志。三处日志行补脱敏 model;异常消息不动(BYOK 用户的 503 诊断保留自己的模型名)。
 
 ## [0.6.1.0] - 2026-06-10
 
