@@ -92,7 +92,10 @@ class TraceEntry(BaseModel):
     prompt: str = ""
     input_summary: str = ""
     output_summary: str = ""
-    tokens: int = 0
+    tokens: int = 0              # 总数 = prompt + completion(向后兼容既有读方)
+    prompt_tokens: int = 0       # 输入/输出必须分开:两者单价不同,只有总数算不出成本
+    completion_tokens: int = 0
+    llm_calls: int = 0           # 区分「单次调用贵」与「调用次数多」——路由决策相反
     latency_ms: int = 0
     ts: str
 

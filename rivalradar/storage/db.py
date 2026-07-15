@@ -2,6 +2,7 @@ from __future__ import annotations
 
 import os
 import sqlite3
+import threading
 
 SCHEMA = """
 CREATE TABLE IF NOT EXISTS runs (
@@ -88,16 +89,22 @@ CREATE TABLE IF NOT EXISTS agent_skills (
     installed_at TEXT NOT NULL,
     PRIMARY KEY (agent_id, skill_id)
 );
+-- token 计量三列(成本埋点):tokens 保留为总数(向后兼容既有读方),新增输入/输出拆分
+-- 与调用次数。拆分是必须的 —— 成本 = 输入×输入单价 + 输出×输出单价,两者单价不同,
+-- 只存总数算不出钱;llm_calls 才能区分「单次贵」与「调用次数多」(二者对应相反的路由决策)。
 CREATE TABLE IF NOT EXISTS trace (
-    id             INTEGER PRIMARY KEY AUTOINCREMENT,
-    run_id         TEXT NOT NULL,
-    node           TEXT NOT NULL,
-    prompt         TEXT,
-    input_summary  TEXT,
-    output_summary TEXT,
-    tokens         INTEGER,
-    latency_ms     INTEGER,
-    ts             TEXT NOT NULL
+    id                INTEGER PRIMARY KEY AUTOINCREMENT,
+    run_id            TEXT NOT NULL,
+    node              TEXT NOT NULL,
+    prompt            TEXT,
+    input_summary     TEXT,
+    output_summary    TEXT,
+    tokens            INTEGER,
+    prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    llm_calls         INTEGER NOT NULL DEFAULT 0,
+    latency_ms        INTEGER,
+    ts                TEXT NOT NULL
 );
 CREATE INDEX IF NOT EXISTS idx_evidence_run ON evidence(run_id);
 CREATE INDEX IF NOT EXISTS idx_queries_run ON queries(run_id);
@@ -176,15 +183,18 @@ CREATE TABLE IF NOT EXISTS agent_skills (
     PRIMARY KEY (agent_id, skill_id)
 );
 CREATE TABLE IF NOT EXISTS trace (
-    id             BIGSERIAL PRIMARY KEY,
-    run_id         TEXT NOT NULL,
-    node           TEXT NOT NULL,
-    prompt         TEXT,
-    input_summary  TEXT,
-    output_summary TEXT,
-    tokens         INTEGER,
-    latency_ms     INTEGER,
-    ts             TEXT NOT NULL
+    id                BIGSERIAL PRIMARY KEY,
+    run_id            TEXT NOT NULL,
+    node              TEXT NOT NULL,
+    prompt            TEXT,
+    input_summary     TEXT,
+    output_summary    TEXT,
+    tokens            INTEGER,
+    prompt_tokens     INTEGER NOT NULL DEFAULT 0,
+    completion_tokens INTEGER NOT NULL DEFAULT 0,
+    llm_calls         INTEGER NOT NULL DEFAULT 0,
+    latency_ms        INTEGER,
+    ts                TEXT NOT NULL
 );
 CREATE TABLE IF NOT EXISTS annotations (
     id              BIGSERIAL PRIMARY KEY,
@@ -200,6 +210,18 @@ CREATE INDEX IF NOT EXISTS idx_curation_drops_run ON curation_drops(run_id);
 CREATE INDEX IF NOT EXISTS idx_trace_run ON trace(run_id);
 CREATE INDEX IF NOT EXISTS idx_annotations_run ON annotations(run_id);
 """
+
+
+# Postgres 在线迁移。**原假设已失效**:此前 _ensure_columns 的注释写着「Postgres 是全新库,
+# PG_SCHEMA 已含全列,不需要在线迁移」—— 那在 v0.6.1.0 首次建 Supabase 库时成立,但库一旦
+# 有了生产数据,`CREATE TABLE IF NOT EXISTS` 对**既有表不加列**,新列不会凭空出现 → 下次部署
+# 第一次 INSERT 就 UndefinedColumn 炸。而本地测试全走 SQLite 路径,**没有任何测试会失败**。
+# PG 支持 ADD COLUMN IF NOT EXISTS(幂等),故 init_db 每次无条件跑一遍,已存在即空操作。
+PG_MIGRATIONS = (
+    "ALTER TABLE trace ADD COLUMN IF NOT EXISTS prompt_tokens INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE trace ADD COLUMN IF NOT EXISTS completion_tokens INTEGER NOT NULL DEFAULT 0",
+    "ALTER TABLE trace ADD COLUMN IF NOT EXISTS llm_calls INTEGER NOT NULL DEFAULT 0",
+)
 
 
 def _database_url() -> str | None:
@@ -292,7 +314,10 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
        analyze node 拿到空证据 → 报 insufficient_evidence(reviewer 实测复现 +
        confirmation:critical pass 自核 + security + adversarial 三方 confirmed)。
 
-    仅 SQLite 路径调用;Postgres 是全新库,PG_SCHEMA 已含全列,不需要在线迁移。
+    3. trace 的 token 计量三列(成本埋点)— ALTER 加列
+
+    仅 SQLite 路径调用。Postgres 的在线迁移见 PG_MIGRATIONS(**两边都要加**:PG 库一旦有
+    生产数据,只改 PG_SCHEMA 常量是不生效的)。
     """
     runs_cols = {row[1] for row in conn.execute("PRAGMA table_info(runs)").fetchall()}
     if "degraded" not in runs_cols:
@@ -335,16 +360,47 @@ def _ensure_columns(conn: sqlite3.Connection) -> None:
         conn.execute("CREATE INDEX IF NOT EXISTS idx_evidence_run ON evidence(run_id)")
         conn.commit()
 
+    # trace token 计量三列。SQLite 不支持 ADD COLUMN IF NOT EXISTS,须先查列。
+    # DEFAULT 0 让老 run 的 trace 行读出来是 0 —— 与「本节点确实没调 LLM」(collect/finalize)
+    # 的真实 0 语义一致,不需要回填,也不会假装老 run 有成本数据。
+    trace_cols = {row[1] for row in conn.execute("PRAGMA table_info(trace)").fetchall()}
+    for col in ("prompt_tokens", "completion_tokens", "llm_calls"):
+        if col not in trace_cols:
+            conn.execute(f"ALTER TABLE trace ADD COLUMN {col} INTEGER NOT NULL DEFAULT 0")
+    conn.commit()
+
+
+# PG 的 DDL 进程内只跑一次:init_db 被 get_db_conn 每个请求调用,而 Postgres 的
+# ALTER TABLE(即使 ADD COLUMN IF NOT EXISTS 是 no-op)也要先拿表的 ACCESS EXCLUSIVE 锁
+# —— 每个请求都对 trace(最热的写表)拿排它锁,一旦有长事务(如 SSE 回放的分页 SELECT)
+# 持有 ACCESS SHARE,排队的排它锁会把后续所有读写全堵在它身后(锁车队,ship 前评审抓出)。
+# 双检锁而非裸布尔:冷启动时前端会并发扇出请求(fetchRuns + healthz),check-then-act
+# 无锁会让多个首请求各自跑 DDL —— PG 的并发 CREATE TABLE IF NOT EXISTS 有目录插入竞态,
+# 会以 duplicate key(pg_type_typname_nsp_index)炸出瞬时 500(红队)。
+# 失败不置位:首次迁移抛异常时下个请求重试。SQLite 无此问题(无服务器锁队列),保持原行为。
+_PG_SCHEMA_READY = False
+_PG_INIT_LOCK = threading.Lock()
+
 
 def init_db(conn) -> None:  # noqa: ANN001
     """建表(幂等)。Postgres:逐条跑 PG_SCHEMA(psycopg3 单 execute 不支持多语句),
-    跳过 WAL pragma 与 SQLite 在线迁移。SQLite:原行为(WAL + executescript + _ensure_columns)。"""
+    跳过 WAL pragma 与 SQLite 在线迁移,且**进程内只跑一次**(见 _PG_SCHEMA_READY)。
+    SQLite:原行为(WAL + executescript + _ensure_columns)。"""
+    global _PG_SCHEMA_READY
     if getattr(conn, "dialect", "") == "pg":
-        for stmt in PG_SCHEMA.split(";"):
-            s = stmt.strip()
-            if s:
-                conn.execute(s)
-        conn.commit()
+        if _PG_SCHEMA_READY:
+            return
+        with _PG_INIT_LOCK:
+            if _PG_SCHEMA_READY:   # 双检:等锁期间别的请求可能已完成初始化
+                return
+            for stmt in PG_SCHEMA.split(";"):
+                s = stmt.strip()
+                if s:
+                    conn.execute(s)
+            for stmt in PG_MIGRATIONS:  # 既有生产表加列(CREATE TABLE IF NOT EXISTS 管不到)
+                conn.execute(stmt)
+            conn.commit()
+            _PG_SCHEMA_READY = True
         return
     conn.execute("PRAGMA journal_mode=WAL")
     conn.executescript(SCHEMA)

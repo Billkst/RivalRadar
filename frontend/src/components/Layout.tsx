@@ -1,11 +1,14 @@
 import * as React from 'react'
 import { Link, Outlet, useParams } from 'react-router-dom'
 import { useThemeStore } from '@/stores/themeStore'
+import { useLLMSettingsStore } from '@/stores/llmSettingsStore'
+import { loadLLMConfig } from '@/lib/llmConfig'
 import { ThemeToggle } from './ThemeToggle'
+import { LLMSettingsSheet } from './settings/LLMSettingsSheet'
 
 /**
  * RivalRadar 应用外壳(v0.4 证据驾驶舱)。
- *   ┌ 顶栏: 项目名 / 副标 / run_id / ThemeToggle / "EN"(即将支持) ┐
+ *   ┌ 顶栏: 项目名 / 副标 / run_id / ThemeToggle / 模型设置(BYOK) / "EN"(即将支持) ┐
  *   └ 所有页面:主区全宽(run 页 cockpit 自带分屏;列表/报告页自带布局) ┘
  *
  * v0.4:run 页退役 office AgentTeamRoster 左轨(卡通动物违背机构级 cockpit 美学)。
@@ -18,6 +21,13 @@ export function Layout() {
   // A3: CredibilityBadge 条件式 — 仅在 /run/:run_id 等路由下渲染。Task 7 (lib/credibility) 完成后实装。
   const { run_id } = useParams<{ run_id?: string }>()
   const initTheme = useThemeStore((s) => s.init)
+  const openLLMSettings = useLLMSettingsStore((s) => s.open)
+  // configVersion 变化(保存/清除)→ 重读 localStorage(唯一事实源)刷新未配置圆点
+  const configVersion = useLLMSettingsStore((s) => s.configVersion)
+  const llmConfigured = React.useMemo(() => {
+    void configVersion // 仅作依赖信号,触发重读
+    return loadLLMConfig() !== null
+  }, [configVersion])
 
   React.useEffect(() => {
     return initTheme()
@@ -40,6 +50,26 @@ export function Layout() {
           <ThemeToggle />
           <button
             type="button"
+            onClick={openLLMSettings}
+            className="relative rounded-md border border-border px-2 py-1 text-xs text-text-primary hover:bg-surface-subtle"
+            title={
+              llmConfigured
+                ? '配置 LLM 厂商 / API Key(仅存浏览器本地)'
+                : '尚未配置模型 —— 点击设置 LLM 厂商 / API Key(仅存浏览器本地)'
+            }
+          >
+            模型设置
+            {/* 未配置提示:低调琥珀圆点(纯 CSS),配置后消失。双编码:圆点(色)
+                + button title 文案(非色觉),色弱 / 屏幕阅读器同样能感知未配置态。 */}
+            {!llmConfigured && (
+              <span
+                aria-hidden
+                className="absolute -right-0.5 -top-0.5 h-2 w-2 rounded-full bg-warning"
+              />
+            )}
+          </button>
+          <button
+            type="button"
             disabled
             className="cursor-not-allowed rounded-md border border-border px-2 py-1 text-xs text-text-muted opacity-50"
             title="中英文切换 · 即将支持(本轮暂未实装)"
@@ -56,6 +86,7 @@ export function Layout() {
           <Outlet />
         </main>
       </div>
+      <LLMSettingsSheet />
     </div>
   )
 }

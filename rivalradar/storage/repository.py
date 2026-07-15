@@ -267,11 +267,16 @@ def get_insight(conn: sqlite3.Connection, run_id: str) -> ReportInsight | None:
 # ---- trace ----
 def append_trace(conn: sqlite3.Connection, run_id: str, node: str, *,
                  prompt: str = "", input_summary: str = "", output_summary: str = "",
-                 tokens: int = 0, latency_ms: int = 0) -> None:
+                 tokens: int = 0, prompt_tokens: int = 0, completion_tokens: int = 0,
+                 llm_calls: int = 0, latency_ms: int = 0) -> None:
+    """一节点一行。token 四元组由 TokenMeter.trace_fields() 摊平传入;不调 LLM 的节点
+    (collect 走 Tavily / finalize 纯本地)全 0 —— 那是真实的 0,不是缺数据。"""
     conn.execute(
         "INSERT INTO trace (run_id, node, prompt, input_summary, output_summary, "
-        "tokens, latency_ms, ts) VALUES (?, ?, ?, ?, ?, ?, ?, ?)",
-        (run_id, node, prompt, input_summary, output_summary, tokens, latency_ms, _now()),
+        "tokens, prompt_tokens, completion_tokens, llm_calls, latency_ms, ts) "
+        "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+        (run_id, node, prompt, input_summary, output_summary, tokens, prompt_tokens,
+         completion_tokens, llm_calls, latency_ms, _now()),
     )
     conn.commit()
 

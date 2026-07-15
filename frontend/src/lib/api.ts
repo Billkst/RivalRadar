@@ -5,6 +5,7 @@
  * SSE streaming (POST /run + GET /stream/:id) lives in `@/hooks/useSSE` —
  * this file only owns one-shot JSON requests.
  */
+import { headersFromConfig, llmHeaders, type LLMConfig } from '@/lib/llmConfig'
 import type {
   AgentSkillRow,
   AnnotationCreate,
@@ -27,9 +28,13 @@ import type {
 export const API_BASE = import.meta.env.VITE_API_BASE ?? '/api'
 
 async function jsonFetch<T>(path: string, init?: RequestInit): Promise<T> {
+  // init.headers 必须先解构出来:若把 `...init` 放在 headers 键之后展开,
+  // init 自带的 headers 会整体覆盖刚合入的 Content-Type,带自定义头(如
+  // BYOK llmHeaders())的请求就丢掉 application/json → 后端按 text/plain 拒解 → 422。
+  const { headers: initHeaders, ...restInit } = init ?? {}
   const res = await fetch(`${API_BASE}${path}`, {
-    headers: { 'Content-Type': 'application/json', ...(init?.headers ?? {}) },
-    ...init,
+    headers: { 'Content-Type': 'application/json', ...(initHeaders ?? {}) },
+    ...restInit,
   })
   if (!res.ok) {
     let detail: string
@@ -104,11 +109,39 @@ export const deleteAgentSkill = (agentId: string, skillId: string) =>
 
 // ─── Discover competitors (Epic 1.1 引导式 setup)──────────────────────────
 // LLM 不通 → 后端 503;调用方 catch 提示手动输入(非静默)。
+// BYOK:带用户模型三头(未配置为 {},后端走 env fallback)。
 export const discoverCompetitors = (seed: string, industryHint?: string) =>
   jsonFetch<DiscoverySet>('/discover-competitors', {
     method: 'POST',
+    headers: llmHeaders(),
     body: JSON.stringify({ seed, industry_hint: industryHint || null }),
   })
+
+// ─── BYOK 连通性测试(POST /llm/ping)──────────────────────────────────────
+// 头直接用传入 cfg 构造 —— 测「表单当前值」而非已保存值。后端响应恒 200,
+// 成功 {ok:true, latency_ms};失败 {ok:false, error_type, detail(已脱敏)}。
+export interface PingLLMResult {
+  ok: boolean
+  latency_ms?: number
+  completion_tokens?: number // 本次测试实际吐了多少输出 token(思考 token 计入)
+  thinking?: boolean // 厂商默认开了思考模式(响应带 reasoning_content)—— 延迟主因的归因线索
+  error_type?:
+    | 'auth'
+    | 'not_found'
+    | 'bad_request'
+    | 'timeout'
+    | 'connection'
+    | 'unconfigured'
+    | 'busy'
+    | 'other'
+  detail?: string
+}
+// 注意:测试用的是**表单当前值**(不是已保存值),所以这里不能复用 llmHeaders(),
+// 但头的构造共用 headersFromConfig 单一真源(防两份手写副本漂移)。
+// max_tokens 必须一起送 —— 后端的 ping 会按真 run 的额度发请求,上限填错了当场 400,
+// 而不是等你花几分钟跑一个必死的 run 才发现。
+export const pingLLM = (cfg: LLMConfig) =>
+  jsonFetch<PingLLMResult>('/llm/ping', { method: 'POST', headers: headersFromConfig(cfg) })
 
 // ─── Annotations ──────────────────────────────────────────────────────────
 export const createAnnotation = (payload: AnnotationCreate) =>

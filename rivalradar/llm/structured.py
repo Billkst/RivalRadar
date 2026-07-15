@@ -4,9 +4,10 @@ import json
 import logging
 from typing import TypeVar
 
-from openai import APIConnectionError, APIError, APITimeoutError
+from openai import APIConnectionError, APIError, APITimeoutError, BadRequestError
 from pydantic import BaseModel, ValidationError
 
+from rivalradar.llm.redact import redact
 from rivalradar.schema.doubao_schema import to_doubao_schema
 
 logger = logging.getLogger(__name__)
@@ -29,6 +30,12 @@ _DEFAULT_REQUEST_TIMEOUT = 90.0
 
 class StructuredCallError(RuntimeError):
     """结构化调用在重试封顶后仍失败 —— 显式抛出,绝不静默吞掉(spec §9)。"""
+
+
+# 已确认「拒绝点名 tool_choice」的厂商端点(进程级,按 base_url+model 分键防跨厂商误伤)。
+# 降级是厂商行为的**确定性事实**,不记住它就得每次调用都花一次注定 400 的全 payload 往返
+# 去重新发现 —— 满矩阵 65 次 structured_call,白烧分钟级墙钟 + 双倍上行带宽(ship 前评审)。
+_NAMED_TOOL_CHOICE_REJECTED: set[tuple[str, str]] = set()
 
 
 def _extract_tool_args(resp) -> str | None:
@@ -91,23 +98,87 @@ def structured_call(
     tool_choice = {"type": "function", "function": {"name": _TOOL_NAME}}
     convo = list(messages)
     last_err: Exception | None = None
+    # 🔑 BYOK:provider 的 401 等错误 body 可能回显本次 client 的 key。从 client 取
+    # 精确 key 值,任何 str(err) 落日志 / 进异常消息前用它 + 正则兜底脱敏。
+    _secret = getattr(client, "api_key", None)
+    # 点名 tool_choice 是首选(Doubao 实测最稳);但部分厂商在特定模式下拒绝它 ——
+    # DeepSeek V4 thinking 模式(默认开)实测 400「Thinking mode does not support
+    # this tool_choice」。被点名拒绝时去掉该参数重发:带 tools 时厂商默认即 auto,
+    # 「必须调用工具」的契约由下方校验重试循环兜底,不必在参数层强制。
+    _vendor_key = (str(getattr(client, "base_url", "")), model)
+    send_tool_choice = _vendor_key not in _NAMED_TOOL_CHOICE_REJECTED
+    _memo_pending = False  # 降级已发生、待「厂商接受了降级后的请求」确认后才写记忆
 
-    for attempt in range(max_retries + 1):
+    # while 而非 for:tool_choice 降级是**参数协商**,不是模型给了坏结果,不计入尝试
+    # 次数(真 run 实测:计入会把 SWOT 格的 3 次真机会吃成 2 次,到顶被优雅跳过)。
+    attempt = 0
+    while attempt < max_retries + 1:
+        kwargs: dict = dict(model=model, messages=convo, tools=tools,
+                            timeout=_DEFAULT_REQUEST_TIMEOUT, max_tokens=max_tokens)
+        if send_tool_choice:
+            kwargs["tool_choice"] = tool_choice
         try:
-            resp = client.chat.completions.create(
-                model=model, messages=convo, tools=tools, tool_choice=tool_choice,
-                timeout=_DEFAULT_REQUEST_TIMEOUT, max_tokens=max_tokens,
-            )
+            resp = client.chat.completions.create(**kwargs)
+        except BadRequestError as err:
+            detail = redact(str(err), _secret)
+            # 落日志前再脱一层 model:env 模式下 model 是 DOUBAO_MODEL endpoint id(项目
+            # 纪律视同 KEY),厂商 400 body 若回显 model= 就会进日志(对抗评审)。异常消息
+            # **不**脱 model —— BYOK 的 503 诊断要让用户看见自己的模型名;env 路径的异常
+            # 文本从不回显给客户端(post_discover env 分支回笼统文案,SSE 只回异常类型名)。
+            log_detail = redact(detail, model)
+            if send_tool_choice and "tool_choice" in detail:
+                # 厂商点名拒绝 tool_choice → 降级重发。**先降级、后验证、才记忆**:
+                # 400 文案只做子串匹配,若在这里就写记忆,任何恰好含 "tool_choice" 字样的
+                # 无关 400 都会把 (base_url, model) 永久毒化(红队);降级后的请求被厂商
+                # 接受(成功拿到 resp)才确认拒因属实,写入记忆(见 attempt+=1 之后)。
+                send_tool_choice = False
+                _memo_pending = True
+                last_err = err
+                logger.warning(
+                    "structured_call(%s) 厂商拒绝点名 tool_choice,去掉该参数重发:%s",
+                    model_cls.__name__, log_detail[:200])
+                continue  # 不计 attempt
+            # 其余 400 = 请求本身不合法(参数超出厂商上限 / schema 不被支持),**确定性错误**:
+            # 同样的请求重试必然同样失败。原先它落进下面的 APIError 分支被当网络抖动重试 3 次
+            # —— 白烧 3 次真金白银的调用,还把「是我们发错了参数」这个诊断埋进超时噪声里。
+            # BYOK 换厂商时这是最可能踩的一条(见 llm/limits.py):快失败 + 原样回传厂商的
+            # 400 文案(已脱敏),用户一眼看到「max_tokens 超上限」而不是「网络失败」。
+            # 上层若吞掉异常文本,服务端日志是最后一处能看到厂商真实拒因的地方 → 也留 warning。
+            logger.warning("structured_call(%s) 被厂商拒绝(400,不重试):%s",
+                           model_cls.__name__, log_detail[:300])
+            # from None(不是 from err):厂商 400 body 可能回显 key,外层消息已脱敏,但
+            # `from err` 会把**未脱敏**的原始异常挂到 __cause__ 上;任何调用方用 exc_info=True
+            # / logger.exception 打印时,traceback 会把 __cause__ 的 str() 原样写进日志 →
+            # key 从异常链泄漏(评审 P1,analyst._safe_extract 正是 exc_info=True)。
+            # from None 断链:StructuredCallError 永不携带未脱敏的 key,任何调用方都安全。
+            raise StructuredCallError(
+                f"structured_call({model_cls.__name__}) 被厂商拒绝(400,不重试):{detail}"
+            ) from None
         except (APITimeoutError, APIConnectionError, APIError) as err:
             # 网络层失败(timeout / connection drop / 上游 5xx)归入 retry 循环。
             # 不带 prompt 修改 — 同一 messages 重试,假设下次网络好。Clash 抖动
             # 时 1-2 个 retry 一般够;如果全打不通,封顶后 raise 让上层走降级。
+            attempt += 1
             last_err = err
             logger.warning(
                 "structured_call attempt %d/%d network error: %s: %s",
-                attempt + 1, max_retries + 1, type(err).__name__, str(err)[:200],
+                attempt, max_retries + 1, type(err).__name__,
+                redact(str(err), _secret, model)[:200],
             )
             continue
+        attempt += 1
+        if _memo_pending:
+            # 降级后的请求被厂商接受了 → 拒因确系 tool_choice,此刻才写进程级记忆,
+            # 后续 structured_call 直接跳过探测。容量兜底:BYOK 方可控 base_url,
+            # 能造无限 (base_url, model) 组合,封顶防集合无界膨胀(满了就退回每次探测)。
+            if len(_NAMED_TOOL_CHOICE_REJECTED) < 128:
+                _NAMED_TOOL_CHOICE_REJECTED.add(_vendor_key)
+                # 只记 base_url,**不打 model** —— env 模式下 model 是 DOUBAO_MODEL
+                # endpoint id,项目纪律视同 KEY 敏感(评审 P2);base_url 非敏感,够定位。
+                logger.warning(
+                    "structured_call(%s) 确认端点 %s 拒绝点名 tool_choice,已记忆,"
+                    "本进程后续调用不再探测", model_cls.__name__, _vendor_key[0])
+            _memo_pending = False
         raw = _extract_tool_args(resp)
         try:
             if raw is None:
@@ -119,7 +190,7 @@ def structured_call(
             # 真 run-6 因日志不带 raw,只能靠 spike 复现才看清是"截断不完整"。
             logger.warning(
                 "structured_call(%s) attempt %d/%d 解析/校验失败:%s | raw head=%r tail=%r",
-                model_cls.__name__, attempt + 1, max_retries + 1, err,
+                model_cls.__name__, attempt, max_retries + 1, err,
                 (raw or "")[:160], (raw or "")[-160:],
             )
             convo = convo + [{
@@ -132,5 +203,6 @@ def structured_call(
             }]
 
     raise StructuredCallError(
-        f"structured_call({model_cls.__name__}) 在 {max_retries + 1} 次尝试后仍失败:{last_err}"
+        f"structured_call({model_cls.__name__}) 在 {max_retries + 1} 次尝试后仍失败:"
+        f"{redact(str(last_err), _secret)}"
     )

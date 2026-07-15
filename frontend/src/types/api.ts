@@ -237,7 +237,10 @@ export interface TraceEntry {
   prompt: string
   input_summary: string
   output_summary: string
-  tokens: number // 单字段,NOT token_in/token_out — Codex #2
+  tokens: number // 总数 = prompt + completion(向后兼容既有读方,如 DagDrawer)
+  prompt_tokens?: number // 成本埋点(v0.6.2):输入/输出分列,老 run 的行是 0
+  completion_tokens?: number
+  llm_calls?: number
   latency_ms: number
   ts: string
   // NO retry_index — derive from trace.filter(t => t.node === N).length - 1

@@ -14,6 +14,7 @@ from rivalradar.agents.writer import (
 from rivalradar.graph.router import extract_collect_targets
 from rivalradar.agents import qc
 from rivalradar.llm.runcontrol import wrap_client
+from rivalradar.llm.usage import TokenMeter, meter_client
 from rivalradar.schema.models import (
     CONTROLLED_DIMENSIONS, CompetitorAnalysis, DecisionSet, Evidence, QCResult,
     ReportInsight,
@@ -35,10 +36,16 @@ def _get_emit(config: dict) -> Callable[[str, dict[str, Any]], None] | None:
     return config.get("configurable", {}).get("emit")
 
 
-def _run_client(client, config: dict):
-    """按 config 注入的 RunControl 包装 client(每次 LLM 调用前查取消/超时)。
-    无 control(单测/CLI)→ 原样返回 → 行为不变,backward compat。"""
-    return wrap_client(client, config.get("configurable", {}).get("run_control"))
+def _run_client(client, config: dict, meter: TokenMeter | None = None):
+    """按 config 注入的 RunControl 包装 client(每次 LLM 调用前查取消/超时),再按 meter
+    包一层 token 计量(每次调用后累加 usage)。无 control / 无 meter(单测/CLI)→ 原样返回
+    → 行为不变,backward compat。
+
+    包装顺序 meter(外)→ cancellable(内):取消检查先于 HTTP 也先于计量,故被取消的调用
+    不进成本。同一节点内多次调用本函数须传**同一个 meter 实例**(qc/decide 有多个调用点),
+    包装对象本身是廉价的一次性壳。"""
+    rc = wrap_client(client, config.get("configurable", {}).get("run_control"))
+    return meter_client(rc, meter)
 
 
 def _emit_progress(
@@ -207,7 +214,8 @@ def make_analyze_node(*, conn, client, model):
         # 收集本轮 profile 抽取降级(单项 LLM 截断/失败优雅降级,见 analyst._safe_extract)。
         # 非空 → 置 run 级 degraded,保证「降级必可见」(否则整竞品 profile 半瘫却 done)。
         degraded_sink: list[str] = []
-        rc_client = _run_client(client, config)
+        meter = TokenMeter()
+        rc_client = _run_client(client, config, meter)
 
         # post-real-run-7「坏维度精准重跑」:**仅 retry_analyze** 时复用上轮竞品画像,只重做对比矩阵。
         # 依据:qc 只对【对比矩阵 cell】做 entailment(comparison_only=True),retry_analyze 的
@@ -256,8 +264,9 @@ def make_analyze_node(*, conn, client, model):
         append_trace(conn, run_id, "analyze",
                      input_summary=f"{len(evidence)} evidence",
                      output_summary=f"{len(analysis.competitors)} profiles, "
-                                    f"{len(analysis.comparison)} rows{degraded_note}",
-                     latency_ms=int((time.monotonic() - t0) * 1000))
+                                    f"{len(analysis.comparison)} rows{degraded_note}{meter.note()}",
+                     latency_ms=int((time.monotonic() - t0) * 1000),
+                     **meter.trace_fields())
         out: dict = {"analysis": analysis.model_dump()}
         # 仅"影响用户可见产出(对比矩阵 cell)"的降级才置 run 级 degraded。profile 辅助项
         # (features/pricing/personas/swot)抽取失败只折进上面的 trace degraded_note(仍可见),
@@ -278,12 +287,13 @@ def make_write_node(*, conn, client, model, as_of):
         t0 = time.monotonic()
         analysis = CompetitorAnalysis(**state["analysis"])
         evidence = [Evidence(**d) for d in state["evidence"]]
+        meter = TokenMeter()
         _emit_progress(
             emit, "writer", "drafting",
             f"正在撰写 {len(analysis.competitors)} 个竞品的对比报告",
         )
         report, insight = write_report_with_insight(
-            analysis, evidence, as_of=as_of, client=_run_client(client, config), model=model,
+            analysis, evidence, as_of=as_of, client=_run_client(client, config, meter), model=model,
             emit=emit)
         save_report(conn, run_id, report)
         save_insight(conn, run_id, insight)  # Epic 2.4:结构化洞察持久化(/insight 端点)
@@ -294,8 +304,9 @@ def make_write_node(*, conn, client, model, as_of):
         )
         append_trace(conn, run_id, "write",
                      input_summary=f"analysis of {len(state['analysis'].get('competitors', []))} competitors",
-                     output_summary=f"report {len(report)} chars",
-                     latency_ms=int((time.monotonic() - t0) * 1000))
+                     output_summary=f"report {len(report)} chars{meter.note()}",
+                     latency_ms=int((time.monotonic() - t0) * 1000),
+                     **meter.trace_fields())
         # insight 经 state 传给 qc 节点:qc 策展后用 curated body 重拼报告时复用同一 insight
         # (不重生成,守 24/30 baseline)。见 make_qc_node 的反幻觉重渲染。
         return {"report": report, "insight": insight.model_dump()}
@@ -315,6 +326,7 @@ def make_qc_node(*, conn, client, model, as_of):
         t0 = time.monotonic()
         analysis = CompetitorAnalysis(**state["analysis"])
         evidence = [Evidence(**d) for d in state["evidence"]]
+        meter = TokenMeter()  # 本节点两个 LLM 调用点(策展蕴含 + insight 重生成)共用
         _emit_progress(
             emit, "qc", "validate",
             f"开始质检 {len(analysis.competitors)} 个竞品 profile",
@@ -332,7 +344,7 @@ def make_qc_node(*, conn, client, model, as_of):
         try:
             curated, dropped = qc.curate_analysis(
                 analysis, evidence, dimensions=requested_dims, on_progress=tick,
-                client=_run_client(client, config), model=model)
+                client=_run_client(client, config, meter), model=model)
         except Exception as e:  # noqa: BLE001 — 蕴含是尽力而为辅助闸,任何失败都降级,绝不崩整图(必办项①/spec §5)
             local_degraded = True
             # 只记 type(e).__name__,**绝不**写 str(e) 入 trace(GET /trace/:run 公开暴露,
@@ -385,7 +397,7 @@ def make_qc_node(*, conn, client, model, as_of):
             curated_body = render_body(curated, evidence, as_of=as_of)
             if dropped:  # 策展真丢了 cell → headline 须用 curated body 重生成(否则引用已丢结论)
                 try:
-                    insight_obj = generate_insight(curated_body, client=_run_client(client, config), model=model)
+                    insight_obj = generate_insight(curated_body, client=_run_client(client, config, meter), model=model)
                     save_insight(conn, run_id, insight_obj)
                 except Exception as e:  # noqa: BLE001 — 重生成尽力而为,失败保原 insight + 降级,绝不崩图
                     logger.exception("qc insight regenerate failed for run %s", run_id)
@@ -426,8 +438,9 @@ def make_qc_node(*, conn, client, model, as_of):
         append_trace(conn, run_id, "qc",
                      input_summary=f"{len(evidence)} evidence",
                      output_summary=f"verdict={verdict} curated={len(dropped)} issues={len(issues)} "
-                                    f"degraded={degraded} retry={new_rc}",
-                     latency_ms=int((time.monotonic() - t0) * 1000))
+                                    f"degraded={degraded} retry={new_rc}{meter.note()}",
+                     latency_ms=int((time.monotonic() - t0) * 1000),
+                     **meter.trace_fields())
         out = {"analysis": curated.model_dump(), "qc_result": result.model_dump(),
                "retry_count": new_rc, "degraded": degraded}
         if curated_report is not None:
@@ -452,13 +465,14 @@ def make_decide_node(*, conn, client, model, as_of):
         evidence = [Evidence(**d) for d in state["evidence"]]
         decision_context = state.get("decision_context") or ""
         body = render_body(analysis, evidence, as_of=as_of)  # 确定性,无 LLM
+        meter = TokenMeter()  # 本节点两个 LLM 调用点(生成决策 + 策展蕴含)共用
         _emit_progress(emit, "decide", "deciding", "正在基于证据生成决策建议")
 
         decision_degraded = False
         dropped: list[dict] = []  # 被策展掉的 ungrounded 决策(结构化 {"action"},可见性,非降级)
         try:
             decision_set = generate_decisions(body, decision_context,
-                                              client=_run_client(client, config), model=model)
+                                              client=_run_client(client, config, meter), model=model)
         except Exception as e:  # noqa: BLE001 — 生成失败降级,绝不崩图
             logger.exception("decide generate failed for run %s", run_id)
             append_trace(conn, run_id, "decide",
@@ -469,7 +483,7 @@ def make_decide_node(*, conn, client, model, as_of):
             # 策展:丢弃 ungrounded 决策(机械悬空免 LLM + 蕴含不支撑),只留站得住的。
             try:
                 kept, dropped = qc.curate_decisions(
-                    decision_set.decisions, evidence, client=_run_client(client, config), model=model)
+                    decision_set.decisions, evidence, client=_run_client(client, config, meter), model=model)
                 decision_set = DecisionSet(decisions=kept)
             except Exception as e:  # noqa: BLE001 — 蕴含失败:机械门 fallback(只丢悬空)+ 降级,绝不崩图
                 logger.exception("decide curate failed for run %s", run_id)
@@ -501,8 +515,10 @@ def make_decide_node(*, conn, client, model, as_of):
         append_trace(conn, run_id, "decide",
                      input_summary=f"context={'set' if decision_context else 'generic'}",
                      output_summary=f"decisions={len(decision_set.decisions)} "
-                                    f"dropped={len(dropped)} degraded={decision_degraded}",
-                     latency_ms=int((time.monotonic() - t0) * 1000))
+                                    f"dropped={len(dropped)} degraded={decision_degraded}"
+                                    f"{meter.note()}",
+                     latency_ms=int((time.monotonic() - t0) * 1000),
+                     **meter.trace_fields())
         return {"decisions": decision_set.model_dump(), "decision_degraded": decision_degraded}
     return decide_node
 

@@ -53,7 +53,7 @@ python -m venv .venv
 在项目根目录新建 `.env` 文件,填入以下变量名对应的值:
 
 ```
-ARK_API_KEY=          # 必填,Doubao API key(字节跳动 ARK 平台)
+ARK_API_KEY=          # 可选;服务端 Doubao key。未设 → BYOK 模式:每次请求由前端「模型设置」页自带 X-LLM-* 头
 TAVILY_API_KEY=        # 必填(或 EXA_API_KEY)
 EXA_API_KEY=           # 可选,Tavily 主 / Exa 兜底
 RIVALRADAR_DB=         # 可选,默认 rivalradar.db
@@ -91,12 +91,13 @@ DATABASE_URL=          # 可选,设 postgres:// 连接串(如 Supabase)即切 Po
 
 ---
 
-## API 端点(20 路由)
+## API 端点(21 路由)
 
 | 方法 | 路径 | 用途 |
 |---|---|---|
 | `POST` | `/run` | 发起竞品分析任务,同步 SSE 流式返回 |
 | `POST` | `/discover-competitors` | 由产品名发现候选竞品 |
+| `POST` | `/llm/ping` | BYOK 连通性测试 —— 发真 run 会发的请求,返回延迟 +(思考模型)输出 token 数 |
 | `GET` | `/stream/{run_id}` | 重放已完成 run 的富过程事件(replay 路径) |
 | `GET` | `/runs` | 列出所有 run 摘要(含 `degraded` 字段) |
 | `GET` | `/run/{run_id}` | 获取单个 run 详情 |
@@ -114,6 +115,8 @@ DATABASE_URL=          # 可选,设 postgres:// 连接串(如 Supabase)即切 Po
 | `GET`·`PUT`·`DELETE` | `/agent-skills[/{agent_id}/{skill_id}]` | Agent 技能目录子系统 |
 | `POST` | `/annotations` | 添加人工质疑标注(§17 质疑率统计) |
 | `GET` | `/healthz` | 健康检查 |
+
+**BYOK 请求头(可选,前三个全有或全无):** `X-LLM-Base-URL` / `X-LLM-API-Key` / `X-LLM-Model` 按请求覆盖模型配置(只给部分 → 422);可选 `X-LLM-Max-Tokens` 声明厂商输出上限。未设 → 用服务端 env key(若有)。Key 只活在浏览器与请求内存里,绝不落库。
 
 **SSE 事件类型:**
 - Live `POST /run`:`start` / `node` / `query` / `query_hit` / `source` / `cell_row` / `verdict_recheck` / `error` / `cancelled` / `done`
