@@ -82,6 +82,16 @@ function SettingsForm() {
   const [showKey, setShowKey] = React.useState(false)
   const [testing, setTesting] = React.useState(false)
   const [testResult, setTestResult] = React.useState<{ ok: boolean; text: string } | null>(null)
+  // 单调递增的测试序号:表单在 ping 进行中仍可编辑,旧请求晚到会用**上一套配置**的结果
+  // 覆盖当前显示,谎称当前配置已测通(评审 P2)。每次发起自增,回来时只认最新那次。
+  const testSeq = React.useRef(0)
+  // 任何改动配置的编辑都作废进行中的 ping(自增序号)+ 清掉旧结果 —— 编辑后那条「连通」
+  // 是对**旧配置**说的,留着就是误导。
+  const invalidateTest = () => {
+    testSeq.current += 1
+    setTesting(false)
+    setTestResult(null)
+  }
 
   const preset = PROVIDER_PRESETS.find((p) => p.id === provider) ?? PROVIDER_PRESETS[0]
 
@@ -94,7 +104,10 @@ function SettingsForm() {
     setModel(next.models[0] ?? '')
     setMaxTokens(next.maxOutputTokens ? String(next.maxOutputTokens) : '')
     setCustomModel(next.models.length === 0)
-    setTestResult(null)
+    // **必须清空 API Key**:一家的 key 属于一家。不清会把上一家(如 OpenAI)的 key 在下次
+    // 测试/运行时发给新选的厂商端点 —— 换到自定义 URL 时就是把 key 送进别人的服务器(评审 P1)。
+    setApiKey('')
+    invalidateTest()
   }
 
   const MODEL_CUSTOM = '__custom__'
@@ -105,7 +118,7 @@ function SettingsForm() {
       setCustomModel(false)
       setModel(v)
     }
-    setTestResult(null)
+    invalidateTest()
   }
 
   // 全串数字校验,不用裸 parseInt —— parseInt("32,768")===32 会**静默**把从厂商文档粘贴
@@ -125,7 +138,9 @@ function SettingsForm() {
     maxTokens: maxOk && parsedMax > 0 ? parsedMax : undefined,
   }
   const allFilled = !!(trimmed.baseUrl && trimmed.apiKey && trimmed.model)
-  const urlOk = /^https?:\/\//.test(trimmed.baseUrl)
+  // 只认 https:明文 http 会让 API Key 在网线上裸奔(评审 P1)。所有真实厂商端点都是 https,
+  // 后端也只放行 https(deps._validate_base_url),两端一致。
+  const urlOk = /^https:\/\//.test(trimmed.baseUrl)
   const canSave = allFilled && urlOk && maxOk
 
   const runTest = async () => {
@@ -135,13 +150,16 @@ function SettingsForm() {
       return
     }
     if (!urlOk) {
-      setTestResult({ ok: false, text: 'base_url 需以 http:// 或 https:// 开头' })
+      setTestResult({ ok: false, text: 'base_url 需以 https:// 开头(明文 http 会泄漏 API Key)' })
       return
     }
+    const seq = ++testSeq.current
+    const stale = () => seq !== testSeq.current // 期间又发起了新测试 → 本次结果作废
     setTesting(true)
     setTestResult(null)
     try {
       const res = await pingLLM(trimmed)
+      if (stale()) return
       setTestResult(
         res.ok
           ? {
@@ -154,13 +172,14 @@ function SettingsForm() {
           : { ok: false, text: pingFailText(res) },
       )
     } catch (err) {
+      if (stale()) return
       // /llm/ping 恒 200;走到这里是网络层 / 后端不可达
       setTestResult({
         ok: false,
         text: `测试请求失败:${err instanceof Error ? err.message : String(err)}`,
       })
     } finally {
-      setTesting(false)
+      if (!stale()) setTesting(false)
     }
   }
 
@@ -177,7 +196,7 @@ function SettingsForm() {
     setApiKey('') // 只清 key;模型名/上限回落预设默认,省得重配一遍
     setModel(preset.models[0] ?? '')
     setMaxTokens(preset.maxOutputTokens ? String(preset.maxOutputTokens) : '')
-    setTestResult(null)
+    invalidateTest()
   }
 
   const inputCls =
@@ -234,7 +253,7 @@ function SettingsForm() {
           value={baseUrl}
           onChange={(e) => {
             setBaseUrl(e.target.value)
-            setTestResult(null)
+            invalidateTest()
           }}
           placeholder="https://api.example.com/v1"
           autoComplete="off"
@@ -258,7 +277,7 @@ function SettingsForm() {
             value={apiKey}
             onChange={(e) => {
               setApiKey(e.target.value)
-              setTestResult(null)
+              invalidateTest()
             }}
             placeholder="sk-..."
             autoComplete="off"
@@ -312,7 +331,7 @@ function SettingsForm() {
             value={model}
             onChange={(e) => {
               setModel(e.target.value)
-              setTestResult(null)
+              invalidateTest()
             }}
             placeholder="模型 id(厂商文档里的精确字符串)"
             autoComplete="off"
@@ -334,7 +353,7 @@ function SettingsForm() {
           value={maxTokens}
           onChange={(e) => {
             setMaxTokens(e.target.value)
-            setTestResult(null)
+            invalidateTest()
           }}
           placeholder="留空 = 不声明"
           autoComplete="off"
