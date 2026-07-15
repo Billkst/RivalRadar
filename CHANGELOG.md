@@ -4,6 +4,31 @@ All notable changes to RivalRadar are documented here per [Keep a Changelog](htt
 
 Versioning follows 4-digit semver `MAJOR.MINOR.PATCH.MICRO`(< 1.0 表 API 未稳定,迭代期允许 breaking changes)。
 
+## [0.6.2.0] - 2026-07-15
+
+**BYOK(自带 API Key)+ token 成本埋点**。现在可以在前端「模型设置」页填自己的 LLM Key(DeepSeek / OpenAI / Claude / Gemini / Kimi / 火山方舟 / 任意 OpenAI 兼容端点),Key 只存在浏览器 localStorage,随请求以 `X-LLM-*` 头下发,绝不落库;换厂商不用改一行代码。同时每次调研的每个节点都记下 prompt/completion/调用次数,「成本·质量·延迟」三角第一次凑齐 —— 满矩阵 5×6 实测:DeepSeek flash ¥0.92 / 6.5min vs pro ¥3.20 / 13.6min,成本 84% 集中在 analyze 节点。ship 前四路评审(specialists + red-team + Claude/Codex 对抗)收口 3 个 P1 + 4 个 CRITICAL + 若干 P2。
+
+### Added
+
+- **BYOK 前端「模型设置」页**(`frontend/src/components/settings/LLMSettingsSheet.tsx` 等)— 厂商预设(base_url / 模型下拉 / 输出上限默认值都按官方文档预填)+ 手填逃生口 + 「测试连接」按钮(发真 run 会发的那个请求,上限填错当场 400,而非跑一半才死);未配置时顶部圆点提示,503 自动弹设置抽屉。
+- **token 成本埋点**(`rivalradar/llm/usage.py` `TokenMeter` + `rivalradar/api/schemas.py` + `rivalradar/storage/db.py`)— 计量在 client 包装层完成,4 个 agent 与 `structured_call` **一行未改**;trace 表新增 `prompt_tokens / completion_tokens / llm_calls` 三列(SQLite `_ensure_columns` + Postgres `PG_MIGRATIONS` 双方言在线迁移)。流式调用经 `stream_options` 计量;未计量调用显式标注,绝不静默算 0。
+- **厂商输出上限钳制**(`rivalradar/llm/limits.py`)— `X-LLM-Max-Tokens` 头声明本厂商上限,client 层 `min(想要的, 上限)` 钳掉,吸收厂商差异;声明了上限则对**所有**调用生效(含流式草稿)。
+- **`/llm/ping` 连通性 + 归因**(`rivalradar/api/runs.py`)— 成功返回 `completion_tokens` + `thinking` 布尔:推理模型(如 DeepSeek V4 默认开思考)的延迟数字没有 token 数不可解读(flash 对 "ping" 思考 1000+ token ≈10s,pro 只吐几十 ≈1s)。
+
+### Changed
+
+- **代理策略:应用不再假装懂网络拓扑**(`main.py` + `scripts/dev-backend.sh`)— 删掉启动即清空所有代理 env 的旧逻辑(那是「只有豆包一个厂商」时代的硬编码,BYOK 后 `api.deepseek.com` 直连不通只走代理通,清代理 = 永远连不上、一次测试卡 46s)。改为:应用只保证 localhost 自调用绕过代理,其余尊重 `http_proxy`/`NO_PROXY` 标准契约;动态代理探测下放到开发启动脚本(探 TCP 端口 + 打印选择 + 可覆盖)。
+- **BYOK client 硬化**(`rivalradar/api/deps.py`)— `max_retries=0`(重试已在 `structured_call`,SDK 默认再叠 2 次 = 最坏 9 次真请求)+ `follow_redirects=False`(堵「域名过校验→302 跳内网」的 SSRF);base_url 只放行 **https** 域名(明文 http 会让 Key 裸奔),拒 IP 字面量 / 数字编码(十进制/十六进制/点分变体/尾点)/ Unicode IDNA 归一化绕过。
+- **`structured_call` 厂商无关降级**(`rivalradar/llm/structured.py`)— 厂商点名拒绝 `tool_choice`(DeepSeek 思考模式实测 400)时去掉该参数重发,「必须调工具」交给校验重试兜底;降级结果按 `(base_url, model)` 进程级记忆(**降级被接受才写入**,防无关 400 毒化)+ 128 容量兜底;400 快失败不重试、不白烧调用。
+
+### Fixed
+
+- **KEY 从异常链泄漏**(`structured.py`;评审 P1)— 400 快失败原用 `raise ... from err`,厂商回显 Key 的原始异常挂在 `__cause__` 上,调用方 `exc_info=True` 打印时整条 traceback 带出 Key。改 `from None` 断链,外层消息已脱敏。
+- **换厂商残留上一家 Key**(`LLMSettingsSheet.tsx`;评审 P1)— 换厂商只改 base_url/模型/上限却留着旧 Key,下次测试/运行会把 OpenAI 的 Key 发给新端点(自定义 URL 时 = 送进别人服务器)。改为换厂商一并清空 Key。
+- **PG 迁移每请求拿排它锁**(`db.py`;评审 CRITICAL)— `init_db` 每请求被调,PG 的 `ALTER TABLE`(即便 no-op)也拿 `ACCESS EXCLUSIVE` 锁,遇 SSE 回放长事务成锁车队冻结全 API。改为进程内双检锁只跑一次。
+- **流中断静默漏计**(`usage.py`;评审)— `_tee` 只在整流走完才记未计量,流中途断/提前弃流时这次真实计费的调用连痕迹都不留。改 try/finally 保证弃流也留未计量痕迹。
+- **前端上限校验 silent 截断**(`LLMSettingsSheet.tsx`;评审)— `parseInt("32,768")===32` 会把粘贴的上限静默截成 32,ping 照过真 run 必因 JSON 截断而死。改全串数字校验 + 上界镜像后端 1048576;修 `max_tokens=0` 锁死保存、模型下拉 label a11y 悬空、useSSE 非字符串 detail 显示 `[object Object]`、「测试连接」竞态旧结果覆盖新配置。
+
 ## [0.6.1.0] - 2026-06-10
 
 **Supabase Postgres 持久化迁移**。后端存储层从「仅 SQLite」扩展为「SQLite + Postgres 双方言」:设 `DATABASE_URL=postgres://`(如 Supabase)即切到托管 Postgres 持久化,云端容器重启不丢数据;不设则零行为变化走本地 SQLite。SQLite 路径 402 pytest 全绿 + 真 Supabase 9 段 CRUD 冒烟全 PASS;ship 前 Claude + Codex 跨模型对抗评审收口 1 个 HIGH(PG 事务污染)+ 3 个 INFORMATIONAL。

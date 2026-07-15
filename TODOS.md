@@ -23,6 +23,12 @@
 **Priority:** P2
 **详情:** `safe_fetch + follow_redirects=True` 可能跟随重定向到 `169.254.169.254` 元数据服务等内网地址(security specialist Medium #2)。在 `is_self_fetch_allowed` 或 `safe_fetch` 内加私有 IP 段过滤(`127.x / 10.x / 192.168.x / 169.254.x`)。当前 demo 阶段 URL 来自 Tavily/Exa 不直接用户控制,风险低。
 
+### BYOK `/llm/ping` 限流 + 剩余 SSRF 敞口(v0.6.2 BYOK 评审遗留)
+**Priority:** P2
+**详情:** ship 前四路评审(specialists + red-team + Claude/Codex 对抗)对 BYOK 端点提了两类**已缓解但未彻底封死**的问题,记此追踪:
+- **`/llm/ping` 无鉴权 + 无限流**:任意匿名请求可让服务端向任意**公网** host 发一次探测并回 `latency_ms`/`error_type`(轻量 open-relay 式探测,仅限公网 host)。线程占用已由 `max_retries=0`(deps.py)把最坏从 ~46s 砍到 15s,但无 per-IP 限流。投产建议:`/llm/ping` 加简单限流(slowapi / 反代层)或要求鉴权。
+- **剩余 SSRF**:已封的——IP 字面量 / 数字编码(十进制/十六进制/点分变体)/ 尾点 / Unicode IDNA(校验层)+ 重定向到内网(client `follow_redirects=False`)+ 明文 http(https-only)。**未封的**——无代理直连部署时「域名 A 记录指向内网」/ DNS rebinding。本项目外网强制走代理(DNS 在代理端解析,本地 getaddrinfo 拿 fake-ip),故**刻意不做**本地 DNS 解析+私有段判断(在代理拓扑下既误杀合法厂商端点又无效)。真正的 egress 管控属部署层(代理白名单 / egress proxy),投产直连部署时补。
+
 ### POST /annotations auth
 **Priority:** P3
 **详情:** 当前 demo 走 localhost,无 token / session 校验(plan 已确认 acceptable for 比赛)。投产前加简单 header token(从 env 读 `RIVALRADAR_ANNOTATION_TOKEN`)。
