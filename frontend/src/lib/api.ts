@@ -125,7 +125,15 @@ export interface PingLLMResult {
   latency_ms?: number
   completion_tokens?: number // 本次测试实际吐了多少输出 token(思考 token 计入)
   thinking?: boolean // 厂商默认开了思考模式(响应带 reasoning_content)—— 延迟主因的归因线索
-  error_type?: 'auth' | 'not_found' | 'bad_request' | 'timeout' | 'connection' | 'unconfigured' | 'other'
+  error_type?:
+    | 'auth'
+    | 'not_found'
+    | 'bad_request'
+    | 'timeout'
+    | 'connection'
+    | 'unconfigured'
+    | 'busy'
+    | 'other'
   detail?: string
 }
 // 注意:测试用的是**表单当前值**(不是已保存值),所以这里不能复用 llmHeaders(),

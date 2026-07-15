@@ -121,6 +121,11 @@ def structured_call(
             resp = client.chat.completions.create(**kwargs)
         except BadRequestError as err:
             detail = redact(str(err), _secret)
+            # 落日志前再脱一层 model:env 模式下 model 是 DOUBAO_MODEL endpoint id(项目
+            # 纪律视同 KEY),厂商 400 body 若回显 model= 就会进日志(对抗评审)。异常消息
+            # **不**脱 model —— BYOK 的 503 诊断要让用户看见自己的模型名;env 路径的异常
+            # 文本从不回显给客户端(post_discover env 分支回笼统文案,SSE 只回异常类型名)。
+            log_detail = redact(detail, model)
             if send_tool_choice and "tool_choice" in detail:
                 # 厂商点名拒绝 tool_choice → 降级重发。**先降级、后验证、才记忆**:
                 # 400 文案只做子串匹配,若在这里就写记忆,任何恰好含 "tool_choice" 字样的
@@ -131,7 +136,7 @@ def structured_call(
                 last_err = err
                 logger.warning(
                     "structured_call(%s) 厂商拒绝点名 tool_choice,去掉该参数重发:%s",
-                    model_cls.__name__, detail[:200])
+                    model_cls.__name__, log_detail[:200])
                 continue  # 不计 attempt
             # 其余 400 = 请求本身不合法(参数超出厂商上限 / schema 不被支持),**确定性错误**:
             # 同样的请求重试必然同样失败。原先它落进下面的 APIError 分支被当网络抖动重试 3 次
@@ -140,7 +145,7 @@ def structured_call(
             # 400 文案(已脱敏),用户一眼看到「max_tokens 超上限」而不是「网络失败」。
             # 上层若吞掉异常文本,服务端日志是最后一处能看到厂商真实拒因的地方 → 也留 warning。
             logger.warning("structured_call(%s) 被厂商拒绝(400,不重试):%s",
-                           model_cls.__name__, detail[:300])
+                           model_cls.__name__, log_detail[:300])
             # from None(不是 from err):厂商 400 body 可能回显 key,外层消息已脱敏,但
             # `from err` 会把**未脱敏**的原始异常挂到 __cause__ 上;任何调用方用 exc_info=True
             # / logger.exception 打印时,traceback 会把 __cause__ 的 str() 原样写进日志 →
@@ -158,7 +163,7 @@ def structured_call(
             logger.warning(
                 "structured_call attempt %d/%d network error: %s: %s",
                 attempt, max_retries + 1, type(err).__name__,
-                redact(str(err), _secret)[:200],
+                redact(str(err), _secret, model)[:200],
             )
             continue
         attempt += 1

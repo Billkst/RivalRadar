@@ -2,6 +2,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 import time
 import uuid
 
@@ -11,7 +12,8 @@ from sse_starlette.sse import EventSourceResponse
 
 from rivalradar.agents.discover import DiscoverySet, discover_competitors
 from rivalradar.api.deps import (
-    LLMSettings, get_db_conn, get_llm, get_provider, get_as_of, get_max_retries,
+    LLMSettings, close_byok_client, get_db_conn, get_llm, get_provider, get_as_of,
+    get_max_retries,
 )
 from rivalradar.api.schemas import DiscoverRequest, RunDetail, RunRequest, RunSummary
 from rivalradar.api.sse import (
@@ -80,6 +82,8 @@ def post_discover(
             raise HTTPException(503, str(err)[:300])
         # env fallback:err 可能含 DOUBAO_MODEL endpoint ID(视同 KEY 敏感),保持笼统。
         raise HTTPException(503, "竞品发现暂时不可用,请手动输入竞品名")
+    finally:
+        close_byok_client(llm)  # 一次性端点:BYOK client 用完即关(env 单例不关)
 
 
 # ── BYOK 连通性测试 ─────────────────────────────────────────────────────────
@@ -95,6 +99,12 @@ def _llm_secrets(request: Request, llm: LLMSettings) -> tuple[str | None, ...]:
     if llm.source == "env":
         secrets.append(llm.model)
     return tuple(secrets)
+
+
+# /llm/ping 是无鉴权公开端点,且是 sync 路由(跑在共享 AnyIO 线程池里):攻击者填一个
+# 只接受 TCP 连接、永不响应的黑洞域名(能过 SSRF 域名校验),并发打就能以 15s/请求占满
+# 线程池、拖停全站(对抗评审)。并发闸:满了立即 429 分类,不排队、不占线程。
+_PING_GATE = threading.BoundedSemaphore(4)
 
 
 @router.post("/llm/ping")
@@ -117,40 +127,51 @@ def llm_ping(request: Request) -> dict:
             return {"ok": False, "error_type": "unconfigured",
                     "detail": str(e.detail)[:200]}
         raise
-    secrets = _llm_secrets(request, llm)
-    t0 = time.perf_counter()
+    if not _PING_GATE.acquire(blocking=False):
+        # 不排队:排队本身就占线程池,正是要防的资源占用形态。
+        # 提前 return 走不到下方 finally —— BYOK client 在这里就得关,否则 busy 风暴期间
+        # 每个被拒请求都漏一个连接池。
+        close_byok_client(llm)
+        return {"ok": False, "error_type": "busy",
+                "detail": "连通性测试并发已满,稍候几秒再点"}
     try:
-        resp = llm.client.chat.completions.create(
-            model=llm.model,
-            messages=[{"role": "user", "content": "ping"}],
-            # 只是上限;但「prompt 短 = 只吐几个 token」对默认开 thinking 的模型(如
-            # DeepSeek V4 系)不成立 —— 思考 token 计入输出、是延迟主因。所以成功时把
-            # completion_tokens 一并返回,让「XXXms」可归因(慢在思考,还是慢在网络)。
-            max_tokens=_DEFAULT_MAX_TOKENS,
-            timeout=15,
-        )
-    except openai.AuthenticationError as e:
-        return {"ok": False, "error_type": "auth", "detail": redact(str(e), *secrets)[:200]}
-    except openai.NotFoundError as e:
-        return {"ok": False, "error_type": "not_found", "detail": redact(str(e), *secrets)[:200]}
-    except openai.BadRequestError as e:
-        # 400:参数被厂商拒。BYOK 换厂商时最常见的一条 —— 多半是输出上限没声明/填太大。
-        return {"ok": False, "error_type": "bad_request",
-                "detail": redact(str(e), *secrets)[:200]}
-    except openai.APITimeoutError as e:  # 必须先于 APIConnectionError(是其子类)
-        return {"ok": False, "error_type": "timeout", "detail": redact(str(e), *secrets)[:200]}
-    except openai.APIConnectionError as e:
-        return {"ok": False, "error_type": "connection", "detail": redact(str(e), *secrets)[:200]}
-    except Exception as e:  # noqa: BLE001 — 分类兜底,detail 已脱敏
-        return {"ok": False, "error_type": "other", "detail": redact(str(e), *secrets)[:200]}
-    out: dict = {"ok": True, "latency_ms": int((time.perf_counter() - t0) * 1000)}
-    usage = getattr(resp, "usage", None)
-    if usage is not None and getattr(usage, "completion_tokens", None) is not None:
-        out["completion_tokens"] = usage.completion_tokens
-    choices = getattr(resp, "choices", None)
-    if choices and getattr(choices[0].message, "reasoning_content", None):
-        out["thinking"] = True  # 只回布尔,不回思考内容(KEY 纪律:响应体不带模型输出)
-    return out
+        secrets = _llm_secrets(request, llm)
+        t0 = time.perf_counter()
+        try:
+            resp = llm.client.chat.completions.create(
+                model=llm.model,
+                messages=[{"role": "user", "content": "ping"}],
+                # 只是上限;但「prompt 短 = 只吐几个 token」对默认开 thinking 的模型(如
+                # DeepSeek V4 系)不成立 —— 思考 token 计入输出、是延迟主因。所以成功时把
+                # completion_tokens 一并返回,让「XXXms」可归因(慢在思考,还是慢在网络)。
+                max_tokens=_DEFAULT_MAX_TOKENS,
+                timeout=15,
+            )
+        except openai.AuthenticationError as e:
+            return {"ok": False, "error_type": "auth", "detail": redact(str(e), *secrets)[:200]}
+        except openai.NotFoundError as e:
+            return {"ok": False, "error_type": "not_found", "detail": redact(str(e), *secrets)[:200]}
+        except openai.BadRequestError as e:
+            # 400:参数被厂商拒。BYOK 换厂商时最常见的一条 —— 多半是输出上限没声明/填太大。
+            return {"ok": False, "error_type": "bad_request",
+                    "detail": redact(str(e), *secrets)[:200]}
+        except openai.APITimeoutError as e:  # 必须先于 APIConnectionError(是其子类)
+            return {"ok": False, "error_type": "timeout", "detail": redact(str(e), *secrets)[:200]}
+        except openai.APIConnectionError as e:
+            return {"ok": False, "error_type": "connection", "detail": redact(str(e), *secrets)[:200]}
+        except Exception as e:  # noqa: BLE001 — 分类兜底,detail 已脱敏
+            return {"ok": False, "error_type": "other", "detail": redact(str(e), *secrets)[:200]}
+        out: dict = {"ok": True, "latency_ms": int((time.perf_counter() - t0) * 1000)}
+        usage = getattr(resp, "usage", None)
+        if usage is not None and getattr(usage, "completion_tokens", None) is not None:
+            out["completion_tokens"] = usage.completion_tokens
+        choices = getattr(resp, "choices", None)
+        if choices and getattr(choices[0].message, "reasoning_content", None):
+            out["thinking"] = True  # 只回布尔,不回思考内容(KEY 纪律:响应体不带模型输出)
+        return out
+    finally:
+        _PING_GATE.release()
+        close_byok_client(llm)  # 一次性端点:BYOK client 用完即关(env 单例不关)
 
 
 @router.get("/stream/{run_id}")

@@ -96,9 +96,13 @@ class _MeteredCompletions:
         else:
             try:
                 stream = self._inner.create(**kwargs, stream_options={"include_usage": True})
-            except BadRequestError:
+            except BadRequestError as err:
                 # 只接 400 = 厂商不认这个参数(BYOK 下厂商各异)。网络/鉴权错误照常上抛,
                 # 绝不吞掉重试 —— 否则会把一次失败调用变成两次真实计费。
+                # 且 400 必须**点名这个参数**才回退:别的 400(如 max_tokens 超上限)与
+                # stream_options 无关,盲目重发一次注定同样失败的请求纯属浪费(对抗评审)。
+                if not any(k in str(err) for k in ("stream_options", "include_usage")):
+                    raise
                 stream = self._inner.create(**kwargs)
         return self._tee(stream)
 

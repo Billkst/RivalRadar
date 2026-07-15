@@ -211,6 +211,22 @@ def test_stream_falls_back_when_provider_rejects_stream_options():
     assert "未计量" in m.note()
 
 
+def test_stream_unrelated_400_propagates_without_second_call():
+    """400 必须**点名 stream_options/include_usage** 才回退。别的 400(如 max_tokens
+    超上限)与该参数无关 —— 盲目重发一次注定同样失败的请求纯属浪费(对抗评审)。"""
+    comp = _Completions(chunks=[], stream_err=_bad_request())
+    comp._stream_err = BadRequestError(
+        "max_tokens must be <= 8192",
+        response=httpx.Response(400, request=httpx.Request(
+            "POST", "https://provider.example/v1/chat/completions")),
+        body=None)
+    m = TokenMeter()
+    with pytest.raises(BadRequestError):
+        meter_client(_FakeClient(comp), m).chat.completions.create(
+            model="m", messages=[], stream=True)
+    assert len(comp.calls) == 1                          # 不点名该参数的 400:不重发
+
+
 def test_stream_non_400_error_propagates_without_retry():
     """只有 400(厂商不认参数)才回退。网络/鉴权错误照常上抛 —— 若也重试,一次失败调用
     会被变成两次真实计费。"""

@@ -45,6 +45,7 @@ const PING_ERROR_TEXT: Record<string, string> = {
   connection: '无法连接到该端点',
   unconfigured: '请先填写完整配置',
   bad_request: '参数被厂商拒绝 —— 多半是「输出上限」填得比该模型允许的大,按厂商文档调小',
+  busy: '连通性测试并发已满,稍候几秒再点',
 }
 
 function pingFailText(res: PingLLMResult): string {

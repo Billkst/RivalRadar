@@ -259,6 +259,88 @@ def test_ping_reports_completion_tokens_and_thinking(db_path):
     assert "模型的内部思考过程" not in str(body)
 
 
+def test_ping_gate_full_returns_busy_without_probing(db_path, monkeypatch):
+    """并发闸满 → 立即 busy 分类,不发出站请求、不排队(排队占线程恰是要防的)。
+    /llm/ping 无鉴权 + sync 线程池:黑洞域名 15s/请求 × 池宽 = 全站卡死(对抗评审)。"""
+    from rivalradar.api import runs as runs_mod
+
+    probed = {}
+
+    def create(**kw):
+        probed["hit"] = True
+        return SimpleNamespace()
+
+    client = TestClient(create_app(db_path=db_path, doubao_client=_stub_chat_client(create)))
+    monkeypatch.setenv("DOUBAO_MODEL", "ep-test-dummy-endpoint")
+    assert runs_mod._PING_GATE.acquire(blocking=False)  # 占满闸(BoundedSemaphore(4)→ 占 4 个)
+    held = 1
+    while runs_mod._PING_GATE.acquire(blocking=False):
+        held += 1
+    try:
+        body = client.post("/llm/ping").json()
+    finally:
+        for _ in range(held):
+            runs_mod._PING_GATE.release()
+    assert body["ok"] is False
+    assert body["error_type"] == "busy"
+    assert "hit" not in probed                       # 没发任何出站请求
+    # 闸释放后恢复正常
+    assert client.post("/llm/ping").json()["ok"] is True
+
+
+def test_ping_closes_byok_client_but_never_env_client(db_path, monkeypatch):
+    """一次性端点用完即关 BYOK client(每请求新建的连接池不关就攒 FD);
+    env 单例是进程级共享,绝不能被关(对抗评审)。"""
+    closed = []
+
+    class _ClosableStub:
+        def __init__(self, tag):
+            self._tag = tag
+            self.chat = SimpleNamespace(completions=SimpleNamespace(
+                create=lambda **kw: SimpleNamespace()))
+
+        def close(self):
+            closed.append(self._tag)
+
+    monkeypatch.setattr("rivalradar.api.deps.OpenAI",
+                        lambda **kw: _ClosableStub("byok"))
+    env_client = _ClosableStub("env")
+    monkeypatch.setenv("DOUBAO_MODEL", "ep-test-dummy-endpoint")
+    client = TestClient(create_app(db_path=db_path, doubao_client=env_client))
+
+    assert client.post("/llm/ping", headers=BYOK_HEADERS).json()["ok"] is True
+    assert closed == ["byok"]                        # BYOK 关了
+    assert client.post("/llm/ping").json()["ok"] is True  # env fallback 路径
+    assert closed == ["byok"]                        # env 单例没被关
+
+
+def test_discover_closes_byok_client_on_both_paths(db_path, monkeypatch):
+    """discover 成功与失败(StructuredCallError→503)都必须走 finally 关 BYOK client。"""
+    closed = []
+
+    class _ClosableStub:
+        def close(self):
+            closed.append("byok")
+
+    monkeypatch.setattr("rivalradar.api.deps.OpenAI", lambda **kw: _ClosableStub())
+    calls = {"n": 0}
+
+    def fake_discover(seed, hint, *, client, model):
+        calls["n"] += 1
+        if calls["n"] == 1:
+            return _discovery("钉钉")
+        raise StructuredCallError("被厂商拒绝(400,不重试):boom")
+
+    monkeypatch.setattr("rivalradar.api.runs.discover_competitors", fake_discover)
+    client = TestClient(create_app(db_path=db_path))
+    assert client.post("/discover-competitors", json={"seed": "飞书"},
+                       headers=BYOK_HEADERS).status_code == 200
+    assert closed == ["byok"]                        # 成功路径关了
+    assert client.post("/discover-competitors", json={"seed": "飞书"},
+                       headers=BYOK_HEADERS).status_code == 503
+    assert closed == ["byok", "byok"]                # 失败路径也关了
+
+
 def test_ping_auth_error_masks_key(db_path, monkeypatch):
     """AuthenticationError → error_type=auth;异常消息里的 key 必须被脱敏成 ***。"""
     def boom(**kw):

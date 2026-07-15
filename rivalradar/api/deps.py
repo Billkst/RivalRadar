@@ -73,6 +73,23 @@ class LLMSettings:
     source: str = "env"  # "env" | "byok"
 
 
+def close_byok_client(llm: "LLMSettings") -> None:
+    """一次性端点(/llm/ping、/discover-competitors)用完即关 BYOK client。
+
+    BYOK 每请求都新建 OpenAI(+httpx 连接池),SDK 只会自动回收**它自己默认建的**
+    http client —— 我们传了自定义 httpx.Client 就退出了那张安全网,不显式 close 的话
+    连接池/FD 靠 GC 慢慢攒(对抗评审)。env 单例是进程级共享,**绝不能**关;
+    run 路径的 client 存活到 run 结束,数量受并发 run 数天然限界,不经此。"""
+    if llm.source != "byok":
+        return
+    close = getattr(llm.client, "close", None)  # 包装链 __getattr__ 透传到 OpenAI.close
+    if callable(close):
+        try:
+            close()
+        except Exception:  # noqa: BLE001 — 关闭失败不影响响应,连接由 GC 兜底
+            pass
+
+
 def _validate_base_url(base_url: str) -> None:
     """SSRF 校验(云端防打内网 metadata):只放行域名形式的 **https** 端点。
 
