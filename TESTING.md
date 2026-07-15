@@ -6,7 +6,7 @@
 .venv/bin/python -m pytest
 ```
 
-402 个测试,约 13 秒。无任何外部依赖(全部 mock)。
+499 个测试,约 18 秒。无任何外部依赖(全部 mock)。
 
 ```bash
 # 只跑某个模块
@@ -149,7 +149,7 @@ def test_rerun_same_url_no_integrity_error(tmp_path):
 
 spike 文件命名:如 `spikes/spike_doubao_e2e.py`。结果记录在 `spikes/SPIKE_RESULTS.md`。
 
-**Postgres 方言路径**:repository 的方言统一(`ON CONFLICT`)在 SQLite 上由 402 单测覆盖;Postgres 专属分支(`RETURNING id` / `fetched_at,id` 排序 / dict_row / 失败即 rollback)无法在无 PG server 的 CI 里单测,改由 `spikes/spike_supabase_crud.py` 真打 Supabase 验证(9 段 CRUD + 事务污染恢复,首尾自清理)。
+**Postgres 方言路径**:repository 的方言统一(`ON CONFLICT`)在 SQLite 上由单测覆盖;Postgres 专属分支(`RETURNING id` / `fetched_at,id` 排序 / dict_row / 失败即 rollback / `PG_MIGRATIONS` 加列 + 进程内一次)由 `tests/test_token_usage.py` 的 fake-pg 连接单测校验语句序列,并由 `spikes/spike_supabase_crud.py` 真打 Supabase 验证(9 段 CRUD + 事务污染恢复,首尾自清理)。
 
 ---
 

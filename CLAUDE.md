@@ -129,7 +129,7 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 .venv/bin/python -m pytest
 ```
 
-402 个测试,约 13 秒通过。
+499 个测试,约 18 秒通过。
 
 **测试哲学:**
 

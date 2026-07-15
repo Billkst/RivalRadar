@@ -53,7 +53,7 @@ python -m venv .venv
 Create a `.env` file in the project root with the values for these keys:
 
 ```
-ARK_API_KEY=          # required, Doubao API key (ByteDance ARK platform)
+ARK_API_KEY=          # optional; server-side Doubao key. Unset → BYOK mode: each request carries X-LLM-* headers from the frontend 模型设置 page
 TAVILY_API_KEY=        # required (or EXA_API_KEY)
 EXA_API_KEY=           # optional; Tavily is primary, Exa is fallback
 RIVALRADAR_DB=         # optional, defaults to rivalradar.db
@@ -91,12 +91,13 @@ Open **http://localhost:3000** to start. Stop both services:
 
 ---
 
-## API endpoints (20 routes)
+## API endpoints (21 routes)
 
 | Method | Path | Purpose |
 |---|---|---|
 | `POST` | `/run` | Start a competitive-analysis run, streamed back over SSE |
 | `POST` | `/discover-competitors` | Discover candidate rivals from a product name |
+| `POST` | `/llm/ping` | BYOK connectivity test — sends the real run-shaped request; returns latency + (for thinking models) completion tokens |
 | `GET` | `/stream/{run_id}` | Replay the rich process events of a finished run |
 | `GET` | `/runs` | List all run summaries (includes the `degraded` field) |
 | `GET` | `/run/{run_id}` | Get a single run's detail |
@@ -114,6 +115,8 @@ Open **http://localhost:3000** to start. Stop both services:
 | `GET`·`PUT`·`DELETE` | `/agent-skills[/{agent_id}/{skill_id}]` | Agent skill catalog subsystem |
 | `POST` | `/annotations` | Add a manual-challenge annotation (challenge-rate stats) |
 | `GET` | `/healthz` | Health check |
+
+**BYOK headers (optional, all-or-nothing on the first three):** `X-LLM-Base-URL` / `X-LLM-API-Key` / `X-LLM-Model` override the model per request (partial → 422); optional `X-LLM-Max-Tokens` declares the vendor output cap. Unset → the server env key (if any) is used. Keys live only in the browser and in per-request memory — never persisted.
 
 **SSE event types:**
 - Live `POST /run`: `start` / `node` / `query` / `query_hit` / `source` / `cell_row` / `verdict_recheck` / `error` / `cancelled` / `done`
