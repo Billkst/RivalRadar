@@ -103,7 +103,11 @@ export function DecisionSurface({
 
   // 因果桥:选中决策 idx(切 run / 切换决策清空共享高亮在 DecisionBoard 内处理)。
   const [selectedIdx, setSelectedIdx] = React.useState<number | null>(null)
-  React.useEffect(() => setSelectedIdx(null), [runId])
+  React.useEffect(() => {
+    // 选择只属于当前 run,切换时同步清空防串 run 高亮。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setSelectedIdx(null)
+  }, [runId])
 
   // 防串 run:cockpit 数据属于本页 runId 才采信。
   const live = cockpitRunId === runId

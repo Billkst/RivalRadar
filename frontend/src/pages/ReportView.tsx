@@ -23,6 +23,8 @@ export function ReportView() {
 
   React.useEffect(() => {
     if (!run_id) return
+    // 路由参数变化时先退出上一份报告的 ready/error 状态。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setState('loading')
     fetchReport(run_id)
       .then((r) => {

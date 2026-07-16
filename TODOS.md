@@ -6,11 +6,6 @@
 
 ## 部署 / 投产硬化
 
-### CI/CD pipeline(`.github/workflows/test.yml`)
-**Priority:** P1
-**详情:** 当前无 CI,PR 测试只靠本地 `.venv/bin/python -m pytest`。建议加 GitHub Actions workflow(setup-python 3.11 + 安装依赖 + 跑 pytest + 跑 coverage report)。模板:`ubuntu-latest` + `actions/setup-python@v5` + `pip install -e .` + `pytest`。
-**触发:** push + pull_request。
-
 ### SQLite `PRAGMA busy_timeout` 设置
 **Priority:** P1
 **详情:** WAL 允许并发读 + 单写,但**两个**并发写在第二个 writer 上立即 `OperationalError: database is locked`(无超时等待)。`test_concurrent_two_posts_no_busy` 在低强度通过,高强度会触发。加 `conn.execute("PRAGMA busy_timeout=5000")` 在 `connect()` 内,让短暂争用透明 block 5s 后再 fail。
@@ -151,18 +146,6 @@
 
 ---
 
-## 文档
-
-### CLAUDE.md 加 `## Testing` section
-**Priority:** P4
-**详情:** ship 自动 bootstrap 检测到无 `## Testing` 但跳过(因为已有 pytest)。手工加一段:`.venv/bin/python -m pytest` 命令 + TESTING.md 链接 + 测试期望(100% coverage 目标、新功能加测试、修 bug 加回归测试、加分支加双路径测试)。
-
-### TESTING.md 创建
-**Priority:** P4
-**详情:** 写测试 philosophy + 框架(pytest)+ 命令 + 分层(unit / integration / spike)+ conventions(naming / fixtures / monkeypatch / KEY 纪律)。
-
----
-
 ## Lane F frontend(post-ship review 发现 / 残留)
 
 ### Writer agent 真打 LLM 改 stream_chat — "招牌时刻 typing" production 体感
@@ -197,6 +180,8 @@
 
 ## Completed
 
+- 统一验证入口 + GitHub Actions CI(`scripts/verify.sh`、版本一致性检查、Python 3.11 后端 / Node 22.13 前端双 job,不运行占位 test/lighthouse)— **Completed:** Phase 1 (2026-07-16)
+- Claude/Codex 共享维护契约 + TESTING 文档入口(`AGENTS.md`、`CLAUDE.md` 薄适配、`docs/agents/`、`TESTING.md`)— **Completed:** Phase 0 (2026-07-16)
 - `check_entailment` 逐 cell 并行降本(`qc.py _judge_comparison_verdicts` 用 `ThreadPoolExecutor` + `ex.map`,N×M 蕴含调用并发)— ① 并行已落地;② 抽样未做(并行已够,按需再加)— **Completed:** v0.6.0.0 (2026-06-09)
 - Writer v2 — `generate_insight` 3 段 schema-encoded(market_context / differentiation_thesis / actionable_takeaway)替代 v1 单段 summary;rubric v1 真打两轮 18.5/30 → 24/30 验证(距 ref-01 仅 2 分);references/ 加 4 份中文 SaaS reference baseline + Round 1/2 evidence — **Completed:** v0.3.0.0 (2026-05-28)
 - pipeline graceful skip(`_run_query_safe` try/except + 返 []+ failed_count 日志)— 单 Tavily query 60s timeout 不再 abort 整轮 — **Completed:** v0.3.0.0 (2026-05-28)

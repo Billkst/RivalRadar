@@ -17,6 +17,8 @@ export function useElapsed(startTs: string | number | null): number {
 
   React.useEffect(() => {
     if (startTs === null) {
+      // caller 停止计时时同步清零,避免下一次启动先闪旧值。
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setElapsed(0)
       return
     }
@@ -27,7 +29,8 @@ export function useElapsed(startTs: string | number | null): number {
       return
     }
     const tick = () => setElapsed(Math.max(0, Date.now() - startMs))
-    tick()  // 立即 tick 一次防初始 0
+    // 立即 tick 一次,避免计时器首帧固定显示 0。
+    tick()
     const id = setInterval(tick, 100)
     return () => clearInterval(id)
   }, [startTs])

@@ -112,7 +112,7 @@ export const useSkillsStore = create<SkillsState>((set, get) => ({
   },
   remove: async (agentId, skillId) => {
     set((s) => {
-      const { [skillId]: _, ...rest } = s.state
+      const rest = Object.fromEntries(Object.entries(s.state).filter(([id]) => id !== skillId))
       return {
         installed: { ...s.installed, [agentId]: s.installed[agentId].filter((x) => x.id !== skillId) },
         state: rest,

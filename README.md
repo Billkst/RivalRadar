@@ -67,7 +67,7 @@ DATABASE_URL=          # optional; set a postgres:// URL (e.g. Supabase) to swit
 
 ### 3. Run the services
 
-The repo ships dev scripts (they auto-handle the WSL2 + Clash proxy workaround and run from any directory). **Open one terminal for each:**
+The repo ships dev scripts (they handle the local proxy boundary and run from any directory). **Open one terminal for each:**
 
 ```bash
 # Terminal 1 — backend FastAPI (http://127.0.0.1:8000)
@@ -85,7 +85,7 @@ Open **http://localhost:3000** to start. Stop both services:
 
 > **Two things to know**
 > - **No `--reload` on the backend**: after editing `rivalradar/**` or `main.py`, restart `dev-backend.sh` for changes to take effect (the frontend hot-reloads via HMR, no restart needed).
-> - **WSL2 + Clash**: the scripts `unset` proxy variables and add `ark.cn-beijing.volces.com` (Doubao) and `api.tavily.com` to `NO_PROXY`; otherwise LLM calls get stuck on fake-ip routing. Do the same if you start services by hand.
+> - **WSL2 + Clash**: the backend script preserves an explicitly configured proxy; otherwise it probes `RIVALRADAR_DEV_PROXY` (default `http://127.0.0.1:7897`) and prints the selected path. Only localhost is forced to bypass the proxy. The frontend script clears proxy variables because it talks only to localhost.
 >
 > Backend only, directly: `.venv/bin/python main.py` (listens on `http://127.0.0.1:8000`).
 
@@ -127,7 +127,7 @@ Open **http://localhost:3000** to start. Stop both services:
 ```json
 {
   "competitors": ["RivalA", "RivalB"],
-  "dimensions": ["features", "pricing"]
+  "dimensions": ["core_workflows", "pricing"]
 }
 ```
 
@@ -138,10 +138,12 @@ Limits: `competitors` ≤ 5, `dimensions` ≤ 6, each string 1-200 chars.
 ## Running the tests
 
 ```bash
-.venv/bin/python -m pytest
+./scripts/verify.sh backend   # version consistency + backend tests
+./scripts/verify.sh frontend  # typecheck + lint + production build
+./scripts/verify.sh all       # both
 ```
 
-402 tests, ~13 seconds, no external dependencies (everything is mocked). See [`TESTING.md`](TESTING.md).
+Backend tests mock external services and never include `spikes/`. See [`TESTING.md`](TESTING.md).
 
 ---
 
@@ -181,7 +183,7 @@ rivalradar/
   search/      # SearchProvider protocol + TavilyProvider + ExaProvider + FallbackSearch
   storage/     # db.py dialect routing (SQLite / Postgres) + repository CRUD
   config.py    # Environment variable reads (never exposes key values)
-tests/         # 402 tests (44 test_*.py files)
+tests/         # automated backend tests (external services mocked)
 spikes/        # Real end-to-end spikes against Doubao / Tavily / Supabase (see SPIKE_RESULTS.md)
 docs/superpowers/specs/  # Design specs
 main.py        # Service entrypoint
@@ -193,9 +195,9 @@ main.py        # Service entrypoint
 
 | File | Contents |
 |---|---|
-| [`CHANGELOG.md`](CHANGELOG.md) | Version history, latest v0.6.1.0 |
+| [`CHANGELOG.md`](CHANGELOG.md) | Version history, latest v0.6.2.0 |
 | [`DEPLOY.md`](DEPLOY.md) | Deployment guide (Vercel + Render + Supabase Postgres) |
-| [`TESTING.md`](TESTING.md) | Testing guide (402 tests / 44 test files / testing philosophy) |
+| [`TESTING.md`](TESTING.md) | Testing guide, commands, boundaries, and conventions |
 | [`TODOS.md`](TODOS.md) | Non-blocking backlog (grouped + P0-P4) |
 | [`DESIGN.md`](DESIGN.md) | Frontend design system v5 (type / color / spacing / motion / decision cockpit) |
 | [`DATA_SOURCES.md`](DATA_SOURCES.md) | Data-source compliance statement |
@@ -206,7 +208,7 @@ main.py        # Service entrypoint
 
 ## Version
 
-Current version: **v0.6.1.0** (Supabase Postgres persistence migration, 2026-06-10)
+Current version: **v0.6.2.0** (BYOK and token usage metering, 2026-07-15)
 
 Version format: `MAJOR.MINOR.PATCH.MICRO` (< 1.0 means the API is unstable and breaking changes are allowed)
 

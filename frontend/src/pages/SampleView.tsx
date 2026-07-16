@@ -35,6 +35,8 @@ export function SampleView() {
 
   React.useEffect(() => {
     if (!sample || !isMd) return
+    // 切换范文时先退出上一份文档的 ready/error 状态。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setState('loading')
     fetch(sample.file)
       .then((r) => {

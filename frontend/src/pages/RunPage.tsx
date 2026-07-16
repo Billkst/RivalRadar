@@ -57,6 +57,8 @@ export function RunPage() {
   React.useEffect(() => {
     if (!run_id) return
     if (isDemoRun(run_id)) {
+      // demo 是本地 fixture,无需异步请求;路由切入时立即装载。
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setRun(DEMO_RUN_DETAIL)
       return
     }

@@ -34,7 +34,11 @@ export function CockpitLayout({
   // 收窄摘要态的「查看工作 ↗」展开:在此持有,展开时右列同步加宽(原先 expanded 在
   // ResearcherWorkbench 内,grid 宽度看不到它 → 终态展开时实时内容被挤进 280px,看不清)。
   const [expanded, setExpanded] = React.useState(false)
-  React.useEffect(() => setExpanded(false), [runId]) // 切 run 复位
+  React.useEffect(() => {
+    // 切 run 必须收起上一 run 的本地展开态。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setExpanded(false)
+  }, [runId])
 
   // 技能子系统:首次挂载加载一次(GET /agent-skills,空表 seed);loaded 守卫防重复。
   React.useEffect(() => {
