@@ -1,73 +1,16 @@
-## 0. Response Language
+# Claude Code adapter
 
-**Always respond in Simplified Chinese.**
+在本仓库开展任何工作前，必须先阅读并遵守
+[`docs/agents/working-agreement.md`](docs/agents/working-agreement.md)。
 
-- All explanations, plans, clarifying questions, summaries, and final answers must be written in Simplified Chinese.
-- Keep code, commands, file paths, API names, error messages, and quoted source text in their original language when necessary.
-- If the user explicitly requests another language, follow the user's request for that response only.
+恢复未完成工作时，同时阅读
+[`docs/agents/handoff.md`](docs/agents/handoff.md) 和上一位维护者提供的本地
+handoff 文件。
 
-## 1. Think Before Coding
+本文件只记录 Claude Code / gstack 专属规则及工程 skills 入口。通用工程规则
+只维护在 `docs/agents/working-agreement.md`，不要在这里复制。
 
-**Don't assume. Don't hide confusion. Surface tradeoffs.**
-
-Before implementing:
-
-- State your assumptions explicitly. If uncertain, ask.
-- If multiple interpretations exist, present them - don't pick silently.
-- If a simpler approach exists, say so. Push back when warranted.
-- If something is unclear, stop. Name what's confusing. Ask.
-
-## 2. Simplicity First
-
-**Minimum code that solves the problem. Nothing speculative.**
-
-- No features beyond what was asked.
-- No abstractions for single-use code.
-- No "flexibility" or "configurability" that wasn't requested.
-- No error handling for impossible scenarios.
-- If you write 200 lines and it could be 50, rewrite it.
-
-Ask yourself: "Would a senior engineer say this is overcomplicated?" If yes, simplify.
-
-## 3. Surgical Changes
-
-**Touch only what you must. Clean up only your own mess.**
-
-When editing existing code:
-
-- Don't "improve" adjacent code, comments, or formatting.
-- Don't refactor things that aren't broken.
-- Match existing style, even if you'd do it differently.
-- If you notice unrelated dead code, mention it - don't delete it.
-
-When your changes create orphans:
-
-- Remove imports/variables/functions that YOUR changes made unused.
-- Don't remove pre-existing dead code unless asked.
-
-The test: Every changed line should trace directly to the user's request.
-
-## 4. Goal-Driven Execution
-
-**Define success criteria. Loop until verified.**
-
-Transform tasks into verifiable goals:
-
-- "Add validation" → "Write tests for invalid inputs, then make them pass"
-- "Fix the bug" → "Write a test that reproduces it, then make it pass"
-- "Refactor X" → "Ensure tests pass before and after"
-
-For multi-step tasks, state a brief plan:
-
-```
-1. [Step] → verify: [check]
-2. [Step] → verify: [check]
-3. [Step] → verify: [check]
-```
-
-Strong success criteria let you loop independently. Weak criteria ("make it work") require constant clarification.
-
-## 5. gstack
+## gstack
 
 本项目使用 gstack 工具链。若本机尚未安装,先全局安装一次:
 
@@ -116,67 +59,17 @@ Strong success criteria let you loop independently. Weak criteria ("make it work
 - `/gstack-upgrade` — 升级 gstack 到最新版
 - `/learn` — 管理项目的"学习记录"
 
-## Design System
+## Agent skills
 
-做任何视觉 / UI 决策前,先读 `DESIGN.md`。字体、配色、间距、布局、动效、美学方向都在那里定义。
-未经用户明确同意不得偏离。QA 时标记任何不符合 `DESIGN.md` 的代码。
+### Issue tracker
 
-## Testing
+Issues 与 PRD 使用 GitHub Issues。见 `docs/agents/issue-tracker.md`。
 
-**测试命令:**
+### Triage labels
 
-```bash
-.venv/bin/python -m pytest
-```
+使用默认五类 triage 标签。见 `docs/agents/triage-labels.md`。
 
-503 个测试,约 19 秒通过。
+### Domain docs
 
-**测试哲学:**
-
-- 目标 100% 路径覆盖。每个 bug 修复必须先写一个能复现 bug 的测试,再让测试通过。
-- 分支必须两条都测:成功路径 + 失败路径,缺一不可。
-- 新功能先写测试(TDD),不允许"以后补测试"。
-- spike 文件(真打外部 API)放 `spikes/` 目录,不跑进 `pytest`。
-
-**测试框架:**
-
-- `pytest` + `pytest-asyncio`(asyncio_mode = auto)
-- `monkeypatch` 打桩外部调用(Doubao、Tavily、Exa)
-- `tmp_path` 隔离 SQLite db 文件,防测试间污染
-- `bool(config.X)` 检查 key 是否配置,而非读取 key 值本身(KEY 纪律)
-
-**测试目录布局:**
-
-```
-tests/
-  test_config.py           # 配置层(环境变量读取)
-  test_db.py               # SQLite/Postgres schema + repository CRUD + _RUN_SCOPED_TABLES 完整性
-  test_doubao_schema.py    # Pydantic schema + $ref 内联
-  test_structured_call.py  # Doubao function-calling 包装器
-  test_collect_pipeline.py # 采集管线(并行 + 速率限制)
-  test_analyst_agent.py    # Analyst Agent 结构化抽取
-  test_writer_agent.py     # Writer Agent Markdown 渲染
-  test_qc_agent.py         # QC Agent 闸 + verdict
-  test_graph_build.py      # LangGraph StateGraph 构建
-  test_api_app.py          # FastAPI app 工厂 + 健康检查
-  test_api_runs.py         # POST /run + GET /runs + GET /run/:id
-  test_api_sse.py          # SSE 推流 + replay
-  test_api_reads.py        # evidence / analysis / report / trace 端点
-  test_api_annotations.py  # POST /annotations + run_id 存在校验
-  test_api_concurrent.py   # WAL 并发写写安全
-  test_api_cancel.py       # POST /run/:id/cancel 取消路径
-  test_queries_repo.py     # queries 表 repository(真检索词)
-  test_curation_drops_repo.py # curation_drops 策展丢弃记录
-  test_collect_node_emit.py   # 采集节点 SSE emit(query/source/evidence_delta)
-  test_sse_schemas.py      # SSE 事件 Pydantic schema 校验
-  test_agent_skills.py     # agent_skills 表 + REST 技能目录子系统
-  test_replay_parity.py    # replay 与真 run 富过程事件等价
-  test_evals.py            # LLM 输出质量评测框架
-  test_fallback.py         # SDK timeout / 熔断降级路径
-  ...                      # 其他单元 + 集成测试(tests/ 共 44 个 test_*.py)
-```
-
-**已知测试缺口(见 TODOS.md):**
-
-- 高强度并发写写(`busy_timeout` 竞争)
-- Lane F 前端 E2E 测试
+本仓库采用 single-context：根目录 `CONTEXT.md`，系统级 ADR 位于
+`docs/adr/`。见 `docs/agents/domain.md`。
