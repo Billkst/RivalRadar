@@ -13,7 +13,6 @@ import { useEvidenceStore } from '@/stores/evidenceStore'
 import { HEADING_RE, headingId } from './markdownHeadings'
 
 const CITE_SPLIT = /(\[ev_[^\]]*\])/g
-const CITE_SCAN = /\[ev_[^\]]*\]/g
 const ANCHOR_PREFIX = '锚定: '
 
 /** 全篇 id→序号映射(预扫描建,Citation 经 Context 读)→ [ev_长hash] 渲成脚注式 [1][2]。 */
@@ -47,12 +46,13 @@ function Citation({ id }: { id: string }) {
     if (ev?.source_url) go(ev.source_url)
     else getEvidence(id).then((x) => go(x.source_url)).catch(() => {})
   }
-  let host = ''
-  try {
-    host = ev?.source_url ? new URL(ev.source_url).hostname.replace(/^www\./, '') : ''
-  } catch {
-    host = ''
-  }
+  const host = (() => {
+    try {
+      return ev?.source_url ? new URL(ev.source_url).hostname.replace(/^www\./, '') : ''
+    } catch {
+      return ''
+    }
+  })()
 
   return (
     <span className="group/cite relative mx-0.5 inline-block align-super leading-none">
@@ -198,9 +198,7 @@ export function Markdown({ source }: { source: string }) {
   const citeNumbers = React.useMemo(() => {
     const map = new Map<string, number>()
     let n = 0
-    let m: RegExpExecArray | null
-    CITE_SCAN.lastIndex = 0
-    while ((m = CITE_SCAN.exec(source)) !== null) {
+    for (const m of source.matchAll(/\[ev_[^\]]*\]/g)) {
       for (const raw of m[0].slice(1, -1).split(',')) {
         const id = raw.trim()
         if (id && !map.has(id)) map.set(id, ++n)

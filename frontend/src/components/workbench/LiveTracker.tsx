@@ -44,6 +44,8 @@ function useStaggered(target: number, ms = 320): number {
   const [shown, setShown] = React.useState(0)
   React.useEffect(() => {
     if (shown > target) {
+      // target 缩小时立即裁回,避免短暂展示上一阶段的额外项目。
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setShown(target)
       return
     }
@@ -139,7 +141,7 @@ export function LiveTracker({ totalDimensions = 0 }: { totalDimensions?: number 
   const writerTyping = useTypingStore((s) => s.byAgent['writer']) ?? ''
 
   // 当前阶段:角色节点 running 优先;否则 run 仍 running 时区分 decide / 启动 / 交接 gap。
-  const phase = React.useMemo<Phase>(() => {
+  const phase: Phase = (() => {
     if (status !== 'running') return { kind: 'terminal' }
     for (const id of ROLE_ORDER) {
       const ns = nodes[NODE_OF_ROLE[id]]
@@ -149,16 +151,19 @@ export function LiveTracker({ totalDimensions = 0 }: { totalDimensions?: number 
     if ((narrative['decide']?.length ?? 0) > 0) return { kind: 'decide' } // 决策合成(qc 后,可数十秒)
     if (NODE_NAMES.every((n) => nodes[n] === 'idle')) return { kind: 'startup' } // 尚未启动任何节点
     return { kind: 'gap' } // 节点间交接空窗
-  }, [status, nodes, narrative])
+  })()
 
   // 客户端墙钟锚点:仅 agent / decide 这类「持续工作」阶段计时;阶段切换重置(每段独立计时)。
   const phaseKey = phase.kind === 'agent' ? `agent:${phase.id}` : phase.kind
   const [anchor, setAnchor] = React.useState<{ key: string; t: number } | null>(null)
   React.useEffect(() => {
     if (phase.kind !== 'agent' && phase.kind !== 'decide') {
+      // 非持续工作阶段不显示上一阶段计时。
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setAnchor(null)
       return
     }
+    // 阶段切换时建立新的客户端墙钟锚点。
     setAnchor((prev) => (prev && prev.key === phaseKey ? prev : { key: phaseKey, t: Date.now() }))
   }, [phaseKey, phase.kind])
   const elapsed = useElapsed(anchor ? anchor.t : null)

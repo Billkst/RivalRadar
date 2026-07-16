@@ -1,14 +1,26 @@
 # RivalRadar 测试指南
 
-## 快速运行
+## 统一验证入口
 
 ```bash
-.venv/bin/python -m pytest
+./scripts/verify.sh backend   # 版本一致性 + 后端测试
+./scripts/verify.sh frontend  # typecheck + lint + production build
+./scripts/verify.sh all       # 默认值;执行以上全部
 ```
 
-503 个测试,约 19 秒。无任何外部依赖(全部 mock)。
+后端测试的外部服务调用全部 mock,并显式只扫描 `tests/`;不会运行 `spikes/`。
+验证脚本会清空 API / 数据库相关环境变量,但保留当前代理环境。
+`tests/conftest.py` 会在导入应用前禁用本机 `.env`,注入公开测试占位配置,并把
+默认数据库重定向到临时目录;直接运行 pytest 也不会读取私密 endpoint 或写项目数据库。
+
+若运行环境禁止本地 `socketpair` 通信,AnyIO / Starlette `TestClient` 无法唤醒
+事件循环。脚本会在 pytest 前明确退出,避免表现为测试永久卡住;请改在正常终端或
+允许本地进程间 socket 通信的 CI 中运行。
 
 ```bash
+# 直接运行 pytest(调试或传递额外参数时)
+.venv/bin/python -m pytest tests -p no:cacheprovider
+
 # 只跑某个模块
 .venv/bin/python -m pytest tests/test_api_runs.py -v
 
@@ -60,7 +72,7 @@ tests/
 
   # Graph 编排
   test_graph_build.py         # StateGraph 构建 + 节点注册
-  test_graph_regression.py    # ★★★ 真闭环回归(improve→pass + exhaust→insufficient)
+  test_graph_loop.py          # ★★★ 真闭环回归(improve→pass + exhaust→insufficient)
 
   # API 层
   test_api_app.py             # app 工厂 + /healthz
@@ -81,7 +93,7 @@ tests/
   test_runcontrol.py          # RunControl 墙钟预算 + 协作式取消
   test_evals.py               # LLM 输出质量评测框架(可溯源 / 反套话门)
 
-  # (以上为代表性列举;tests/ 实际共 44 个 test_*.py)
+  # (以上为代表性列举;以 tests/ 现场收集结果为准)
 ```
 
 ---
@@ -150,6 +162,34 @@ def test_rerun_same_url_no_integrity_error(tmp_path):
 spike 文件命名:如 `spikes/spike_doubao_e2e.py`。结果记录在 `spikes/SPIKE_RESULTS.md`。
 
 **Postgres 方言路径**:repository 的方言统一(`ON CONFLICT`)在 SQLite 上由单测覆盖;Postgres 专属分支(`RETURNING id` / `fetched_at,id` 排序 / dict_row / 失败即 rollback / `PG_MIGRATIONS` 加列 + 进程内一次)由 `tests/test_token_usage.py` 的 fake-pg 连接单测校验语句序列,并由 `spikes/spike_supabase_crud.py` 真打 Supabase 验证(9 段 CRUD + 事务污染恢复,首尾自清理)。
+
+---
+
+## 前端验证边界
+
+当前前端门禁是:
+
+```bash
+cd frontend
+pnpm typecheck
+pnpm lint
+pnpm build
+```
+
+`pnpm test` 与 `pnpm lighthouse` 目前仍是成功退出的占位脚本,不属于有效验证,
+统一脚本和 CI 都不会调用它们。真实 Vitest / E2E / Lighthouse 接入前,不得把占位
+输出描述为测试或性能检查通过。
+
+---
+
+## CI
+
+`.github/workflows/ci.yml` 在 push 到 `main` 和 pull request 时并行运行:
+
+- Python 3.11 后端门禁(`./scripts/verify.sh backend`);
+- Node 22.13 + pnpm 11.3.0 前端门禁(`./scripts/verify.sh frontend`)。
+
+CI 不注入业务密钥,不访问真实 LLM、搜索服务或 Postgres。
 
 ---
 

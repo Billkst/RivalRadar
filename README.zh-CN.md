@@ -67,7 +67,7 @@ DATABASE_URL=          # 可选,设 postgres:// 连接串(如 Supabase)即切 Po
 
 ### 3. 启动服务
 
-仓库已封装好启动脚本(自动处理 WSL2 + Clash 代理兜底,从任意目录运行均可)。**前后端各开一个终端**:
+仓库已封装好启动脚本(处理本地代理边界,从任意目录运行均可)。**前后端各开一个终端**:
 
 ```bash
 # 终端 1 —— 后端 FastAPI(http://127.0.0.1:8000)
@@ -85,7 +85,7 @@ DATABASE_URL=          # 可选,设 postgres:// 连接串(如 Supabase)即切 Po
 
 > **两个要点**
 > - **后端无 `--reload`**:改了 `rivalradar/**` 或 `main.py` 后,必须重启 `dev-backend.sh` 才生效(前端 HMR 会自动热更,无需重启)。
-> - **WSL2 + Clash**:脚本已自动 `unset` 代理变量并把 `ark.cn-beijing.volces.com`(Doubao)/ `api.tavily.com` 加入 `NO_PROXY`,否则 LLM 调用会被 fake-ip 路由卡死。手动起服务时也需照此处理。
+> - **WSL2 + Clash**:后端脚本优先沿用你显式设置的代理;否则探测 `RIVALRADAR_DEV_PROXY`(默认 `http://127.0.0.1:7897`)并打印实际选择。只有 localhost 被强制绕过代理。前端只访问 localhost,因此前端脚本会清空代理变量。
 >
 > 只跑后端也可直接:`.venv/bin/python main.py`(默认监听 `http://127.0.0.1:8000`)。
 
@@ -127,7 +127,7 @@ DATABASE_URL=          # 可选,设 postgres:// 连接串(如 Supabase)即切 Po
 ```json
 {
   "competitors": ["竞品A", "竞品B"],
-  "dimensions": ["features", "pricing"]
+  "dimensions": ["core_workflows", "pricing"]
 }
 ```
 
@@ -138,10 +138,12 @@ DATABASE_URL=          # 可选,设 postgres:// 连接串(如 Supabase)即切 Po
 ## 运行测试
 
 ```bash
-.venv/bin/python -m pytest
+./scripts/verify.sh backend   # 版本一致性 + 后端测试
+./scripts/verify.sh frontend  # 类型检查 + lint + 生产构建
+./scripts/verify.sh all       # 全部
 ```
 
-402 个测试,约 13 秒通过。无任何外部依赖(全部 mock)。详见 [`TESTING.md`](TESTING.md)。
+后端测试会 mock 外部服务,且不会运行 `spikes/`。详见 [`TESTING.md`](TESTING.md)。
 
 ---
 
@@ -181,7 +183,7 @@ rivalradar/
   search/      # SearchProvider 协议 + TavilyProvider + ExaProvider + FallbackSearch
   storage/     # db.py 方言分流(SQLite / Postgres)+ repository CRUD
   config.py    # 环境变量读取(永不暴露 key 值)
-tests/         # 402 个测试(44 个 test_*.py)
+tests/         # 后端自动化测试(外部服务全部 mock)
 spikes/        # 真打 Doubao / Tavily / Supabase 端到端 spike(含 SPIKE_RESULTS.md)
 docs/superpowers/specs/  # 设计规格
 main.py        # 服务入口
@@ -193,9 +195,9 @@ main.py        # 服务入口
 
 | 文件 | 内容 |
 |---|---|
-| [`CHANGELOG.md`](CHANGELOG.md) | 版本历史,最新 v0.6.1.0 |
+| [`CHANGELOG.md`](CHANGELOG.md) | 版本历史,最新 v0.6.2.0 |
 | [`DEPLOY.md`](DEPLOY.md) | 部署指南(Vercel + Render + Supabase Postgres) |
-| [`TESTING.md`](TESTING.md) | 测试指南(402 测试 / 44 测试文件 / 测试哲学) |
+| [`TESTING.md`](TESTING.md) | 测试命令、边界与约定 |
 | [`TODOS.md`](TODOS.md) | 非阻断遗留事项(按组 + P0-P4) |
 | [`DESIGN.md`](DESIGN.md) | 前端设计系统 v5(字体 / 配色 / 间距 / 动效 / 决策座舱) |
 | [`DATA_SOURCES.md`](DATA_SOURCES.md) | 数据来源合规声明 |
@@ -206,7 +208,7 @@ main.py        # 服务入口
 
 ## 版本
 
-当前版本: **v0.6.1.0**(Supabase Postgres 持久化迁移,2026-06-10)
+当前版本: **v0.6.2.0**(BYOK 与 token 成本埋点,2026-07-15)
 
 版本格式:`MAJOR.MINOR.PATCH.MICRO`(< 1.0 表 API 未稳定,允许 breaking changes)
 

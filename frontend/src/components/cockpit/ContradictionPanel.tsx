@@ -39,6 +39,10 @@ interface Round {
   types: Record<string, number>
 }
 
+function ContradictionTitle() {
+  return <SectionTitle>哪里可能错(质检)</SectionTitle>
+}
+
 function deriveRounds(events: SSEEvent[]): Round[] {
   const rounds: Round[] = []
   // Plan D replay 同时带 trace qc(逐轮,§11.4 Play)+ 一个合成的终态 qc node(注入 retryCount
@@ -83,14 +87,12 @@ export function ContradictionPanel({
   const events = useRunStore((s) => s.events)
   const rounds = React.useMemo(() => deriveRounds(events), [events])
 
-  const Title = () => <SectionTitle>哪里可能错(质检)</SectionTitle>
-
   // 既无逐轮记录、也无终态 qc → 区分中断 / 错误 / 加载中 / 真空态(诚实,不臆测)。
   if (rounds.length === 0 && !qc) {
     if (interrupted) {
       return (
         <section className="space-y-2" aria-label="质检与自我纠错">
-          <Title />
+          <ContradictionTitle />
           <EmptyNote>运行已中断,未完成质检。</EmptyNote>
         </section>
       )
@@ -98,7 +100,7 @@ export function ContradictionPanel({
     if (qcState === 'error') {
       return (
         <section className="space-y-2" aria-label="质检与自我纠错">
-          <Title />
+          <ContradictionTitle />
           <ErrorNote>质检结论加载失败(网络或服务异常),可刷新重试;其余面板不受影响。</ErrorNote>
         </section>
       )
@@ -106,14 +108,14 @@ export function ContradictionPanel({
     if (qcState === 'loading' || qcState === 'idle') {
       return (
         <section className="space-y-2" aria-label="质检与自我纠错">
-          <Title />
+          <ContradictionTitle />
           <PanelSkeleton hint="质检员尚未给出裁决…" />
         </section>
       )
     }
     return (
       <section className="space-y-2" aria-label="质检与自我纠错">
-        <Title />
+        <ContradictionTitle />
         <EmptyNote>本轮无质检记录。</EmptyNote>
       </section>
     )
@@ -131,7 +133,7 @@ export function ContradictionPanel({
 
   return (
     <section className="space-y-2" aria-label="质检与自我纠错">
-      <Title />
+      <ContradictionTitle />
       <div className="rounded-lg border border-border bg-surface p-4 text-[13px]">
         <div className="flex items-baseline gap-2">
           <span className="text-text-muted">最终裁决</span>

@@ -35,7 +35,7 @@ def create_app(
 ) -> FastAPI:
     app = FastAPI(
         title="RivalRadar API",
-        version="0.1.0",
+        version="0.6.2.0",
         lifespan=_lifespan,
     )
 

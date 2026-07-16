@@ -39,6 +39,8 @@ export function EvidenceView({
   React.useEffect(() => {
     if (id && !cached) {
       let live = true
+      // 新证据请求开始时清掉上一条请求的失败态。
+      // eslint-disable-next-line react-hooks/set-state-in-effect
       setFailed(false)
       useEvidenceStore
         .getState()
@@ -59,6 +61,7 @@ export function EvidenceView({
         live = false
       }
     }
+    // 命中 cache 或无 id 时,冷取状态不再适用。
     setFetched(null)
     setFailed(false)
     return undefined

@@ -129,8 +129,14 @@ export function StatusBar({ runId, decisionCount, riskCount }: StatusBarProps) {
   // 终态总耗时用 server ts 差值(demo 用一致的历史假 ts → 时长正确)。replay 的 start/done 都是
   // _now()(回放秒级,非真实时长)→ runStore 把 replay 的 runStartTs 置 null → 此处 totalMs=null 不显。
   const [liveStart, setLiveStart] = React.useState<number | null>(null)
-  React.useEffect(() => setLiveStart(null), [runId])
   React.useEffect(() => {
+    // 本地计时锚点只属于当前 run。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
+    setLiveStart(null)
+  }, [runId])
+  React.useEffect(() => {
+    // 状态边界决定计时器开始/停止,不能沿用上一个 running 区间。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setLiveStart((prev) => (status === 'running' ? prev ?? Date.now() : null))
   }, [status])
   const liveElapsed = useElapsed(status === 'running' ? liveStart : null)
@@ -144,6 +150,8 @@ export function StatusBar({ runId, decisionCount, riskCount }: StatusBarProps) {
   const [showDrops, setShowDrops] = React.useState(false)
   const terminal = TERMINAL.has(status)
   React.useEffect(() => {
+    // 剔除清单与弹层状态均为 run-scoped。
+    // eslint-disable-next-line react-hooks/set-state-in-effect
     setDrops(EMPTY_DROPS)
     setShowDrops(false)
   }, [runId])
