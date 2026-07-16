@@ -12,10 +12,14 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parents[1]
 
 
+class VersionCheckError(ValueError):
+    """Expected version declaration validation failure."""
+
+
 def _read_version() -> str:
     version = (ROOT / "VERSION").read_text(encoding="utf-8").strip()
     if not re.fullmatch(r"\d+\.\d+\.\d+\.\d+", version):
-        raise ValueError(f"VERSION 格式无效: {version!r}")
+        raise VersionCheckError(f"VERSION 格式无效: {version!r}")
     return version
 
 
@@ -25,7 +29,7 @@ def _documented_versions(path: Path, patterns: tuple[str, ...]) -> list[str]:
     for pattern in patterns:
         match = re.search(pattern, text, flags=re.MULTILINE)
         if match is None:
-            raise ValueError(f"{path.relative_to(ROOT)} 缺少版本声明: {pattern}")
+            raise VersionCheckError(f"{path.relative_to(ROOT)} 缺少版本声明")
         versions.append(match.group("version"))
     return versions
 
@@ -78,4 +82,9 @@ def main() -> int:
 
 
 if __name__ == "__main__":
-    raise SystemExit(main())
+    try:
+        exit_code = main()
+    except VersionCheckError as exc:
+        print(f"版本检查失败: {exc}", file=sys.stderr)
+        exit_code = 1
+    raise SystemExit(exit_code)

@@ -48,6 +48,7 @@
 tests/
   # 配置与基础设施
   test_config.py              # 环境变量读取,KEY 纪律 bool 检查
+  test_check_version.py       # 版本声明 CLI 正常/失败路径
   test_db.py                  # SQLite/Postgres schema + repository CRUD + 复合 PK + _RUN_SCOPED_TABLES 完整性
   test_checkpointer.py        # SqliteSaver checkpointer 工厂
 
